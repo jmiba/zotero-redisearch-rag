@@ -465,12 +465,16 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!dir) {
       throw new Error("Plugin directory is unavailable.");
     }
-    return normalizePath(path.join(basePath, dir));
+    const pluginPath = path.isAbsolute(dir) ? dir : path.join(basePath, dir);
+    return path.normalize(pluginPath);
   }
 
   private getAbsoluteVaultPath(vaultRelativePath: string): string {
     const basePath = this.getVaultBasePath();
-    return normalizePath(path.join(basePath, vaultRelativePath));
+    const resolvedPath = path.isAbsolute(vaultRelativePath)
+      ? vaultRelativePath
+      : path.join(basePath, vaultRelativePath);
+    return path.normalize(resolvedPath);
   }
 
   private runPython(scriptPath: string, args: string[]): Promise<void> {
