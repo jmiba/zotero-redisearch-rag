@@ -1,0 +1,5 @@
+docling
+redis
+requests
+pyzotero
+tqdm
