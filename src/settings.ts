@@ -11,6 +11,8 @@ export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
   zoteroUserId: string;
   pythonPath: string;
+  dockerPath: string;
+  autoStartRedis: boolean;
   copyPdfToVault: boolean;
   frontmatterTemplate: string;
   outputPdfDir: string;
@@ -28,12 +30,22 @@ export interface ZoteroRagSettings {
   chatTemperature: number;
   ocrMode: OcrMode;
   chunkingMode: ChunkingMode;
+  forceOcrOnLowQualityText: boolean;
+  enableLlmCleanup: boolean;
+  llmCleanupBaseUrl: string;
+  llmCleanupApiKey: string;
+  llmCleanupModel: string;
+  llmCleanupTemperature: number;
+  llmCleanupMinQuality: number;
+  llmCleanupMaxChars: number;
 }
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   zoteroBaseUrl: "http://127.0.0.1:23119/api",
   zoteroUserId: "0",
   pythonPath: "python3",
+  dockerPath: "docker",
+  autoStartRedis: false,
   copyPdfToVault: true,
   frontmatterTemplate:
     "doc_id: {{doc_id}}\n" +
@@ -59,12 +71,35 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatTemperature: 0.2,
   ocrMode: "auto",
   chunkingMode: "page",
+  forceOcrOnLowQualityText: true,
+  enableLlmCleanup: false,
+  llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
+  llmCleanupApiKey: "",
+  llmCleanupModel: "openai/gpt-oss-20b",
+  llmCleanupTemperature: 0.0,
+  llmCleanupMinQuality: 0.35,
+  llmCleanupMaxChars: 2000,
 };
 
 export class ZoteroRagSettingTab extends PluginSettingTab {
-  private plugin: { settings: ZoteroRagSettings; saveSettings: () => Promise<void> };
+  private plugin: {
+    settings: ZoteroRagSettings;
+    saveSettings: () => Promise<void>;
+    startRedisStack: (silent?: boolean) => Promise<void>;
+    stopRedisStack: (silent?: boolean) => Promise<void>;
+    removeRedisStackContainer: (silent?: boolean) => Promise<void>;
+  };
 
-  constructor(app: App, plugin: { settings: ZoteroRagSettings; saveSettings: () => Promise<void> }) {
+  constructor(
+    app: App,
+    plugin: {
+      settings: ZoteroRagSettings;
+      saveSettings: () => Promise<void>;
+      startRedisStack: (silent?: boolean) => Promise<void>;
+      stopRedisStack: (silent?: boolean) => Promise<void>;
+      removeRedisStackContainer: (silent?: boolean) => Promise<void>;
+    }
+  ) {
     super(app, plugin as any);
     this.plugin = plugin;
   }
@@ -139,6 +174,19 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl)
+      .setName("Docker path")
+      .setDesc("CLI path for Docker (used to start Redis Stack).")
+      .addText((text) =>
+        text
+          .setPlaceholder("docker")
+          .setValue(this.plugin.settings.dockerPath)
+          .onChange(async (value) => {
+            this.plugin.settings.dockerPath = value.trim() || "docker";
+            await this.plugin.saveSettings();
+          })
+      );
+
     containerEl.createEl("h3", { text: "Output folders (vault-relative)" });
 
     new Setting(containerEl)
@@ -201,6 +249,48 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.redisPrefix = value.trim();
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto-start Redis Stack (Docker Compose)")
+      .setDesc("Requires Docker Desktop running and your vault path shared with Docker.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
+          this.plugin.settings.autoStartRedis = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Start Redis Stack now")
+      .setDesc("Runs Docker Compose with the vault data directory.")
+      .addButton((button) =>
+        button.setButtonText("Start").onClick(async () => {
+          await this.plugin.startRedisStack();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Stop Redis Stack now")
+      .setDesc("Stops the Docker Compose Redis Stack container.")
+      .addButton((button) =>
+        button.setButtonText("Stop").onClick(async () => {
+          await this.plugin.stopRedisStack();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Remove stale redis-stack container")
+      .setDesc("Use only if Docker reports a name conflict when starting.")
+      .addButton((button) =>
+        button.setButtonText("Remove").onClick(async () => {
+          const confirmed = window.confirm(
+            "Remove the existing redis-stack container? This does not delete your data volume."
+          );
+          if (confirmed) {
+            await this.plugin.removeRedisStackContainer();
+          }
+        })
       );
 
     containerEl.createEl("h3", { text: "Embeddings (LM Studio)" });
@@ -311,7 +401,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("OCR mode")
-      .setDesc("auto, force, or off")
+      .setDesc("auto: skip OCR when text is readable; force: always OCR; off: never OCR.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("auto", "auto")
@@ -325,6 +415,18 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Force OCR when text looks bad")
+      .setDesc(
+        "If a PDF has a text layer but it is low quality, OCR will be forced (recommended for scanned PDFs)."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.forceOcrOnLowQualityText).onChange(async (value) => {
+          this.plugin.settings.forceOcrOnLowQualityText = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Chunking")
       .setDesc("page or section")
       .addDropdown((dropdown) =>
@@ -334,6 +436,99 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.chunkingMode)
           .onChange(async (value: string) => {
             this.plugin.settings.chunkingMode = value as ChunkingMode;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("h4", { text: "OCR cleanup (optional)" });
+
+    new Setting(containerEl)
+      .setName("LLM cleanup for low-quality chunks")
+      .setDesc("Optional OpenAI-compatible cleanup for poor OCR. Can be slow/costly.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableLlmCleanup).onChange(async (value) => {
+          this.plugin.settings.enableLlmCleanup = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("LLM cleanup base URL")
+      .setDesc("OpenAI-compatible endpoint, e.g. http://127.0.0.1:1234/v1")
+      .addText((text) =>
+        text
+          .setPlaceholder("http://127.0.0.1:1234/v1")
+          .setValue(this.plugin.settings.llmCleanupBaseUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.llmCleanupBaseUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("LLM cleanup API key")
+      .setDesc("Optional API key for the cleanup endpoint.")
+      .addText((text) =>
+        text
+          .setPlaceholder("sk-...")
+          .setValue(this.plugin.settings.llmCleanupApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.llmCleanupApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("LLM cleanup model")
+      .setDesc("Model to use for cleanup.")
+      .addText((text) =>
+        text
+          .setPlaceholder("openai/gpt-oss-20b")
+          .setValue(this.plugin.settings.llmCleanupModel)
+          .onChange(async (value) => {
+            this.plugin.settings.llmCleanupModel = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("LLM cleanup temperature")
+      .setDesc("Lower is more conservative.")
+      .addText((text) =>
+        text
+          .setPlaceholder("0.0")
+          .setValue(String(this.plugin.settings.llmCleanupTemperature))
+          .onChange(async (value) => {
+            const parsed = Number.parseFloat(value);
+            this.plugin.settings.llmCleanupTemperature = Number.isFinite(parsed) ? parsed : 0.0;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("LLM cleanup min quality")
+      .setDesc("Only run cleanup when chunk quality is below this threshold (0-1).")
+      .addText((text) =>
+        text
+          .setPlaceholder("0.35")
+          .setValue(String(this.plugin.settings.llmCleanupMinQuality))
+          .onChange(async (value) => {
+            const parsed = Number.parseFloat(value);
+            this.plugin.settings.llmCleanupMinQuality = Number.isFinite(parsed) ? parsed : 0.35;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("LLM cleanup max chars")
+      .setDesc("Skip cleanup for chunks longer than this limit.")
+      .addText((text) =>
+        text
+          .setPlaceholder("2000")
+          .setValue(String(this.plugin.settings.llmCleanupMaxChars))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.llmCleanupMaxChars = Number.isFinite(parsed) ? parsed : 2000;
             await this.plugin.saveSettings();
           })
       );

@@ -2,11 +2,13 @@ import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
 const tools = [
-  "docling_extract.py",
-  "index_redisearch.py",
-  "rag_query_redisearch.py",
-  "batch_index_pyzotero.py",
-  "ocr_wordlist.txt",
+  { name: "docling_extract.py", path: "tools/docling_extract.py" },
+  { name: "index_redisearch.py", path: "tools/index_redisearch.py" },
+  { name: "rag_query_redisearch.py", path: "tools/rag_query_redisearch.py" },
+  { name: "batch_index_pyzotero.py", path: "tools/batch_index_pyzotero.py" },
+  { name: "ocr_wordlist.txt", path: "tools/ocr_wordlist.txt" },
+  { name: "docker-compose.yml", path: "docker-compose.yml" },
+  { name: "redis-stack.conf", path: "redis-stack.conf" },
 ];
 
 const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
@@ -27,10 +29,10 @@ const stampContent = (content) => {
   return rows.join("\n");
 };
 
-for (const name of tools) {
-  const content = readFileSync(join("tools", name), "utf8");
+for (const entry of tools) {
+  const content = readFileSync(entry.path, "utf8");
   const stamped = stampContent(content);
-  lines.push(`  "${name}": String.raw\`${stamped}\`,`);
+  lines.push(`  "${entry.name}": ${JSON.stringify(stamped)},`);
 }
 
 lines.push("};");

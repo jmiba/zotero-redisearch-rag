@@ -30,6 +30,7 @@ class DoclingProcessingConfig:
     quality_suspicious_token_threshold: float = 0.25
     quality_min_avg_chars_per_page: int = 80
     per_page_ocr_on_low_quality: bool = True
+    force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
     enable_dictionary_correction: bool = False
     dictionary_path: Optional[str] = None
@@ -37,6 +38,13 @@ class DoclingProcessingConfig:
     default_dictionary_name: str = "ocr_wordlist.txt"
     enable_llm_correction: bool = False
     llm_correct: Optional[Callable[[str], str]] = None
+    llm_cleanup_base_url: Optional[str] = None
+    llm_cleanup_api_key: Optional[str] = None
+    llm_cleanup_model: Optional[str] = None
+    llm_cleanup_temperature: float = 0.0
+    llm_cleanup_timeout_sec: int = 60
+    llm_correction_min_quality: float = 0.35
+    llm_correction_max_chars: int = 2000
     postprocess_markdown: bool = False
     analysis_max_pages: int = 5
     ocr_dpi: int = 300
@@ -185,6 +193,7 @@ def decide_ocr_route(
     config: DoclingProcessingConfig,
     languages: str,
 ) -> OcrRouteDecision:
+    low_quality = is_low_quality(quality, config)
     if config.ocr_mode == "off":
         return OcrRouteDecision(
             False,
@@ -199,7 +208,7 @@ def decide_ocr_route(
     if config.ocr_mode == "force":
         ocr_used = True
         route_reason = "OCR forced by config"
-    elif has_text_layer:
+    elif has_text_layer and not (config.force_ocr_on_low_quality_text and low_quality):
         return OcrRouteDecision(
             False,
             "none",
@@ -211,7 +220,10 @@ def decide_ocr_route(
         )
     else:
         ocr_used = True
-        route_reason = "No usable text layer detected"
+        if has_text_layer:
+            route_reason = "Text layer detected but low quality"
+        else:
+            route_reason = "No usable text layer detected"
 
     engine = "docling"
     use_external = False
@@ -223,7 +235,6 @@ def decide_ocr_route(
             engine = config.fallback_ocr_engine
             use_external = True
 
-    low_quality = is_low_quality(quality, config)
     per_page = False
     per_page_reason = "Per-page OCR not applicable"
     if use_external:
@@ -347,6 +358,67 @@ def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str])
     return re.sub(r"[A-Za-z]{4,}", replace_match, text)
 
 
+def should_apply_llm_correction(text: str, config: DoclingProcessingConfig) -> bool:
+    if not config.enable_llm_correction:
+        return False
+    if not config.llm_correct:
+        return False
+    if config.llm_correction_max_chars and len(text) > config.llm_correction_max_chars:
+        return False
+    quality = estimate_text_quality([{"text": text}])
+    return quality.confidence_proxy < config.llm_correction_min_quality
+
+
+def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Callable[[str], str]]:
+    if not config.enable_llm_correction:
+        return None
+    if not config.llm_cleanup_base_url or not config.llm_cleanup_model:
+        LOGGER.warning("LLM cleanup enabled but base URL or model is missing.")
+        return None
+
+    base_url = config.llm_cleanup_base_url.rstrip("/")
+    endpoint = f"{base_url}/chat/completions"
+    api_key = (config.llm_cleanup_api_key or "").strip()
+
+    def _call(text: str) -> str:
+        try:
+            import requests
+        except Exception as exc:
+            LOGGER.warning("requests not available for LLM cleanup: %s", exc)
+            return text
+
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        payload = {
+            "model": config.llm_cleanup_model,
+            "temperature": config.llm_cleanup_temperature,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. "
+                        "Do not add content. Return corrected text only."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+        }
+        try:
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=config.llm_cleanup_timeout_sec)
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content")
+            if content:
+                return str(content).strip()
+        except Exception as exc:
+            LOGGER.warning("LLM cleanup failed: %s", exc)
+        return text
+
+    return _call
+
+
 def postprocess_text(
     text: str,
     config: DoclingProcessingConfig,
@@ -361,7 +433,7 @@ def postprocess_text(
     if config.enable_dictionary_correction:
         cleaned = apply_dictionary_correction(cleaned, wordlist)
     cleaned = apply_umlaut_corrections(cleaned, languages, wordlist)
-    if config.enable_llm_correction and config.llm_correct:
+    if should_apply_llm_correction(cleaned, config) and config.llm_correct:
         cleaned = config.llm_correct(cleaned)
     return cleaned
 
@@ -632,6 +704,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
     analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
     quality = estimate_text_quality(analysis_pages)
+    low_quality = is_low_quality(quality, config)
     languages = select_language_set(config.language_hint, pdf_path, config)
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
@@ -686,6 +759,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         "route_reason": decision.route_reason,
         "per_page_reason": decision.per_page_reason,
         "text_layer_detected": has_text_layer,
+        "text_layer_low_quality": has_text_layer and low_quality,
         "avg_chars_per_page": quality.avg_chars_per_page,
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
@@ -770,6 +844,18 @@ def main() -> int:
     parser.add_argument("--out-md", required=True, help="Output markdown path")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
+    parser.add_argument(
+        "--force-ocr-low-quality",
+        action="store_true",
+        help="Force OCR when text layer appears low quality",
+    )
+    parser.add_argument("--enable-llm-cleanup", action="store_true", help="Enable LLM cleanup for low-quality chunks")
+    parser.add_argument("--llm-cleanup-base-url", help="OpenAI-compatible base URL for LLM cleanup")
+    parser.add_argument("--llm-cleanup-api-key", help="API key for LLM cleanup")
+    parser.add_argument("--llm-cleanup-model", help="Model name for LLM cleanup")
+    parser.add_argument("--llm-cleanup-temperature", type=float, help="Temperature for LLM cleanup")
+    parser.add_argument("--llm-cleanup-max-chars", type=int, help="Max chars per chunk for LLM cleanup")
+    parser.add_argument("--llm-cleanup-min-quality", type=float, help="Min quality threshold for LLM cleanup")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -790,6 +876,24 @@ def main() -> int:
         return 2
 
     config = DoclingProcessingConfig(ocr_mode=args.ocr)
+    if args.force_ocr_low_quality:
+        config.force_ocr_on_low_quality_text = True
+    if args.enable_llm_cleanup:
+        config.enable_llm_correction = True
+    if args.llm_cleanup_base_url:
+        config.llm_cleanup_base_url = args.llm_cleanup_base_url
+    if args.llm_cleanup_api_key:
+        config.llm_cleanup_api_key = args.llm_cleanup_api_key
+    if args.llm_cleanup_model:
+        config.llm_cleanup_model = args.llm_cleanup_model
+    if args.llm_cleanup_temperature is not None:
+        config.llm_cleanup_temperature = args.llm_cleanup_temperature
+    if args.llm_cleanup_max_chars is not None:
+        config.llm_correction_max_chars = args.llm_cleanup_max_chars
+    if args.llm_cleanup_min_quality is not None:
+        config.llm_correction_min_quality = args.llm_cleanup_min_quality
+
+    config.llm_correct = build_llm_cleanup_callback(config)
 
     try:
         conversion = convert_pdf_with_docling(args.pdf, config)

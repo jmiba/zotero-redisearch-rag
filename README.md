@@ -35,6 +35,14 @@ docker compose up -d
 If you prefer not to keep Redis data inside your vault, point `ZRR_DATA_DIR`
 elsewhere.
 
+The compose config mounts `redis-stack.conf` and enables AOF (`appendonly yes`)
+so the index is persisted immediately under the mounted `/data` directory.
+
+You can also start Redis Stack from Obsidian using the command
+`Start Redis Stack (Docker Compose)`. Docker Desktop must be installed,
+running, and your vault path must be shared in Docker settings.
+Stopping and removing a stale container can also be done from the settings UI.
+
 Verify RediSearch works:
 
 ```bash
@@ -85,6 +93,9 @@ Optional OCR dependencies for per-page OCR:
 These Python packages are included in `requirements.txt`, but you must still
 install Poppler + Tesseract on your system for per-page OCR to work.
 
+Optional cleanup enhancements:
+- LLM cleanup for low-quality chunks (OpenAI-compatible endpoint; can be slow/costly).
+
 ## Obsidian plugin build/install
 
 ```bash
@@ -98,6 +109,8 @@ Copy the plugin folder to your vault:
 Ensure the `tools/` folder is included alongside `main.js` and `manifest.json`.
 
 Settings are in Obsidian: `Settings -> Community plugins -> Zotero Redis RAG`.
+If you enable auto-start, the plugin will run `docker compose` using the
+bundled compose file and your vault path for `ZRR_DATA_DIR`.
 
 ## GitHub releases + BRAT
 

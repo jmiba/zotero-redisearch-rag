@@ -178,6 +178,22 @@ export default class ZoteroRagPlugin extends Plugin {
       name: "Recreate missing notes from cache (Docling + RedisSearch)",
       callback: () => this.recreateMissingNotesFromCache(),
     });
+
+    this.addCommand({
+      id: "start-redis-stack",
+      name: "Start Redis Stack (Docker Compose)",
+      callback: () => this.startRedisStack(),
+    });
+
+    this.addCommand({
+      id: "stop-redis-stack",
+      name: "Stop Redis Stack (Docker Compose)",
+      callback: () => this.stopRedisStack(),
+    });
+
+    if (this.settings.autoStartRedis) {
+      void this.startRedisStack(true);
+    }
   }
 
   async loadSettings(): Promise<void> {
@@ -295,20 +311,10 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       this.showStatusProgress("Docling extraction...", null);
-      await this.runPython(doclingScript, [
-        "--pdf",
-        pdfSourcePath,
-        "--doc-id",
-        docId,
-        "--out-json",
-        this.getAbsoluteVaultPath(chunkPath),
-        "--out-md",
-        this.getAbsoluteVaultPath(notePath),
-        "--chunking",
-        this.settings.chunkingMode,
-        "--ocr",
-        this.settings.ocrMode,
-      ]);
+      await this.runPython(
+        doclingScript,
+        this.buildDoclingArgs(pdfSourcePath, docId, chunkPath, notePath)
+      );
     } catch (error) {
       new Notice("Docling extraction failed. See console for details.");
       console.error(error);
@@ -1441,20 +1447,10 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       this.showStatusProgress("Docling extraction...", null);
-      await this.runPython(doclingScript, [
-        "--pdf",
-        sourcePdf,
-        "--doc-id",
-        docId,
-        "--out-json",
-        this.getAbsoluteVaultPath(chunkPath),
-        "--out-md",
-        this.getAbsoluteVaultPath(notePath),
-        "--chunking",
-        this.settings.chunkingMode,
-        "--ocr",
-        this.settings.ocrMode,
-      ]);
+      await this.runPython(
+        doclingScript,
+        this.buildDoclingArgs(sourcePdf, docId, chunkPath, notePath)
+      );
     } catch (error) {
       if (showNotices) {
         new Notice("Docling extraction failed. See console for details.");
@@ -1753,10 +1749,156 @@ export default class ZoteroRagPlugin extends Plugin {
     return path.normalize(resolvedPath);
   }
 
+  private buildDoclingArgs(
+    pdfSourcePath: string,
+    docId: string,
+    chunkPath: string,
+    notePath: string
+  ): string[] {
+    const args = [
+      "--pdf",
+      pdfSourcePath,
+      "--doc-id",
+      docId,
+      "--out-json",
+      this.getAbsoluteVaultPath(chunkPath),
+      "--out-md",
+      this.getAbsoluteVaultPath(notePath),
+      "--chunking",
+      this.settings.chunkingMode,
+      "--ocr",
+      this.settings.ocrMode,
+    ];
+
+    if (this.settings.forceOcrOnLowQualityText) {
+      args.push("--force-ocr-low-quality");
+    }
+
+    if (this.settings.enableLlmCleanup) {
+      args.push("--enable-llm-cleanup");
+      if (this.settings.llmCleanupBaseUrl) {
+        args.push("--llm-cleanup-base-url", this.settings.llmCleanupBaseUrl);
+      }
+      if (this.settings.llmCleanupApiKey) {
+        args.push("--llm-cleanup-api-key", this.settings.llmCleanupApiKey);
+      }
+      if (this.settings.llmCleanupModel) {
+        args.push("--llm-cleanup-model", this.settings.llmCleanupModel);
+      }
+      args.push("--llm-cleanup-temperature", String(this.settings.llmCleanupTemperature));
+      args.push("--llm-cleanup-min-quality", String(this.settings.llmCleanupMinQuality));
+      args.push("--llm-cleanup-max-chars", String(this.settings.llmCleanupMaxChars));
+    }
+
+    return args;
+  }
+
+  private getRedisDataDir(): string {
+    return path.join(this.getVaultBasePath(), CACHE_ROOT, "redis-data");
+  }
+
+  private getDockerComposePath(): string {
+    const pluginDir = this.getPluginDir();
+    return path.join(pluginDir, "tools", "docker-compose.yml");
+  }
+
+  async startRedisStack(silent?: boolean): Promise<void> {
+    try {
+      await this.ensureBundledTools();
+      const composePath = this.getDockerComposePath();
+      const dataDir = this.getRedisDataDir();
+      await fs.mkdir(dataDir, { recursive: true });
+      const dockerPath = this.settings.dockerPath?.trim() || "docker";
+      await this.runCommand(
+        dockerPath,
+        ["compose", "-f", composePath, "up", "-d"],
+        {
+          cwd: path.dirname(composePath),
+          env: { ...process.env, ZRR_DATA_DIR: dataDir },
+        }
+      );
+      if (!silent) {
+        new Notice("Redis Stack started.");
+      }
+    } catch (error) {
+      if (!silent) {
+        new Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing.");
+      }
+      console.error("Failed to start Redis Stack", error);
+    }
+  }
+
+  async stopRedisStack(silent?: boolean): Promise<void> {
+    try {
+      await this.ensureBundledTools();
+      const composePath = this.getDockerComposePath();
+      const dockerPath = this.settings.dockerPath?.trim() || "docker";
+      await this.runCommand(dockerPath, ["compose", "-f", composePath, "down"], {
+        cwd: path.dirname(composePath),
+      });
+      if (!silent) {
+        new Notice("Redis Stack stopped.");
+      }
+    } catch (error) {
+      if (!silent) {
+        new Notice("Failed to stop Redis Stack. See console for details.");
+      }
+      console.error("Failed to stop Redis Stack", error);
+    }
+  }
+
+  async removeRedisStackContainer(silent?: boolean): Promise<void> {
+    try {
+      const dockerPath = this.settings.dockerPath?.trim() || "docker";
+      await this.runCommand(dockerPath, ["rm", "-f", "redis-stack"]);
+      if (!silent) {
+        new Notice("Removed redis-stack container.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("No such container")) {
+        if (!silent) {
+          new Notice("redis-stack container not found.");
+        }
+        return;
+      }
+      if (!silent) {
+        new Notice("Failed to remove redis-stack container. See console for details.");
+      }
+      console.error("Failed to remove redis-stack container", error);
+    }
+  }
+
   private runPython(scriptPath: string, args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
+      });
+
+      let stderr = "";
+      child.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(stderr || `Process exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  private runCommand(
+    command: string,
+    args: string[],
+    options?: { cwd?: string; env?: NodeJS.ProcessEnv }
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd: options?.cwd,
+        env: options?.env,
       });
 
       let stderr = "";

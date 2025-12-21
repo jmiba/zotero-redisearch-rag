@@ -2,7 +2,9 @@ services:
   redis-stack:
     image: redis/redis-stack-server:latest
     container_name: redis-stack
+    command: ["redis-stack-server", "/redis-stack.conf"]
     ports:
       - "6379:6379"
     volumes:
       - "${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
+      - "./redis-stack.conf:/redis-stack.conf:ro"

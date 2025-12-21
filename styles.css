@@ -97,7 +97,11 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: var(--font-ui-medium);
+  font-size: inherit;
+}
+
+.status-bar .zrr-status-progress {
+  font-size: var(--status-bar-font-size, var(--font-ui-small));
 }
 
 .zrr-status-bar {

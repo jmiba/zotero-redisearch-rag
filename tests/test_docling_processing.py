@@ -48,6 +48,19 @@ class DoclingProcessingTests(unittest.TestCase):
         )
         self.assertFalse(decision.ocr_used)
 
+    def test_force_ocr_on_low_quality_text(self):
+        config = self.docling.DoclingProcessingConfig()
+        config.force_ocr_on_low_quality_text = True
+        quality = self.docling.TextQuality(10, 0.2, 0.5, 0.1)
+        decision = self.docling.decide_ocr_route(
+            True,
+            quality,
+            ["paddle"],
+            config,
+            config.default_lang_english,
+        )
+        self.assertTrue(decision.ocr_used)
+
     def test_decide_per_page_ocr(self):
         config = self.docling.DoclingProcessingConfig()
         low_quality = self.docling.TextQuality(20, 0.2, 0.4, 0.1)
