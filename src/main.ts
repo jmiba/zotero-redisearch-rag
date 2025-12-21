@@ -308,13 +308,16 @@ export default class ZoteroRagPlugin extends Plugin {
     const pluginDir = this.getPluginDir();
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+    let qualityLabel: string | null = null;
 
     try {
-      this.showStatusProgress("Docling extraction...", null);
+      qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath);
+      this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), null);
       await this.runPython(
         doclingScript,
         this.buildDoclingArgs(pdfSourcePath, docId, chunkPath, notePath)
       );
+      qualityLabel = await this.readDoclingQualityLabel(chunkPath);
     } catch (error) {
       new Notice("Docling extraction failed. See console for details.");
       console.error(error);
@@ -323,7 +326,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      this.showStatusProgress("Indexing chunks...", 0);
+      this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
       await this.runPythonStreaming(
         indexScript,
         [
@@ -346,7 +349,11 @@ export default class ZoteroRagPlugin extends Plugin {
         (payload) => {
           if (payload?.type === "progress" && payload.total) {
             const percent = Math.round((payload.current / payload.total) * 100);
-            this.showStatusProgress(`Indexing chunks ${payload.current}/${payload.total}`, percent);
+            const label = this.formatStatusLabel(
+              `Indexing chunks ${payload.current}/${payload.total}`,
+              qualityLabel
+            );
+            this.showStatusProgress(label, percent);
           }
         },
         () => undefined
@@ -846,6 +853,50 @@ export default class ZoteroRagPlugin extends Plugin {
     this.statusBarEl.style.display = "none";
     this.statusBarInnerEl.removeClass("indeterminate");
     this.statusBarInnerEl.style.width = "0%";
+  }
+
+  private formatStatusLabel(base: string, qualityLabel?: string | null): string {
+    if (!qualityLabel) {
+      return base;
+    }
+    return `${base} (Text layer quality ${qualityLabel})`;
+  }
+
+  private async readDoclingQualityLabel(chunkPath: string): Promise<string | null> {
+    try {
+      const content = await this.app.vault.adapter.read(chunkPath);
+      const payload = JSON.parse(content);
+      const quality = payload?.metadata?.confidence_proxy;
+      if (typeof quality === "number") {
+        return quality.toFixed(2);
+      }
+    } catch (error) {
+      console.warn("Failed to read Docling quality metadata", error);
+    }
+    return null;
+  }
+
+  private async readDoclingQualityLabelFromPdf(pdfPath: string): Promise<string | null> {
+    try {
+      const pluginDir = this.getPluginDir();
+      const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
+      const ocrMode =
+        this.settings.ocrMode === "force_low_quality" ? "auto" : this.settings.ocrMode;
+      const args = ["--quality-only", "--pdf", pdfPath, "--ocr", ocrMode];
+      if (this.settings.ocrMode === "force_low_quality") {
+        args.push("--force-ocr-low-quality");
+      }
+      args.push("--quality-threshold", String(this.settings.ocrQualityThreshold));
+      const output = await this.runPythonWithOutput(doclingScript, args);
+      const payload = JSON.parse(output);
+      const quality = payload?.confidence_proxy;
+      if (typeof quality === "number") {
+        return quality.toFixed(2);
+      }
+    } catch (error) {
+      console.warn("Failed to read Docling quality from PDF", error);
+    }
+    return null;
   }
 
   private async promptDocId(): Promise<string | null> {
@@ -1444,13 +1495,16 @@ export default class ZoteroRagPlugin extends Plugin {
     const pluginDir = this.getPluginDir();
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+    let qualityLabel: string | null = null;
 
     try {
-      this.showStatusProgress("Docling extraction...", null);
+      qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf);
+      this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), null);
       await this.runPython(
         doclingScript,
         this.buildDoclingArgs(sourcePdf, docId, chunkPath, notePath)
       );
+      qualityLabel = await this.readDoclingQualityLabel(chunkPath);
     } catch (error) {
       if (showNotices) {
         new Notice("Docling extraction failed. See console for details.");
@@ -1461,7 +1515,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      this.showStatusProgress("Indexing chunks...", 0);
+      this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
       await this.runPythonStreaming(
         indexScript,
         [
@@ -1485,7 +1539,11 @@ export default class ZoteroRagPlugin extends Plugin {
         (payload) => {
           if (payload?.type === "progress" && payload.total) {
             const percent = Math.round((payload.current / payload.total) * 100);
-            this.showStatusProgress(`Indexing chunks ${payload.current}/${payload.total}`, percent);
+            const label = this.formatStatusLabel(
+              `Indexing chunks ${payload.current}/${payload.total}`,
+              qualityLabel
+            );
+            this.showStatusProgress(label, percent);
           }
         },
         () => undefined
@@ -1755,6 +1813,8 @@ export default class ZoteroRagPlugin extends Plugin {
     chunkPath: string,
     notePath: string
   ): string[] {
+    const ocrMode =
+      this.settings.ocrMode === "force_low_quality" ? "auto" : this.settings.ocrMode;
     const args = [
       "--pdf",
       pdfSourcePath,
@@ -1767,13 +1827,13 @@ export default class ZoteroRagPlugin extends Plugin {
       "--chunking",
       this.settings.chunkingMode,
       "--ocr",
-      this.settings.ocrMode,
+      ocrMode,
     ];
 
-    if (this.settings.forceOcrOnLowQualityText) {
+    if (this.settings.ocrMode === "force_low_quality") {
       args.push("--force-ocr-low-quality");
     }
-
+    args.push("--quality-threshold", String(this.settings.ocrQualityThreshold));
     if (this.settings.enableLlmCleanup) {
       args.push("--enable-llm-cleanup");
       if (this.settings.llmCleanupBaseUrl) {

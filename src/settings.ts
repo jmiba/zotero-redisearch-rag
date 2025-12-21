@@ -1,6 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 
-export type OcrMode = "auto" | "force" | "off";
+export type OcrMode = "auto" | "force_low_quality" | "force";
 export type ChunkingMode = "page" | "section";
 
 export const CACHE_ROOT = ".zotero-redisearch-rag";
@@ -30,7 +30,7 @@ export interface ZoteroRagSettings {
   chatTemperature: number;
   ocrMode: OcrMode;
   chunkingMode: ChunkingMode;
-  forceOcrOnLowQualityText: boolean;
+  ocrQualityThreshold: number;
   enableLlmCleanup: boolean;
   llmCleanupBaseUrl: string;
   llmCleanupApiKey: string;
@@ -71,7 +71,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatTemperature: 0.2,
   ocrMode: "auto",
   chunkingMode: "page",
-  forceOcrOnLowQualityText: true,
+  ocrQualityThreshold: 0.5,
   enableLlmCleanup: false,
   llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
   llmCleanupApiKey: "",
@@ -401,12 +401,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("OCR mode")
-      .setDesc("auto: skip OCR when text is readable; force: always OCR; off: never OCR.")
+      .setDesc("auto: skip OCR when text is readable; force if bad: OCR only when text looks poor; force: always OCR.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("auto", "auto")
+          .addOption("force_low_quality", "force if quality is bad")
           .addOption("force", "force")
-          .addOption("off", "off")
           .setValue(this.plugin.settings.ocrMode)
           .onChange(async (value: string) => {
             this.plugin.settings.ocrMode = value as OcrMode;
@@ -415,16 +415,18 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Force OCR when text looks bad")
-      .setDesc(
-        "If a PDF has a text layer but it is low quality, OCR will be forced (recommended for scanned PDFs)."
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.forceOcrOnLowQualityText).onChange(async (value) => {
-          this.plugin.settings.forceOcrOnLowQualityText = value;
-          await this.plugin.saveSettings();
-        })
-      );
+      .setName("Text quality threshold")
+      .setDesc("Lower values are stricter; below this threshold the text is treated as low quality.")
+      .addSlider((slider) => {
+        slider
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.ocrQualityThreshold)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.ocrQualityThreshold = value;
+            await this.plugin.saveSettings();
+          });
+      });
 
     new Setting(containerEl)
       .setName("Chunking")

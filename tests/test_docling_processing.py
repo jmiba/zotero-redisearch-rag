@@ -51,6 +51,7 @@ class DoclingProcessingTests(unittest.TestCase):
     def test_force_ocr_on_low_quality_text(self):
         config = self.docling.DoclingProcessingConfig()
         config.force_ocr_on_low_quality_text = True
+        config.quality_confidence_threshold = 0.5
         quality = self.docling.TextQuality(10, 0.2, 0.5, 0.1)
         decision = self.docling.decide_ocr_route(
             True,
@@ -61,11 +62,29 @@ class DoclingProcessingTests(unittest.TestCase):
         )
         self.assertTrue(decision.ocr_used)
 
+    def test_quality_threshold(self):
+        config = self.docling.DoclingProcessingConfig()
+        config.quality_confidence_threshold = 0.8
+        quality = self.docling.TextQuality(200, 0.9, 0.01, 0.7)
+        self.assertTrue(self.docling.is_low_quality(quality, config))
+
+    def test_should_rasterize_text_layer(self):
+        config = self.docling.DoclingProcessingConfig()
+        config.force_ocr_on_low_quality_text = True
+        quality = self.docling.TextQuality(10, 0.2, 0.5, 0.1)
+        low_quality = self.docling.is_low_quality(quality, config)
+        self.assertTrue(self.docling.should_rasterize_text_layer(True, low_quality, config))
+
     def test_decide_per_page_ocr(self):
         config = self.docling.DoclingProcessingConfig()
         low_quality = self.docling.TextQuality(20, 0.2, 0.4, 0.1)
         use_per_page, _reason = self.docling.decide_per_page_ocr(False, low_quality, config)
         self.assertTrue(use_per_page)
+
+    def test_count_column_gaps(self):
+        density = [0.9, 0.8, 0.1, 0.1, 0.85, 0.9]
+        gaps = self.docling.count_column_gaps(density, 0.5, 0.1)
+        self.assertEqual(gaps, 1)
 
     def test_postprocess_dehyphenation(self):
         config = self.docling.DoclingProcessingConfig()

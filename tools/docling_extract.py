@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import statistics
+import shutil
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -29,6 +31,15 @@ class DoclingProcessingConfig:
     quality_alpha_ratio_threshold: float = 0.6
     quality_suspicious_token_threshold: float = 0.25
     quality_min_avg_chars_per_page: int = 80
+    quality_confidence_threshold: float = 0.5
+    quality_use_wordfreq: bool = True
+    quality_wordfreq_min_zipf: float = 3.0
+    column_detect_enable: bool = True
+    column_detect_dpi: int = 150
+    column_detect_max_pages: int = 3
+    column_detect_gap_threshold_ratio: float = 0.35
+    column_detect_min_gap_ratio: float = 0.06
+    column_detect_min_pages_ratio: float = 0.4
     per_page_ocr_on_low_quality: bool = True
     force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
@@ -67,6 +78,13 @@ class TextQuality:
     alpha_ratio: float
     suspicious_token_ratio: float
     confidence_proxy: float
+    dictionary_hit_ratio: Optional[float] = None
+
+@dataclass
+class ColumnLayoutDetection:
+    detected: bool
+    page_ratio: float
+    reason: str
 
 @dataclass
 class DoclingConversionResult:
@@ -99,9 +117,52 @@ def replace_ligatures(text: str) -> str:
     )
 
 
-def estimate_text_quality(pages: Sequence[Dict[str, Any]]) -> TextQuality:
+def select_wordfreq_languages(languages: str) -> List[str]:
+    lang = (languages or "").lower()
+    selected: List[str] = []
+    if any(token in lang for token in ("deu", "ger", "de", "german", "deutsch")):
+        selected.append("de")
+    if any(token in lang for token in ("eng", "en", "english")):
+        selected.append("en")
+    if not selected:
+        selected.append("en")
+    return selected
+
+
+def compute_dictionary_hit_ratio(
+    tokens: Sequence[str],
+    languages: str,
+    min_zipf: float,
+) -> Optional[float]:
+    try:
+        from wordfreq import zipf_frequency
+    except Exception:
+        return None
+
+    if not tokens:
+        return None
+    lang_codes = select_wordfreq_languages(languages)
+    hits = 0
+    total = 0
+    for token in tokens:
+        lower = token.lower()
+        if len(lower) < 2:
+            continue
+        total += 1
+        if any(zipf_frequency(lower, lang) >= min_zipf for lang in lang_codes):
+            hits += 1
+    if not total:
+        return None
+    return hits / total
+
+
+def estimate_text_quality(
+    pages: Sequence[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+    languages: Optional[str] = None,
+) -> TextQuality:
     if not pages:
-        return TextQuality(0.0, 0.0, 1.0, 0.0)
+        return TextQuality(0.0, 0.0, 1.0, 0.0, None)
 
     texts = [str(page.get("text", "")) for page in pages]
     total_chars = sum(len(text) for text in texts)
@@ -117,8 +178,18 @@ def estimate_text_quality(pages: Sequence[Dict[str, Any]]) -> TextQuality:
     suspicious_ratio = len(suspicious_tokens) / max(1, len(tokens))
 
     avg_chars = total_chars / max(1, len(pages))
-    confidence = max(0.0, min(1.0, alpha_ratio * (1.0 - suspicious_ratio)))
-    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence)
+    dictionary_hit_ratio = None
+    if config and config.quality_use_wordfreq and languages:
+        dictionary_hit_ratio = compute_dictionary_hit_ratio(
+            tokens,
+            languages,
+            config.quality_wordfreq_min_zipf,
+        )
+    confidence = alpha_ratio * (1.0 - suspicious_ratio)
+    if dictionary_hit_ratio is not None:
+        confidence *= 0.4 + (0.6 * dictionary_hit_ratio)
+    confidence = max(0.0, min(1.0, confidence))
+    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, dictionary_hit_ratio)
 
 
 def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: DoclingProcessingConfig) -> bool:
@@ -134,11 +205,19 @@ def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: Doclin
 
 
 def is_low_quality(quality: TextQuality, config: DoclingProcessingConfig) -> bool:
+    if quality.confidence_proxy < config.quality_confidence_threshold:
+        return True
     return (
         quality.avg_chars_per_page < config.quality_min_avg_chars_per_page
         or quality.alpha_ratio < config.quality_alpha_ratio_threshold
         or quality.suspicious_token_ratio > config.quality_suspicious_token_threshold
     )
+
+
+def should_rasterize_text_layer(has_text_layer: bool, low_quality: bool, config: DoclingProcessingConfig) -> bool:
+    if config.ocr_mode == "force":
+        return True
+    return bool(has_text_layer and low_quality and config.force_ocr_on_low_quality_text)
 
 
 def decide_per_page_ocr(
@@ -365,7 +444,8 @@ def should_apply_llm_correction(text: str, config: DoclingProcessingConfig) -> b
         return False
     if config.llm_correction_max_chars and len(text) > config.llm_correction_max_chars:
         return False
-    quality = estimate_text_quality([{"text": text}])
+    languages = select_language_set(config.language_hint, "", config)
+    quality = estimate_text_quality([{"text": text}], config, languages)
     return quality.confidence_proxy < config.llm_correction_min_quality
 
 
@@ -637,10 +717,144 @@ def build_converter(config: DoclingProcessingConfig, decision: OcrRouteDecision)
     return DocumentConverter(format_options=format_options)
 
 
+def find_poppler_path() -> Optional[str]:
+    env_path = os.environ.get("POPPLER_PATH")
+    if env_path and os.path.isfile(os.path.join(env_path, "pdftoppm")):
+        return env_path
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm:
+        return os.path.dirname(pdftoppm)
+    for candidate in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        if os.path.isfile(os.path.join(candidate, "pdftoppm")):
+            return candidate
+    return None
+
+
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
     from pdf2image import convert_from_path
 
+    poppler_path = find_poppler_path()
+    if poppler_path:
+        if shutil.which("pdftoppm") is None:
+            LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+        return convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
     return convert_from_path(pdf_path, dpi=dpi)
+
+
+def render_pdf_pages_sample(pdf_path: str, dpi: int, max_pages: int) -> List[Any]:
+    from pdf2image import convert_from_path
+
+    if max_pages <= 0:
+        return []
+    poppler_path = find_poppler_path()
+    kwargs = {"dpi": dpi, "first_page": 1, "last_page": max_pages}
+    if poppler_path:
+        if shutil.which("pdftoppm") is None:
+            LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+        kwargs["poppler_path"] = poppler_path
+    return convert_from_path(pdf_path, **kwargs)
+
+
+def compute_column_density(image: Any, target_width: int = 300) -> List[float]:
+    gray = image.convert("L")
+    width, height = gray.size
+    if width > target_width:
+        scale = target_width / max(1, width)
+        gray = gray.resize((target_width, max(1, int(height * scale))))
+
+    try:
+        import numpy as np
+    except Exception:
+        pixels = list(gray.getdata())
+        w, h = gray.size
+        if w == 0 or h == 0:
+            return []
+        densities = [0] * w
+        for y in range(h):
+            row = pixels[y * w:(y + 1) * w]
+            for x, value in enumerate(row):
+                if value < 200:
+                    densities[x] += 1
+        return [count / h for count in densities]
+
+    arr = np.asarray(gray)
+    if arr.size == 0:
+        return []
+    mask = arr < 200
+    return mask.mean(axis=0).tolist()
+
+
+def count_column_gaps(
+    density: Sequence[float],
+    threshold_ratio: float,
+    min_gap_ratio: float,
+) -> int:
+    if not density:
+        return 0
+    total = len(density)
+    margin = max(1, int(total * 0.05))
+    start = margin
+    end = max(start + 1, total - margin)
+    core = density[start:end]
+    if not core:
+        return 0
+    median = statistics.median(core)
+    threshold = max(0.001, median * threshold_ratio)
+    min_gap = max(1, int(len(core) * min_gap_ratio))
+
+    gaps = 0
+    idx = 0
+    while idx < len(core):
+        if core[idx] < threshold:
+            gap_start = idx
+            while idx < len(core) and core[idx] < threshold:
+                idx += 1
+            if idx - gap_start >= min_gap:
+                gaps += 1
+        else:
+            idx += 1
+    return gaps
+
+
+def detect_multicolumn_layout(
+    images: Sequence[Any],
+    config: DoclingProcessingConfig,
+) -> ColumnLayoutDetection:
+    if not images:
+        return ColumnLayoutDetection(False, 0.0, "No pages available")
+    sample = list(images[: config.column_detect_max_pages])
+    if not sample:
+        return ColumnLayoutDetection(False, 0.0, "No sample pages")
+
+    hits = 0
+    for image in sample:
+        density = compute_column_density(image)
+        gaps = count_column_gaps(
+            density,
+            config.column_detect_gap_threshold_ratio,
+            config.column_detect_min_gap_ratio,
+        )
+        if gaps >= 1:
+            hits += 1
+    ratio = hits / max(1, len(sample))
+    detected = ratio >= config.column_detect_min_pages_ratio
+    reason = f"{hits}/{len(sample)} pages show column gutters"
+    return ColumnLayoutDetection(detected, ratio, reason)
+
+
+def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
+    from tempfile import NamedTemporaryFile
+
+    images = render_pdf_pages(pdf_path, dpi)
+    if not images:
+        raise RuntimeError("Failed to render PDF pages for rasterization.")
+
+    temp_file = NamedTemporaryFile(delete=False, suffix=".pdf")
+    temp_file.close()
+    first = images[0]
+    rest = images[1:]
+    first.save(temp_file.name, format="PDF", save_all=True, append_images=rest)
+    return temp_file.name
 
 
 def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -700,21 +914,74 @@ def run_external_ocr_pages(
     return [], {}
 
 
+def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict[str, Any]:
+    analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
+    has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
+    languages = select_language_set(config.language_hint, pdf_path, config)
+    quality = estimate_text_quality(analysis_pages, config, languages)
+    low_quality = is_low_quality(quality, config)
+    return {
+        "text_layer_detected": has_text_layer,
+        "text_layer_low_quality": has_text_layer and low_quality,
+        "avg_chars_per_page": quality.avg_chars_per_page,
+        "alpha_ratio": quality.alpha_ratio,
+        "suspicious_token_ratio": quality.suspicious_token_ratio,
+        "confidence_proxy": quality.confidence_proxy,
+        "dictionary_hit_ratio": quality.dictionary_hit_ratio,
+    }
+
+
 def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> DoclingConversionResult:
     analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
-    quality = estimate_text_quality(analysis_pages)
-    low_quality = is_low_quality(quality, config)
     languages = select_language_set(config.language_hint, pdf_path, config)
+    quality = estimate_text_quality(analysis_pages, config, languages)
+    low_quality = is_low_quality(quality, config)
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
+    rasterized_source = False
+    rasterized_pdf_path = ""
+    rasterize_error: Optional[str] = None
+    column_layout: Optional[ColumnLayoutDetection] = None
+    if should_rasterize_text_layer(has_text_layer, low_quality, config):
+        try:
+            rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
+            rasterized_source = True
+            LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
+        except Exception as exc:
+            rasterize_error = str(exc)
+            LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
+    if rasterized_source:
+        decision.per_page_ocr = False
+        decision.per_page_reason = "Rasterized PDF for Docling OCR"
 
+    if config.column_detect_enable and decision.ocr_used and (rasterized_source or not has_text_layer):
+        try:
+            sample_images = render_pdf_pages_sample(
+                pdf_path,
+                config.column_detect_dpi,
+                config.column_detect_max_pages,
+            )
+            column_layout = detect_multicolumn_layout(sample_images, config)
+            LOGGER.info(
+                "Column layout detection: %s (%s)",
+                column_layout.detected,
+                column_layout.reason,
+            )
+            if column_layout.detected and decision.use_external_ocr and decision.per_page_ocr:
+                decision.per_page_ocr = False
+                decision.per_page_reason = "Columns detected; keep Docling layout"
+        except Exception as exc:
+            LOGGER.warning("Column layout detection failed: %s", exc)
+
+    dict_ratio = "n/a" if quality.dictionary_hit_ratio is None else f"{quality.dictionary_hit_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
         quality.suspicious_token_ratio,
+        dict_ratio,
     )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
@@ -732,7 +999,8 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         LOGGER.info("External OCR unavailable; relying on Docling OCR.")
 
     converter = build_converter(config, decision)
-    result = converter.convert(pdf_path)
+    docling_input = rasterized_pdf_path or pdf_path
+    result = converter.convert(docling_input)
     doc = result.document if hasattr(result, "document") else result
     markdown = export_markdown(doc)
     pages = extract_pages(doc)
@@ -742,7 +1010,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
             pages = fallback_pages
 
     ocr_stats: Dict[str, Any] = {}
-    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr:
+    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and not rasterized_source:
         try:
             ocr_pages, ocr_stats = run_external_ocr_pages(pdf_path, decision.ocr_engine, languages, config)
             if ocr_pages:
@@ -751,6 +1019,11 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
                     markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
         except Exception as exc:
             LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
+    if rasterized_source and rasterized_pdf_path:
+        try:
+            os.unlink(rasterized_pdf_path)
+        except Exception:
+            pass
 
     metadata = {
         "ocr_used": decision.ocr_used,
@@ -760,10 +1033,17 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         "per_page_reason": decision.per_page_reason,
         "text_layer_detected": has_text_layer,
         "text_layer_low_quality": has_text_layer and low_quality,
+        "rasterized_source_pdf": rasterized_source,
+        "rasterize_failed": bool(rasterize_error),
+        "rasterize_error": rasterize_error,
+        "column_layout_detected": column_layout.detected if column_layout else None,
+        "column_layout_ratio": column_layout.page_ratio if column_layout else None,
+        "column_layout_reason": column_layout.reason if column_layout else None,
         "avg_chars_per_page": quality.avg_chars_per_page,
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
+        "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
     metadata.update(ocr_stats)
@@ -839,9 +1119,9 @@ def build_chunks_section(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract PDF content with Docling and produce chunks.")
     parser.add_argument("--pdf", required=True, help="Path to PDF")
-    parser.add_argument("--doc-id", required=True, help="Document identifier")
-    parser.add_argument("--out-json", required=True, help="Output JSON path")
-    parser.add_argument("--out-md", required=True, help="Output markdown path")
+    parser.add_argument("--doc-id", help="Document identifier")
+    parser.add_argument("--out-json", help="Output JSON path")
+    parser.add_argument("--out-md", help="Output markdown path")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument(
@@ -849,6 +1129,12 @@ def main() -> int:
         action="store_true",
         help="Force OCR when text layer appears low quality",
     )
+    parser.add_argument(
+        "--quality-threshold",
+        type=float,
+        help="Confidence threshold for treating text as low quality (0-1)",
+    )
+    parser.add_argument("--quality-only", action="store_true", help="Output text-layer quality JSON and exit")
     parser.add_argument("--enable-llm-cleanup", action="store_true", help="Enable LLM cleanup for low-quality chunks")
     parser.add_argument("--llm-cleanup-base-url", help="OpenAI-compatible base URL for LLM cleanup")
     parser.add_argument("--llm-cleanup-api-key", help="API key for LLM cleanup")
@@ -862,6 +1148,20 @@ def main() -> int:
 
     if not os.path.isfile(args.pdf):
         eprint(f"PDF not found: {args.pdf}")
+        return 2
+
+    if args.quality_only:
+        config = DoclingProcessingConfig(ocr_mode=args.ocr)
+        if args.force_ocr_low_quality:
+            config.force_ocr_on_low_quality_text = True
+        if args.quality_threshold is not None:
+            config.quality_confidence_threshold = args.quality_threshold
+        report = build_quality_report(args.pdf, config)
+        print(json.dumps(report))
+        return 0
+
+    if not args.doc_id or not args.out_json or not args.out_md:
+        eprint("Missing required arguments: --doc-id, --out-json, --out-md")
         return 2
 
     try:
@@ -878,6 +1178,8 @@ def main() -> int:
     config = DoclingProcessingConfig(ocr_mode=args.ocr)
     if args.force_ocr_low_quality:
         config.force_ocr_on_low_quality_text = True
+    if args.quality_threshold is not None:
+        config.quality_confidence_threshold = args.quality_threshold
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
     if args.llm_cleanup_base_url:

@@ -81,6 +81,14 @@ pip install -r requirements.txt
 - Prefer PaddleOCR, fall back to Tesseract
 - Default language: German+English when detected, otherwise English
 - Optional post-OCR cleanup and dictionary correction (off by default)
+- Optional low-quality text handling: force OCR and rasterize pages before Docling OCR
+- Quality scoring uses `wordfreq` (German/English frequency lists) to penalize gibberish text layers
+- Rasterized column detection heuristic to keep Docling layout when multi-column pages are detected
+
+OCR modes in Obsidian:
+- auto: skip OCR if text looks good
+- force if quality is bad: OCR only when the text layer scores below the quality threshold
+- force: always OCR (ignores text layer)
 
 To enable dictionary correction, set `enable_dictionary_correction = True`
 and optionally point `dictionary_path` to a custom wordlist. A small default
