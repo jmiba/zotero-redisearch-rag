@@ -145,10 +145,14 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    const pdfPath = normalizePath(`${this.settings.outputPdfDir}/${docId}.pdf`);
+    const title = typeof values.title === "string" ? values.title : "";
+    const baseName = this.sanitizeFileName(title) || docId;
+    const finalBaseName = await this.resolveUniqueBaseName(baseName, docId);
+
+    const pdfPath = normalizePath(`${this.settings.outputPdfDir}/${finalBaseName}.pdf`);
     const itemPath = normalizePath(`${this.settings.outputItemDir}/${docId}.json`);
     const chunkPath = normalizePath(`${this.settings.outputChunkDir}/${docId}.json`);
-    const notePath = normalizePath(`${this.settings.outputNoteDir}/${docId}.md`);
+    const notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
 
     try {
       await this.ensureFolder(this.settings.outputItemDir);
@@ -246,7 +250,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);
-      const noteContent = this.buildNoteMarkdown(values, docId, pdfLink, itemPath, doclingMd);
+      const noteContent = this.buildNoteMarkdown(values, item.meta ?? {}, docId, pdfLink, itemPath, doclingMd);
       await this.app.vault.adapter.write(notePath, noteContent);
     } catch (error) {
       new Notice("Failed to finalize note markdown.");
@@ -341,6 +345,28 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
+  private sanitizeFileName(value: string): string {
+    const cleaned = value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
+    if (!cleaned) {
+      return "";
+    }
+    const normalized = cleaned.replace(/[.]+$/g, "").trim();
+    const dashed = normalized.replace(/ /g, "-");
+    return dashed.slice(0, 120);
+  }
+
+  private async resolveUniqueBaseName(baseName: string, docId: string): Promise<string> {
+    const adapter = this.app.vault.adapter;
+    const notePath = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+    const pdfPath = normalizePath(`${this.settings.outputPdfDir}/${baseName}.pdf`);
+    const noteExists = await adapter.exists(notePath);
+    const pdfExists = this.settings.copyPdfToVault ? await adapter.exists(pdfPath) : false;
+    if (noteExists || pdfExists) {
+      return `${baseName}-${docId}`;
+    }
+    return baseName;
+  }
+
   async searchZoteroItems(query: string): Promise<ZoteroLocalItem[]> {
     const params = new URLSearchParams();
     params.set("itemType", "-attachment");
@@ -350,7 +376,7 @@ export default class ZoteroRagPlugin extends Plugin {
       params.set("q", query.trim());
     }
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${params.toString()}`);
-    const payload = await this.requestLocalApi(url);
+    const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
     const items = JSON.parse(payload.toString("utf8"));
     if (!Array.isArray(items)) {
       return [];
@@ -429,7 +455,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async fetchZoteroChildren(itemKey: string): Promise<any[]> {
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children`);
-    const payload = await this.requestLocalApi(url);
+    const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
     return JSON.parse(payload.toString("utf8"));
   }
 
@@ -486,13 +512,16 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
-  private async requestLocalApi(url: string): Promise<Buffer> {
+  private async requestLocalApi(url: string, context?: string): Promise<Buffer> {
     const response = await this.requestLocalApiRaw(url);
     if (response.statusCode >= 400) {
-      throw new Error(`Request failed, status ${response.statusCode}: ${response.body.toString("utf8")}`);
+      const details = response.body.toString("utf8");
+      throw new Error(
+        `${context ?? "Request failed"}, status ${response.statusCode}: ${details || "no response body"}`
+      );
     }
     if (response.statusCode >= 300) {
-      throw new Error(`Request failed, status ${response.statusCode}`);
+      throw new Error(`${context ?? "Request failed"}, status ${response.statusCode}`);
     }
     return response.body;
   }
@@ -547,16 +576,112 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private buildNoteMarkdown(
     values: ZoteroItemValues,
+    meta: Record<string, any>,
     docId: string,
     pdfLink: string,
     itemPath: string,
     doclingMarkdown: string
   ): string {
-    const title = typeof values.title === "string" ? values.title : "";
-    const safeTitle = title.replace(/"/g, "'");
     const jsonLink = `[[${itemPath}]]`;
+    const frontmatter = this.renderFrontmatter(values, meta, docId, pdfLink, jsonLink);
+    const frontmatterBlock = frontmatter ? `---\n${frontmatter}\n---\n\n` : "";
 
-    return `---\ndoc_id: "${docId}"\ntitle: "${safeTitle}"\n---\n\nPDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;
+    return `${frontmatterBlock}PDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;
+  }
+
+  private renderFrontmatter(
+    values: ZoteroItemValues,
+    meta: Record<string, any>,
+    docId: string,
+    pdfLink: string,
+    itemJsonLink: string
+  ): string {
+    const template = this.settings.frontmatterTemplate ?? "";
+    if (!template.trim()) {
+      return "";
+    }
+    const vars = this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
+    return template.replace(/{{\s*([a-z0-9_]+)\s*}}/gi, (_, key) => vars[key] ?? "").trim();
+  }
+
+  private buildTemplateVars(
+    values: ZoteroItemValues,
+    meta: Record<string, any>,
+    docId: string,
+    pdfLink: string,
+    itemJsonLink: string
+  ): Record<string, string> {
+    const title = typeof values.title === "string" ? values.title : "";
+    const shortTitle = typeof values.shortTitle === "string" ? values.shortTitle : "";
+    const date = typeof values.date === "string" ? values.date : "";
+    const parsedDate = typeof meta?.parsedDate === "string" ? meta.parsedDate : "";
+    const year = this.extractYear(parsedDate || date);
+    const creators = Array.isArray(values.creators) ? values.creators : [];
+    const authorsList = creators.filter((c) => c.creatorType === "author").map((c) => this.formatCreatorName(c));
+    const authors = authorsList.join("; ");
+    const tagsList = Array.isArray(values.tags)
+      ? values.tags.map((tag: any) => (typeof tag === "string" ? tag : tag?.tag)).filter(Boolean)
+      : [];
+    const tags = tagsList.join("; ");
+    const itemType = typeof values.itemType === "string" ? values.itemType : "";
+    const creatorSummary = typeof meta?.creatorSummary === "string" ? meta.creatorSummary : "";
+
+    const vars: Record<string, string> = {
+      doc_id: docId,
+      zotero_key: typeof values.key === "string" ? values.key : docId,
+      title,
+      short_title: shortTitle,
+      date,
+      year,
+      authors,
+      tags,
+      item_type: itemType,
+      creator_summary: creatorSummary,
+      pdf_link: this.escapeYamlString(pdfLink),
+      item_json: this.escapeYamlString(itemJsonLink),
+    };
+
+    for (const [key, value] of Object.entries(vars)) {
+      vars[`${key}_yaml`] = this.escapeYamlString(value);
+    }
+
+    vars["authors_yaml"] = this.toYamlList(authorsList);
+    vars["tags_yaml"] = this.toYamlList(tagsList);
+
+    return vars;
+  }
+
+  private extractYear(value: string): string {
+    if (!value) {
+      return "";
+    }
+    const match = value.match(/\b(\d{4})\b/);
+    return match ? match[1] : "";
+  }
+
+  private formatCreatorName(creator: any): string {
+    if (!creator || typeof creator !== "object") {
+      return "";
+    }
+    if (creator.name) {
+      return String(creator.name);
+    }
+    const first = creator.firstName ? String(creator.firstName) : "";
+    const last = creator.lastName ? String(creator.lastName) : "";
+    const combined = [last, first].filter(Boolean).join(", ");
+    return combined || `${first} ${last}`.trim();
+  }
+
+  private escapeYamlString(value: string): string {
+    const safe = String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `"${safe}"`;
+  }
+
+  private toYamlList(items: string[]): string {
+    if (!items.length) {
+      return "  - \"\"";
+    }
+    return items.map((item) => `  - ${this.escapeYamlString(item)}`).join("\n");
   }
 
   private getVaultBasePath(): string {
@@ -640,13 +765,13 @@ export default class ZoteroRagPlugin extends Plugin {
 
 class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   private plugin: ZoteroRagPlugin;
-  private onSelect: (item: ZoteroLocalItem | null) => void;
-  private didSelect = false;
+  private resolveSelection: ((item: ZoteroLocalItem | null) => void) | null;
+  private lastError: string | null = null;
 
   constructor(app: App, plugin: ZoteroRagPlugin, onSelect: (item: ZoteroLocalItem | null) => void) {
     super(app);
     this.plugin = plugin;
-    this.onSelect = onSelect;
+    this.resolveSelection = onSelect;
     this.setPlaceholder("Search Zotero items...");
   }
 
@@ -654,6 +779,11 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     try {
       return await this.plugin.searchZoteroItems(query);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.lastError !== message) {
+        this.lastError = message;
+        new Notice(message);
+      }
       console.error("Zotero search failed", error);
       return [];
     }
@@ -664,16 +794,27 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     const year = this.extractYear(item);
     el.createEl("div", { text: title });
     el.createEl("small", { text: year ? `${year}` : "" });
+    el.addEventListener("click", () => {
+      if (this.resolveSelection) {
+        this.resolveSelection(item);
+        this.resolveSelection = null;
+      }
+      this.close();
+    });
   }
 
   onChooseSuggestion(item: ZoteroLocalItem, evt: MouseEvent | KeyboardEvent): void {
-    this.didSelect = true;
-    this.onSelect(item);
+    if (this.resolveSelection) {
+      this.resolveSelection(item);
+      this.resolveSelection = null;
+    }
+    this.close();
   }
 
   onClose(): void {
-    if (!this.didSelect) {
-      this.onSelect(null);
+    if (this.resolveSelection) {
+      this.resolveSelection(null);
+      this.resolveSelection = null;
     }
   }
 

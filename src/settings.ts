@@ -8,6 +8,7 @@ export interface ZoteroRagSettings {
   zoteroUserId: string;
   pythonPath: string;
   copyPdfToVault: boolean;
+  frontmatterTemplate: string;
   outputPdfDir: string;
   outputItemDir: string;
   outputNoteDir: string;
@@ -31,6 +32,15 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   zoteroUserId: "0",
   pythonPath: "python3",
   copyPdfToVault: true,
+  frontmatterTemplate:
+    "doc_id: {{doc_id}}\n" +
+    "zotero_key: {{zotero_key}}\n" +
+    "title: {{title_yaml}}\n" +
+    "year: {{year}}\n" +
+    "authors:\n{{authors_yaml}}\n" +
+    "item_type: {{item_type}}\n" +
+    "pdf_link: {{pdf_link}}\n" +
+    "item_json: {{item_json}}",
   outputPdfDir: "zotero/pdfs",
   outputItemDir: "zotero/items",
   outputNoteDir: "zotero/notes",
@@ -111,6 +121,21 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Frontmatter template")
+      .setDesc(
+        "Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}, {{item_json}}"
+      )
+      .addTextArea((text) => {
+        text.inputEl.rows = 8;
+        text
+          .setValue(this.plugin.settings.frontmatterTemplate)
+          .onChange(async (value) => {
+            this.plugin.settings.frontmatterTemplate = value;
+            await this.plugin.saveSettings();
+          });
+      });
 
     containerEl.createEl("h3", { text: "Output folders (vault-relative)" });
 
