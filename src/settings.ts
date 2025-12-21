@@ -3,8 +3,9 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 export type OcrMode = "auto" | "force" | "off";
 export type ChunkingMode = "page" | "section";
 
-export const ITEM_CACHE_DIR = ".zotero-redisearch-rag/items";
-export const CHUNK_CACHE_DIR = ".zotero-redisearch-rag/chunks";
+export const CACHE_ROOT = ".zotero-redisearch-rag";
+export const ITEM_CACHE_DIR = `${CACHE_ROOT}/items`;
+export const CHUNK_CACHE_DIR = `${CACHE_ROOT}/chunks`;
 
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
@@ -14,6 +15,7 @@ export interface ZoteroRagSettings {
   frontmatterTemplate: string;
   outputPdfDir: string;
   outputNoteDir: string;
+  chatPaneLocation: "right" | "main";
   redisUrl: string;
   redisIndex: string;
   redisPrefix: string;
@@ -44,6 +46,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "item_json: {{item_json}}",
   outputPdfDir: "zotero/pdfs",
   outputNoteDir: "zotero/notes",
+  chatPaneLocation: "right",
   redisUrl: "redis://127.0.0.1:6379",
   redisIndex: "idx:zotero",
   redisPrefix: "zotero:chunk:",
@@ -286,6 +289,20 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             const parsed = Number.parseFloat(value);
             this.plugin.settings.chatTemperature = Number.isFinite(parsed) ? parsed : 0.2;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Chat panel location")
+      .setDesc("Where to open the chat view by default.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("right", "Right sidebar")
+          .addOption("main", "Main window")
+          .setValue(this.plugin.settings.chatPaneLocation)
+          .onChange(async (value: string) => {
+            this.plugin.settings.chatPaneLocation = value as "right" | "main";
             await this.plugin.saveSettings();
           })
       );

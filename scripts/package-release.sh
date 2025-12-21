@@ -17,6 +17,9 @@ rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}/${PLUGIN_ID}"
 
 cp "${ROOT_DIR}/main.js" "${ROOT_DIR}/manifest.json" "${ROOT_DIR}/versions.json" "${DIST_DIR}/${PLUGIN_ID}/"
+if [ -f "${ROOT_DIR}/styles.css" ]; then
+  cp "${ROOT_DIR}/styles.css" "${DIST_DIR}/${PLUGIN_ID}/"
+fi
 cp -R "${ROOT_DIR}/tools" "${DIST_DIR}/${PLUGIN_ID}/"
 
 (

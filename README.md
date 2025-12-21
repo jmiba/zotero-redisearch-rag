@@ -121,6 +121,7 @@ Interactive mode writes to your vault:
 - `.zotero-redisearch-rag/items/<doc_id>.json`
 - `zotero/notes/<title>.md`
 - `.zotero-redisearch-rag/chunks/<doc_id>.json`
+- `.zotero-redisearch-rag/chat.json` (chat history)
 
 Batch mode writes to `--out-dir`:
 - `pdfs/`, `items/`, `docs/`, `chunks/`, `checkpoint.json`

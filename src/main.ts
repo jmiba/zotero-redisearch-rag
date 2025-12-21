@@ -1,4 +1,13 @@
-import { App, FileSystemAdapter, Modal, Notice, Plugin, SuggestModal, normalizePath } from "obsidian";
+import {
+  App,
+  FileSystemAdapter,
+  Modal,
+  Notice,
+  Plugin,
+  SuggestModal,
+  WorkspaceLeaf,
+  normalizePath,
+} from "obsidian";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import http from "http";
@@ -7,12 +16,15 @@ import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import {
   CHUNK_CACHE_DIR,
+  CACHE_ROOT,
   DEFAULT_SETTINGS,
   ITEM_CACHE_DIR,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
 } from "./settings";
 import { TOOL_ASSETS } from "./toolAssets";
+import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
+import type { ChatCitation, ChatMessage } from "./chatView";
 
 type ZoteroItemValues = Record<string, any>;
 
@@ -108,6 +120,8 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.migrateCachePaths();
     this.addSettingTab(new ZoteroRagSettingTab(this.app, this));
 
+    this.registerView(VIEW_TYPE_ZOTERO_CHAT, (leaf) => new ZoteroChatView(leaf, this));
+
     try {
       await this.ensureBundledTools();
     } catch (error) {
@@ -124,6 +138,12 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "ask-zotero-library",
       name: "Ask my Zotero library (RAG via RedisSearch)",
       callback: () => this.askZoteroLibrary(),
+    });
+
+    this.addCommand({
+      id: "open-zotero-chat",
+      name: "Open Zotero RAG chat panel",
+      callback: () => this.openChatView(true),
     });
 
     this.addCommand({
@@ -298,79 +318,120 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async askZoteroLibrary(): Promise<void> {
-    if (!this.settings.chatBaseUrl) {
-      new Notice("Chat base URL must be set in settings.");
-      return;
-    }
+    await this.openChatView(true);
+  }
 
+  private getChatLeaf(): WorkspaceLeaf {
+    if (this.settings.chatPaneLocation === "right") {
+      return this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf("split");
+    }
+    return this.app.workspace.getLeaf("tab");
+  }
+
+  async openChatView(focus = false): Promise<ZoteroChatView> {
+    const leaf = this.getChatLeaf();
+    await leaf.setViewState({ type: VIEW_TYPE_ZOTERO_CHAT, active: true });
+    this.app.workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (view instanceof ZoteroChatView && focus) {
+      view.focusInput();
+    }
+    return view as ZoteroChatView;
+  }
+
+  async loadChatHistory(): Promise<ChatMessage[]> {
+    const adapter = this.app.vault.adapter;
+    const historyPath = normalizePath(`${CACHE_ROOT}/chat.json`);
+    if (!(await adapter.exists(historyPath))) {
+      return [];
+    }
+    const raw = await adapter.read(historyPath);
+    let payload: any;
     try {
-      await this.ensureBundledTools();
-    } catch (error) {
-      new Notice("Failed to sync bundled tools. See console for details.");
-      console.error(error);
-      return;
+      payload = JSON.parse(raw);
+    } catch {
+      return [];
     }
+    const messages = Array.isArray(payload) ? payload : payload?.messages;
+    if (!Array.isArray(messages)) {
+      return [];
+    }
+    return messages
+      .filter((msg) => msg && typeof msg.content === "string")
+      .map((msg) => ({
+        id: msg.id || this.generateChatId(),
+        role: msg.role === "assistant" ? "assistant" : "user",
+        content: msg.content,
+        citations: Array.isArray(msg.citations) ? msg.citations : [],
+        createdAt: msg.createdAt || new Date().toISOString(),
+      }));
+  }
 
-    new TextPromptModal(this.app, "Ask Zotero Library", "Enter your query", async (query) => {
-      const pluginDir = this.getPluginDir();
-      const ragScript = path.join(pluginDir, "tools", "rag_query_redisearch.py");
+  async saveChatHistory(messages: ChatMessage[]): Promise<void> {
+    await this.ensureFolder(CACHE_ROOT);
+    const adapter = this.app.vault.adapter;
+    const historyPath = normalizePath(`${CACHE_ROOT}/chat.json`);
+    const payload = {
+      version: 1,
+      messages,
+    };
+    await adapter.write(historyPath, JSON.stringify(payload, null, 2));
+  }
 
-      let stdout = "";
-      try {
-        const result = await this.runPythonWithOutput(ragScript, [
-          "--query",
-          query,
-          "--k",
-          "5",
-          "--redis-url",
-          this.settings.redisUrl,
-          "--index",
-          this.settings.redisIndex,
-          "--prefix",
-          this.settings.redisPrefix,
-          "--embed-base-url",
-          this.settings.embedBaseUrl,
-          "--embed-api-key",
-          this.settings.embedApiKey,
-          "--embed-model",
-          this.settings.embedModel,
-          "--chat-base-url",
-          this.settings.chatBaseUrl,
-          "--chat-api-key",
-          this.settings.chatApiKey,
-          "--chat-model",
-          this.settings.chatModel,
-          "--temperature",
-          String(this.settings.chatTemperature),
-        ]);
-        stdout = result;
-      } catch (error) {
-        new Notice("RAG query failed. See console for details.");
-        console.error(error);
-        return;
-      }
+  async runRagQueryStreaming(
+    query: string,
+    onDelta: (delta: string) => void,
+    onFinal: (payload: any) => void
+  ): Promise<void> {
+    await this.ensureBundledTools();
+    const pluginDir = this.getPluginDir();
+    const ragScript = path.join(pluginDir, "tools", "rag_query_redisearch.py");
+    const args = [
+      "--query",
+      query,
+      "--k",
+      "5",
+      "--redis-url",
+      this.settings.redisUrl,
+      "--index",
+      this.settings.redisIndex,
+      "--prefix",
+      this.settings.redisPrefix,
+      "--embed-base-url",
+      this.settings.embedBaseUrl,
+      "--embed-api-key",
+      this.settings.embedApiKey,
+      "--embed-model",
+      this.settings.embedModel,
+      "--chat-base-url",
+      this.settings.chatBaseUrl,
+      "--chat-api-key",
+      this.settings.chatApiKey,
+      "--chat-model",
+      this.settings.chatModel,
+      "--temperature",
+      String(this.settings.chatTemperature),
+      "--stream",
+    ];
 
-      let response: any;
-      try {
-        response = JSON.parse(stdout);
-      } catch (error) {
-        new Notice("Failed to parse RAG response.");
-        console.error(error);
-        return;
-      }
-
-      const answer = response?.answer ?? "";
-      const citations = response?.citations ?? [];
-      const citationText = citations
-        .map((c: any) => {
-          const pages = c.pages ?? `${c.page_start ?? "?"}-${c.page_end ?? "?"}`;
-          return `${c.doc_id ?? "?"} pages ${pages}`;
-        })
-        .join("\n");
-
-      const body = `${answer}\n\nCitations:\n${citationText || "(none)"}`;
-      new OutputModal(this.app, "Zotero RAG Answer", body).open();
-    }, "Query cannot be empty.").open();
+    return this.runPythonStreaming(
+      ragScript,
+      args,
+      (payload) => {
+        if (payload?.type === "delta" && typeof payload.content === "string") {
+          onDelta(payload.content);
+          return;
+        }
+        if (payload?.type === "final") {
+          onFinal(payload);
+          return;
+        }
+        if (payload?.answer) {
+          onFinal(payload);
+        }
+      },
+      onFinal
+    );
   }
 
   private async rebuildNoteFromCache(): Promise<void> {
@@ -750,7 +811,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
   }
 
-  private buildPdfLinkFromSourcePath(sourcePdf: string): string {
+  public buildPdfLinkFromSourcePath(sourcePdf: string): string {
     if (!sourcePdf) {
       return "";
     }
@@ -762,6 +823,40 @@ export default class ZoteroRagPlugin extends Plugin {
       return `[[${relative}]]`;
     }
     return `[PDF](${pathToFileURL(sourcePdf).toString()})`;
+  }
+
+  public formatCitationsMarkdown(citations: ChatCitation[]): string {
+    if (!citations.length) {
+      return "";
+    }
+    const lines = citations.map((citation) => this.formatCitationMarkdown(citation));
+    return lines.filter(Boolean).join("\n");
+  }
+
+  private formatCitationMarkdown(citation: ChatCitation): string {
+    const docId = citation.doc_id || "?";
+    const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
+    const label = `${docId} pages ${pages}`;
+    const sourcePdf = citation.source_pdf || "";
+    if (sourcePdf) {
+      const link = this.buildPdfLinkFromSourcePath(sourcePdf);
+      if (link.startsWith("[[")) {
+        const target = link.slice(2, -2);
+        return `- [[${target}|${label}]]`;
+      }
+      const match = link.match(/^\[PDF\]\((.+)\)$/);
+      if (match) {
+        return `- [${label}](${match[1]})`;
+      }
+    }
+    return `- ${label}`;
+  }
+
+  private generateChatId(): string {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+      return crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
   private getZoteroLibraryPath(): string {
@@ -996,6 +1091,69 @@ export default class ZoteroRagPlugin extends Plugin {
       });
 
       child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(stderr || `Process exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  private runPythonStreaming(
+    scriptPath: string,
+    args: string[],
+    onPayload: (payload: any) => void,
+    onFallbackFinal: (payload: any) => void
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
+        cwd: path.dirname(scriptPath),
+      });
+
+      let stdoutBuffer = "";
+      let stderr = "";
+      let lastPayload: any = null;
+      let sawFinal = false;
+
+      const handleLine = (line: string): void => {
+        if (!line.trim()) {
+          return;
+        }
+        try {
+          const payload = JSON.parse(line);
+          lastPayload = payload;
+          if (payload?.type === "final") {
+            sawFinal = true;
+          } else if (payload?.answer) {
+            sawFinal = true;
+          }
+          onPayload(payload);
+        } catch {
+          // Ignore non-JSON output.
+        }
+      };
+
+      child.stdout.on("data", (data) => {
+        stdoutBuffer += data.toString();
+        const lines = stdoutBuffer.split(/\r?\n/);
+        stdoutBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          handleLine(line);
+        }
+      });
+
+      child.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      child.on("close", (code) => {
+        if (stdoutBuffer.trim()) {
+          handleLine(stdoutBuffer);
+        }
+        if (!sawFinal && lastPayload) {
+          onFallbackFinal(lastPayload);
+        }
         if (code === 0) {
           resolve();
         } else {

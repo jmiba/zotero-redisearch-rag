@@ -1,0 +1,83 @@
+.zrr-chat-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.zrr-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.zrr-chat-title {
+  font-weight: 600;
+}
+
+.zrr-chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+}
+
+.zrr-chat-message {
+  max-width: 90%;
+  border-radius: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  background: var(--background-secondary);
+  box-shadow: var(--shadow-s);
+}
+
+.zrr-chat-message.zrr-chat-user {
+  align-self: flex-end;
+  background: var(--background-modifier-border);
+}
+
+.zrr-chat-message.zrr-chat-assistant {
+  align-self: flex-start;
+}
+
+.zrr-chat-meta {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  margin-bottom: 0.35rem;
+}
+
+.zrr-chat-content {
+  line-height: 1.5;
+}
+
+.zrr-chat-citations {
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.zrr-chat-citations-label {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.zrr-chat-input {
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.75rem;
+}
+
+.zrr-chat-textarea {
+  flex: 1;
+  min-height: 3.25rem;
+  resize: vertical;
+}
+
+.zrr-chat-send,
+.zrr-chat-clear {
+  white-space: nowrap;
+}
