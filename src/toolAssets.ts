@@ -1,6 +1,6 @@
 export const TOOL_ASSETS: Record<string, string> = {
   "docling_extract.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.1
+# zotero-redisearch-rag tool version: 0.1.2
 import argparse
 import json
 import os
@@ -291,7 +291,7 @@ if __name__ == "__main__":
     sys.exit(main())
 `,
   "index_redisearch.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.1
+# zotero-redisearch-rag tool version: 0.1.2
 import argparse
 import json
 import math
@@ -468,7 +468,7 @@ if __name__ == "__main__":
     sys.exit(main())
 `,
   "rag_query_redisearch.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.1
+# zotero-redisearch-rag tool version: 0.1.2
 import argparse
 import json
 import math
@@ -723,7 +723,7 @@ if __name__ == "__main__":
     sys.exit(main())
 `,
   "batch_index_pyzotero.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.1
+# zotero-redisearch-rag tool version: 0.1.2
 import argparse
 import json
 import os

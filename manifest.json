@@ -1,7 +1,7 @@
 {
   "id": "zotero-redisearch-rag",
   "name": "Zotero Redis RAG",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.5.0",
   "description": "Zotero -> Docling -> Redis Stack RAG orchestrator",
   "author": "Jens Mittelbach",
