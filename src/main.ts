@@ -125,6 +125,9 @@ class OutputModal extends Modal {
 export default class ZoteroRagPlugin extends Plugin {
   settings!: ZoteroRagSettings;
   private docIndex: Record<string, DocIndexEntry> | null = null;
+  private statusBarEl?: HTMLElement;
+  private statusLabelEl?: HTMLElement;
+  private statusBarInnerEl?: HTMLElement;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -132,6 +135,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.addSettingTab(new ZoteroRagSettingTab(this.app, this));
 
     this.registerView(VIEW_TYPE_ZOTERO_CHAT, (leaf) => new ZoteroChatView(leaf, this));
+    this.setupStatusBar();
 
     try {
       await this.ensureBundledTools();
@@ -212,6 +216,8 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
+    this.showStatusProgress("Preparing...", 5);
+
     const title = typeof values.title === "string" ? values.title : "";
     const baseName = this.sanitizeFileName(title) || docId;
     const finalBaseName = await this.resolveUniqueBaseName(baseName, docId);
@@ -231,6 +237,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to create output folders.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -248,6 +255,7 @@ export default class ZoteroRagPlugin extends Plugin {
       } else {
         if (!attachment.filePath) {
           new Notice("PDF file path missing. Enable PDF copying or check Zotero storage.");
+          this.clearStatusProgress();
           return;
         }
         pdfSourcePath = attachment.filePath;
@@ -256,6 +264,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to download PDF attachment.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -264,6 +273,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to write Zotero item JSON.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -272,6 +282,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
 
     try {
+      this.showStatusProgress("Docling extraction...", null);
       await this.runPython(doclingScript, [
         "--pdf",
         pdfSourcePath,
@@ -289,29 +300,43 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Docling extraction failed. See console for details.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
     try {
-      await this.runPython(indexScript, [
-        "--chunks-json",
-        this.getAbsoluteVaultPath(chunkPath),
-        "--redis-url",
-        this.settings.redisUrl,
-        "--index",
-        this.settings.redisIndex,
-        "--prefix",
-        this.settings.redisPrefix,
-        "--embed-base-url",
-        this.settings.embedBaseUrl,
-        "--embed-api-key",
-        this.settings.embedApiKey,
-        "--embed-model",
-        this.settings.embedModel,
-      ]);
+      this.showStatusProgress("Indexing chunks...", 0);
+      await this.runPythonStreaming(
+        indexScript,
+        [
+          "--chunks-json",
+          this.getAbsoluteVaultPath(chunkPath),
+          "--redis-url",
+          this.settings.redisUrl,
+          "--index",
+          this.settings.redisIndex,
+          "--prefix",
+          this.settings.redisPrefix,
+          "--embed-base-url",
+          this.settings.embedBaseUrl,
+          "--embed-api-key",
+          this.settings.embedApiKey,
+          "--embed-model",
+          this.settings.embedModel,
+          "--progress",
+        ],
+        (payload) => {
+          if (payload?.type === "progress" && payload.total) {
+            const percent = Math.round((payload.current / payload.total) * 100);
+            this.showStatusProgress(`Indexing chunks ${payload.current}/${payload.total}`, percent);
+          }
+        },
+        () => undefined
+      );
     } catch (error) {
       new Notice("RedisSearch indexing failed. See console for details.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -322,6 +347,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to finalize note markdown.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -338,6 +364,8 @@ export default class ZoteroRagPlugin extends Plugin {
       console.error("Failed to update doc index", error);
     }
 
+    this.showStatusProgress("Done", 100);
+    window.setTimeout(() => this.clearStatusProgress(), 1200);
     new Notice(`Indexed Zotero item ${docId}.`);
   }
 
@@ -536,6 +564,8 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
+    this.showStatusProgress("Preparing...", 5);
+
     let item: ZoteroLocalItem;
     try {
       const itemRaw = await adapter.read(itemPath);
@@ -543,6 +573,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to read cached item JSON.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -553,12 +584,14 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to read cached chunks JSON.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
     const sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
     if (!sourcePdf) {
       new Notice("Cached chunk JSON is missing source_pdf.");
+      this.clearStatusProgress();
       return;
     }
 
@@ -567,6 +600,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Cached source PDF path is not accessible.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -593,6 +627,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to create notes folder.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -601,6 +636,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
 
     try {
+      this.showStatusProgress("Docling extraction...", null);
       await this.runPython(doclingScript, [
         "--pdf",
         sourcePdf,
@@ -618,30 +654,44 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Docling extraction failed. See console for details.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
     try {
-      await this.runPython(indexScript, [
-        "--chunks-json",
-        this.getAbsoluteVaultPath(chunkPath),
-        "--redis-url",
-        this.settings.redisUrl,
-        "--index",
-        this.settings.redisIndex,
-        "--prefix",
-        this.settings.redisPrefix,
-        "--embed-base-url",
-        this.settings.embedBaseUrl,
-        "--embed-api-key",
-        this.settings.embedApiKey,
-        "--embed-model",
-        this.settings.embedModel,
-        "--upsert",
-      ]);
+      this.showStatusProgress("Indexing chunks...", 0);
+      await this.runPythonStreaming(
+        indexScript,
+        [
+          "--chunks-json",
+          this.getAbsoluteVaultPath(chunkPath),
+          "--redis-url",
+          this.settings.redisUrl,
+          "--index",
+          this.settings.redisIndex,
+          "--prefix",
+          this.settings.redisPrefix,
+          "--embed-base-url",
+          this.settings.embedBaseUrl,
+          "--embed-api-key",
+          this.settings.embedApiKey,
+          "--embed-model",
+          this.settings.embedModel,
+          "--upsert",
+          "--progress",
+        ],
+        (payload) => {
+          if (payload?.type === "progress" && payload.total) {
+            const percent = Math.round((payload.current / payload.total) * 100);
+            this.showStatusProgress(`Indexing chunks ${payload.current}/${payload.total}`, percent);
+          }
+        },
+        () => undefined
+      );
     } catch (error) {
       new Notice("RedisSearch indexing failed. See console for details.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -654,6 +704,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to finalize note markdown.");
       console.error(error);
+      this.clearStatusProgress();
       return;
     }
 
@@ -669,6 +720,8 @@ export default class ZoteroRagPlugin extends Plugin {
       console.error("Failed to update doc index", error);
     }
 
+    this.showStatusProgress("Done", 100);
+    window.setTimeout(() => this.clearStatusProgress(), 1200);
     new Notice(`Rebuilt Zotero note for ${docId}.`);
   }
 
@@ -676,6 +729,47 @@ export default class ZoteroRagPlugin extends Plugin {
     return new Promise((resolve) => {
       new ZoteroItemSuggestModal(this.app, this, resolve).open();
     });
+  }
+
+  private setupStatusBar(): void {
+    const statusBar = this.addStatusBarItem();
+    statusBar.addClass("zrr-status-progress");
+    statusBar.style.display = "none";
+
+    const label = statusBar.createEl("span", { text: "Idle" });
+    label.addClass("zrr-status-label");
+
+    const bar = statusBar.createEl("div", { cls: "zrr-status-bar" });
+    const inner = bar.createEl("div", { cls: "zrr-status-bar-inner" });
+
+    this.statusBarEl = statusBar;
+    this.statusLabelEl = label;
+    this.statusBarInnerEl = inner;
+  }
+
+  private showStatusProgress(label: string, percent: number | null): void {
+    if (!this.statusBarEl || !this.statusLabelEl || !this.statusBarInnerEl) {
+      return;
+    }
+    this.statusBarEl.style.display = "flex";
+    this.statusLabelEl.setText(label);
+    if (percent === null) {
+      this.statusBarInnerEl.addClass("indeterminate");
+      this.statusBarInnerEl.style.width = "40%";
+    } else {
+      this.statusBarInnerEl.removeClass("indeterminate");
+      const clamped = Math.max(0, Math.min(100, percent));
+      this.statusBarInnerEl.style.width = `${clamped}%`;
+    }
+  }
+
+  private clearStatusProgress(): void {
+    if (!this.statusBarEl || !this.statusBarInnerEl) {
+      return;
+    }
+    this.statusBarEl.style.display = "none";
+    this.statusBarInnerEl.removeClass("indeterminate");
+    this.statusBarInnerEl.style.width = "0%";
   }
 
   private async promptDocId(): Promise<string | null> {

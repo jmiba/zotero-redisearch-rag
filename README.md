@@ -14,11 +14,24 @@ Science-grade Zotero RAG pipeline:
 
 ## Redis Stack setup
 
-Option A: Docker
+Option A: Docker (ephemeral)
 
 ```bash
 docker run --rm -p 6379:6379 redis/redis-stack-server:latest
 ```
+
+Option B: Docker Compose with persistent data (recommended)
+
+Store Redis data in a folder inside your vault, e.g.
+`<vault>/.zotero-redisearch-rag/redis-data`, by setting `ZRR_DATA_DIR`:
+
+```bash
+export ZRR_DATA_DIR="/path/to/your/vault/.zotero-redisearch-rag/redis-data"
+docker compose up -d
+```
+
+If you prefer not to keep Redis data inside your vault, point `ZRR_DATA_DIR`
+elsewhere.
 
 Verify RediSearch works:
 

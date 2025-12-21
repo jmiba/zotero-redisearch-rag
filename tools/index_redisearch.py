@@ -100,6 +100,7 @@ def main() -> int:
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)
     parser.add_argument("--upsert", action="store_true")
+    parser.add_argument("--progress", action="store_true")
     args = parser.parse_args()
 
     if not os.path.isfile(args.chunks_json):
@@ -127,14 +128,23 @@ def main() -> int:
         eprint(f"Failed to ensure index: {exc}")
         return 2
 
+    valid_chunks = []
     for chunk in chunks:
         text = str(chunk.get("text", ""))
         if not text.strip():
             continue
-
         chunk_id = chunk.get("chunk_id")
         if not chunk_id:
             continue
+        valid_chunks.append(chunk)
+
+    total = len(valid_chunks)
+    current = 0
+
+    for chunk in valid_chunks:
+        current += 1
+        text = str(chunk.get("text", ""))
+        chunk_id = chunk.get("chunk_id")
 
         stable_chunk_id = f"{doc_id}:{chunk_id}"
         key = f"{args.prefix}{stable_chunk_id}"
@@ -167,6 +177,9 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to index chunk {stable_chunk_id}: {exc}")
             return 2
+
+        if args.progress:
+            print(json.dumps({"type": "progress", "current": current, "total": total}), flush=True)
 
     return 0
 

@@ -67,6 +67,29 @@ def extract_pages(doc: Any) -> List[Dict[str, Any]]:
     return pages
 
 
+def extract_pages_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        eprint(f"pypdf is not available for fallback page extraction: {exc}")
+        return []
+
+    pages: List[Dict[str, Any]] = []
+    try:
+        reader = PdfReader(pdf_path)
+        for idx, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            pages.append({"page_num": idx, "text": text})
+    except Exception as exc:
+        eprint(f"Failed to extract pages with pypdf: {exc}")
+        return []
+
+    return pages
+
+
 def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     sections: List[Dict[str, Any]] = []
     current_title = ""
@@ -267,6 +290,10 @@ def main() -> int:
 
     try:
         pages = extract_pages(doc)
+        if len(pages) <= 1:
+            fallback_pages = extract_pages_from_pdf(args.pdf)
+            if len(fallback_pages) > len(pages):
+                pages = fallback_pages
         if args.chunking == "section":
             chunks = build_chunks_section(args.doc_id, markdown, pages)
         else:
@@ -399,6 +426,7 @@ def main() -> int:
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)
     parser.add_argument("--upsert", action="store_true")
+    parser.add_argument("--progress", action="store_true")
     args = parser.parse_args()
 
     if not os.path.isfile(args.chunks_json):
@@ -426,14 +454,23 @@ def main() -> int:
         eprint(f"Failed to ensure index: {exc}")
         return 2
 
+    valid_chunks = []
     for chunk in chunks:
         text = str(chunk.get("text", ""))
         if not text.strip():
             continue
-
         chunk_id = chunk.get("chunk_id")
         if not chunk_id:
             continue
+        valid_chunks.append(chunk)
+
+    total = len(valid_chunks)
+    current = 0
+
+    for chunk in valid_chunks:
+        current += 1
+        text = str(chunk.get("text", ""))
+        chunk_id = chunk.get("chunk_id")
 
         stable_chunk_id = f"{doc_id}:{chunk_id}"
         key = f"{args.prefix}{stable_chunk_id}"
@@ -466,6 +503,9 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to index chunk {stable_chunk_id}: {exc}")
             return 2
+
+        if args.progress:
+            print(json.dumps({"type": "progress", "current": current, "total": total}), flush=True)
 
     return 0
 

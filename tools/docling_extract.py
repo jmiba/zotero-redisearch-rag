@@ -65,6 +65,29 @@ def extract_pages(doc: Any) -> List[Dict[str, Any]]:
     return pages
 
 
+def extract_pages_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        eprint(f"pypdf is not available for fallback page extraction: {exc}")
+        return []
+
+    pages: List[Dict[str, Any]] = []
+    try:
+        reader = PdfReader(pdf_path)
+        for idx, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            pages.append({"page_num": idx, "text": text})
+    except Exception as exc:
+        eprint(f"Failed to extract pages with pypdf: {exc}")
+        return []
+
+    return pages
+
+
 def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     sections: List[Dict[str, Any]] = []
     current_title = ""
@@ -265,6 +288,10 @@ def main() -> int:
 
     try:
         pages = extract_pages(doc)
+        if len(pages) <= 1:
+            fallback_pages = extract_pages_from_pdf(args.pdf)
+            if len(fallback_pages) > len(pages):
+                pages = fallback_pages
         if args.chunking == "section":
             chunks = build_chunks_section(args.doc_id, markdown, pages)
         else:
