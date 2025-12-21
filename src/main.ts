@@ -1,6 +1,10 @@
-import { App, FileSystemAdapter, Modal, Notice, Plugin, normalizePath, requestUrl } from "obsidian";
+import { App, FileSystemAdapter, Modal, Notice, Plugin, normalizePath } from "obsidian";
 import { spawn } from "child_process";
+import { promises as fs } from "fs";
+import http from "http";
+import https from "https";
 import path from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import { DEFAULT_SETTINGS, ZoteroRagSettingTab, ZoteroRagSettings } from "./settings";
 
 type ZoteroItemValues = Record<string, any>;
@@ -9,8 +13,9 @@ type ZoteroBridgeApi = {
   search: () => Promise<any>;
 };
 
-type RequestUrlOptions = Parameters<typeof requestUrl>[0] & {
-  responseType?: "arraybuffer";
+type PdfAttachment = {
+  key: string;
+  filePath?: string;
 };
 
 class TextPromptModal extends Modal {
@@ -113,11 +118,6 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    if (!this.settings.zoteroUserId) {
-      new Notice("Zotero user ID is required in settings.");
-      return;
-    }
-
     let item: any;
     try {
       const searchResult = await zoteroApi.search();
@@ -148,8 +148,8 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    const attachmentKey = await this.resolvePdfAttachmentKey(values, docId);
-    if (!attachmentKey) {
+    const attachment = await this.resolvePdfAttachment(values, docId);
+    if (!attachment) {
       new Notice("No PDF attachment found for item.");
       return;
     }
@@ -160,19 +160,37 @@ export default class ZoteroRagPlugin extends Plugin {
     const notePath = normalizePath(`${this.settings.outputNoteDir}/${docId}.md`);
 
     try {
-      await this.ensureFolder(this.settings.outputPdfDir);
       await this.ensureFolder(this.settings.outputItemDir);
       await this.ensureFolder(this.settings.outputChunkDir);
       await this.ensureFolder(this.settings.outputNoteDir);
+      if (this.settings.copyPdfToVault) {
+        await this.ensureFolder(this.settings.outputPdfDir);
+      }
     } catch (error) {
       new Notice("Failed to create output folders.");
       console.error(error);
       return;
     }
 
+    let pdfSourcePath = "";
+    let pdfLink = "";
+
     try {
-      const pdfBytes = await this.downloadZoteroPdf(attachmentKey);
-      await this.app.vault.adapter.writeBinary(pdfPath, pdfBytes);
+      if (this.settings.copyPdfToVault) {
+        const buffer = attachment.filePath
+          ? await fs.readFile(attachment.filePath)
+          : await this.downloadZoteroPdf(attachment.key);
+        await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
+        pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
+        pdfLink = `[[${pdfPath}]]`;
+      } else {
+        if (!attachment.filePath) {
+          new Notice("PDF file path missing. Enable PDF copying or check Zotero storage.");
+          return;
+        }
+        pdfSourcePath = attachment.filePath;
+        pdfLink = `[PDF](${pathToFileURL(attachment.filePath).toString()})`;
+      }
     } catch (error) {
       new Notice("Failed to download PDF attachment.");
       console.error(error);
@@ -194,7 +212,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       await this.runPython(doclingScript, [
         "--pdf",
-        this.getAbsoluteVaultPath(pdfPath),
+        pdfSourcePath,
         "--doc-id",
         docId,
         "--out-json",
@@ -237,7 +255,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);
-      const noteContent = this.buildNoteMarkdown(values, docId, pdfPath, itemPath, doclingMd);
+      const noteContent = this.buildNoteMarkdown(values, docId, pdfLink, itemPath, doclingMd);
       await this.app.vault.adapter.write(notePath, noteContent);
     } catch (error) {
       new Notice("Failed to finalize note markdown.");
@@ -347,19 +365,19 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
-  private async resolvePdfAttachmentKey(values: ZoteroItemValues, itemKey: string): Promise<string | null> {
-    const fromValues = this.pickPdfAttachmentKey(values);
+  private async resolvePdfAttachment(values: ZoteroItemValues, itemKey: string): Promise<PdfAttachment | null> {
+    const fromValues = this.pickPdfAttachment(values);
     if (fromValues) {
       return fromValues;
     }
 
     try {
       const children = await this.fetchZoteroChildren(itemKey);
-      const child = children.find((entry) =>
-        this.isPdfAttachment(entry?.data?.contentType ?? entry?.data?.mimeType)
-      );
-      if (child) {
-        return child.key ?? child.data?.key ?? null;
+      for (const child of children) {
+        const attachment = this.toPdfAttachment(child);
+        if (attachment) {
+          return attachment;
+        }
       }
     } catch (error) {
       console.error("Failed to fetch Zotero children", error);
@@ -368,44 +386,65 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
-  private pickPdfAttachmentKey(values: ZoteroItemValues): string | null {
+  private pickPdfAttachment(values: ZoteroItemValues): PdfAttachment | null {
     const attachments = values.attachments ?? values.children ?? values.items ?? [];
     if (!Array.isArray(attachments)) {
       return null;
     }
     for (const attachment of attachments) {
-      const contentType = attachment.contentType ?? attachment.mimeType ?? attachment.data?.contentType;
-      if (this.isPdfAttachment(contentType)) {
-        return attachment.key ?? attachment.attachmentKey ?? attachment.data?.key ?? null;
+      const pdfAttachment = this.toPdfAttachment(attachment);
+      if (pdfAttachment) {
+        return pdfAttachment;
       }
     }
     return null;
   }
 
-  private isPdfAttachment(contentType?: string): boolean {
-    return contentType === "application/pdf";
+  private toPdfAttachment(attachment: any): PdfAttachment | null {
+    const contentType = attachment?.contentType ?? attachment?.mimeType ?? attachment?.data?.contentType;
+    if (contentType !== "application/pdf") {
+      return null;
+    }
+    const key = attachment?.key ?? attachment?.attachmentKey ?? attachment?.data?.key;
+    if (!key) {
+      return null;
+    }
+    const filePath = this.extractAttachmentPath(attachment);
+    return filePath ? { key, filePath } : { key };
+  }
+
+  private extractAttachmentPath(attachment: any): string | null {
+    const href =
+      attachment?.links?.enclosure?.href ??
+      attachment?.enclosure?.href ??
+      attachment?.data?.links?.enclosure?.href;
+    if (typeof href === "string" && href.startsWith("file://")) {
+      try {
+        return fileURLToPath(href);
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   private async fetchZoteroChildren(itemKey: string): Promise<any[]> {
-    const url = this.buildZoteroUrl(`/users/${this.settings.zoteroUserId}/items/${itemKey}/children`);
-    const response = await requestUrl({
-      url,
-      method: "GET",
-      headers: this.zoteroHeaders(),
-    });
-    return response.json ?? [];
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children`);
+    const payload = await this.requestLocalApi(url);
+    return JSON.parse(payload.toString("utf8"));
   }
 
-  private async downloadZoteroPdf(attachmentKey: string): Promise<ArrayBuffer> {
-    const url = this.buildZoteroUrl(`/users/${this.settings.zoteroUserId}/items/${attachmentKey}/file`);
-    const options: RequestUrlOptions = {
-      url,
-      method: "GET",
-      headers: this.zoteroHeaders(),
-      responseType: "arraybuffer",
-    };
-    const response = await requestUrl(options);
-    return response.arrayBuffer;
+  private async downloadZoteroPdf(attachmentKey: string): Promise<Buffer> {
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${attachmentKey}/file`);
+    const response = await this.requestLocalApiRaw(url);
+    const redirected = await this.followFileRedirect(response);
+    if (redirected) {
+      return redirected;
+    }
+    if (response.statusCode >= 300) {
+      throw new Error(`Request failed, status ${response.statusCode}`);
+    }
+    return response.body;
   }
 
   private buildZoteroUrl(pathname: string): string {
@@ -413,11 +452,86 @@ export default class ZoteroRagPlugin extends Plugin {
     return `${base}${pathname}`;
   }
 
-  private zoteroHeaders(): Record<string, string> {
-    if (!this.settings.zoteroApiKey) {
-      return {};
+  private requestLocalApiRaw(
+    url: string
+  ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(url);
+      const lib = parsed.protocol === "https:" ? https : http;
+      const request = lib.request(
+        {
+          method: "GET",
+          hostname: parsed.hostname,
+          port: parsed.port || undefined,
+          path: `${parsed.pathname}${parsed.search}`,
+          headers: {
+            Accept: "*/*",
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+          response.on("end", () => {
+            const body = Buffer.concat(chunks);
+            resolve({
+              statusCode: response.statusCode ?? 0,
+              headers: response.headers,
+              body,
+            });
+          });
+        }
+      );
+
+      request.on("error", reject);
+      request.end();
+    });
+  }
+
+  private async requestLocalApi(url: string): Promise<Buffer> {
+    const response = await this.requestLocalApiRaw(url);
+    if (response.statusCode >= 400) {
+      throw new Error(`Request failed, status ${response.statusCode}: ${response.body.toString("utf8")}`);
     }
-    return { "Zotero-API-Key": this.settings.zoteroApiKey };
+    if (response.statusCode >= 300) {
+      throw new Error(`Request failed, status ${response.statusCode}`);
+    }
+    return response.body;
+  }
+
+  private async followFileRedirect(
+    response: { statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }
+  ): Promise<Buffer | null> {
+    if (response.statusCode < 300 || response.statusCode >= 400) {
+      return null;
+    }
+    const location = response.headers.location;
+    const href = Array.isArray(location) ? location[0] : location;
+    if (!href || typeof href !== "string") {
+      return null;
+    }
+    if (href.startsWith("file://")) {
+      const filePath = fileURLToPath(href);
+      return fs.readFile(filePath);
+    }
+    if (href.startsWith("http://") || href.startsWith("https://")) {
+      return this.requestLocalApi(href);
+    }
+    return null;
+  }
+
+  private bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+  }
+
+  private getZoteroLibraryPath(): string {
+    const raw = (this.settings.zoteroUserId || "0").trim();
+    if (!raw || raw === "0") {
+      return "users/0";
+    }
+    if (raw.startsWith("users/") || raw.startsWith("groups/")) {
+      return raw;
+    }
+    return `users/${raw}`;
   }
 
   private async ensureFolder(folderPath: string): Promise<void> {
@@ -435,13 +549,12 @@ export default class ZoteroRagPlugin extends Plugin {
   private buildNoteMarkdown(
     values: ZoteroItemValues,
     docId: string,
-    pdfPath: string,
+    pdfLink: string,
     itemPath: string,
     doclingMarkdown: string
   ): string {
     const title = typeof values.title === "string" ? values.title : "";
     const safeTitle = title.replace(/"/g, "'");
-    const pdfLink = `[[${pdfPath}]]`;
     const jsonLink = `[[${itemPath}]]`;
 
     return `---\ndoc_id: "${docId}"\ntitle: "${safeTitle}"\n---\n\nPDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;

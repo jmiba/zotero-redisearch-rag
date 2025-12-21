@@ -6,8 +6,8 @@ export type ChunkingMode = "page" | "section";
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
   zoteroUserId: string;
-  zoteroApiKey: string;
   pythonPath: string;
+  copyPdfToVault: boolean;
   outputPdfDir: string;
   outputItemDir: string;
   outputNoteDir: string;
@@ -28,9 +28,9 @@ export interface ZoteroRagSettings {
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   zoteroBaseUrl: "http://127.0.0.1:23119/api",
-  zoteroUserId: "",
-  zoteroApiKey: "",
+  zoteroUserId: "0",
   pythonPath: "python3",
+  copyPdfToVault: true,
   outputPdfDir: "zotero/pdfs",
   outputItemDir: "zotero/items",
   outputNoteDir: "zotero/notes",
@@ -78,26 +78,13 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Zotero user ID")
-      .setDesc("Required for Zotero local API downloads")
+      .setDesc("Use 0 for local library. You can also enter users/<id> or groups/<id>.")
       .addText((text) =>
         text
           .setPlaceholder("123456")
           .setValue(this.plugin.settings.zoteroUserId)
           .onChange(async (value) => {
             this.plugin.settings.zoteroUserId = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Zotero API key")
-      .setDesc("Optional for local API")
-      .addText((text) =>
-        text
-          .setPlaceholder("optional")
-          .setValue(this.plugin.settings.zoteroApiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.zoteroApiKey = value.trim();
             await this.plugin.saveSettings();
           })
       );
@@ -113,6 +100,16 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.pythonPath = value.trim() || "python3";
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Copy PDFs into vault")
+      .setDesc("Disable to use Zotero storage paths directly.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.copyPdfToVault).onChange(async (value) => {
+          this.plugin.settings.copyPdfToVault = value;
+          await this.plugin.saveSettings();
+        })
       );
 
     containerEl.createEl("h3", { text: "Output folders (vault-relative)" });
