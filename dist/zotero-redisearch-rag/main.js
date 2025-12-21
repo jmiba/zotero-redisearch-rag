@@ -1,4 +1,4 @@
-"use strict";var K=Object.create;var N=Object.defineProperty;var W=Object.getOwnPropertyDescriptor;var Y=Object.getOwnPropertyNames;var Q=Object.getPrototypeOf,X=Object.prototype.hasOwnProperty;var ee=(w,p)=>{for(var e in p)N(w,e,{get:p[e],enumerable:!0})},U=(w,p,e,t)=>{if(p&&typeof p=="object"||typeof p=="function")for(let r of Y(p))!X.call(w,r)&&r!==e&&N(w,r,{get:()=>p[r],enumerable:!(t=W(p,r))||t.enumerable});return w};var z=(w,p,e)=>(e=w!=null?K(Q(w)):{},U(p||!w||!w.__esModule?N(e,"default",{value:w,enumerable:!0}):e,w)),te=w=>U(N({},"__esModule",{value:!0}),w);var re={};ee(re,{default:()=>O});module.exports=te(re);var l=require("obsidian"),I=require("child_process"),E=require("fs"),G=z(require("http")),J=z(require("https")),h=z(require("path")),R=require("url");var f=require("obsidian"),D=".zotero-redisearch-rag",P=`${D}/items`,S=`${D}/chunks`,V={zoteroBaseUrl:"http://127.0.0.1:23119/api",zoteroUserId:"0",pythonPath:"python3",dockerPath:"docker",autoStartRedis:!1,copyPdfToVault:!0,frontmatterTemplate:`doc_id: {{doc_id}}
+"use strict";var Q=Object.create;var I=Object.defineProperty;var W=Object.getOwnPropertyDescriptor;var K=Object.getOwnPropertyNames;var Y=Object.getPrototypeOf,X=Object.prototype.hasOwnProperty;var ee=(k,p)=>{for(var e in p)I(k,e,{get:p[e],enumerable:!0})},U=(k,p,e,t)=>{if(p&&typeof p=="object"||typeof p=="function")for(let n of K(p))!X.call(k,n)&&n!==e&&I(k,n,{get:()=>p[n],enumerable:!(t=W(p,n))||t.enumerable});return k};var j=(k,p,e)=>(e=k!=null?Q(Y(k)):{},U(p||!k||!k.__esModule?I(e,"default",{value:k,enumerable:!0}):e,k)),te=k=>U(I({},"__esModule",{value:!0}),k);var ne={};ee(ne,{default:()=>z});module.exports=te(ne);var l=require("obsidian"),A=require("child_process"),L=require("fs"),H=j(require("http")),J=j(require("https")),g=j(require("path")),R=require("url");var f=require("obsidian"),E=".zotero-redisearch-rag",S=`${E}/items`,C=`${E}/chunks`,V={zoteroBaseUrl:"http://127.0.0.1:23119/api",zoteroUserId:"0",pythonPath:"python3",dockerPath:"docker",autoStartRedis:!1,copyPdfToVault:!0,frontmatterTemplate:`doc_id: {{doc_id}}
 zotero_key: {{zotero_key}}
 title: {{title_yaml}}
 year: {{year}}
@@ -6,13 +6,15 @@ authors:
 {{authors_yaml}}
 item_type: {{item_type}}
 pdf_link: {{pdf_link}}
-item_json: {{item_json}}`,outputPdfDir:"zotero/pdfs",outputNoteDir:"zotero/notes",chatPaneLocation:"right",redisUrl:"redis://127.0.0.1:6379",redisIndex:"idx:zotero",redisPrefix:"zotero:chunk:",embedBaseUrl:"http://localhost:1234/v1",embedApiKey:"lm-studio",embedModel:"google/embedding-gemma-300m",chatBaseUrl:"http://127.0.0.1:1234/v1",chatApiKey:"",chatModel:"openai/gpt-oss-20b",chatTemperature:.2,ocrMode:"auto",chunkingMode:"page",enableLlmCleanup:!1,llmCleanupBaseUrl:"http://127.0.0.1:1234/v1",llmCleanupApiKey:"",llmCleanupModel:"openai/gpt-oss-20b",llmCleanupTemperature:0,llmCleanupMinQuality:.35,llmCleanupMaxChars:2e3},q=class extends f.PluginSettingTab{constructor(p,e){super(p,e),this.plugin=e}display(){let{containerEl:p}=this;p.empty(),p.createEl("h2",{text:"Zotero RAG Settings"}),new f.Setting(p).setName("Zotero base URL").setDesc("Local Zotero API base URL, e.g. http://127.0.0.1:23119/api").addText(e=>e.setPlaceholder("http://127.0.0.1:23119/api").setValue(this.plugin.settings.zoteroBaseUrl).onChange(async t=>{this.plugin.settings.zoteroBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Zotero user ID").setDesc("Use 0 for local library. You can also enter users/<id> or groups/<id>.").addText(e=>e.setPlaceholder("123456").setValue(this.plugin.settings.zoteroUserId).onChange(async t=>{this.plugin.settings.zoteroUserId=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Python path").setDesc("Path to python3").addText(e=>e.setPlaceholder("python3").setValue(this.plugin.settings.pythonPath).onChange(async t=>{this.plugin.settings.pythonPath=t.trim()||"python3",await this.plugin.saveSettings()})),new f.Setting(p).setName("Copy PDFs into vault").setDesc("Disable to use Zotero storage paths directly.").addToggle(e=>e.setValue(this.plugin.settings.copyPdfToVault).onChange(async t=>{this.plugin.settings.copyPdfToVault=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("Frontmatter template").setDesc("Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}, {{item_json}}").addTextArea(e=>{e.inputEl.rows=8,e.setValue(this.plugin.settings.frontmatterTemplate).onChange(async t=>{this.plugin.settings.frontmatterTemplate=t,await this.plugin.saveSettings()})}),new f.Setting(p).setName("Docker path").setDesc("CLI path for Docker (used to start Redis Stack).").addText(e=>e.setPlaceholder("docker").setValue(this.plugin.settings.dockerPath).onChange(async t=>{this.plugin.settings.dockerPath=t.trim()||"docker",await this.plugin.saveSettings()})),p.createEl("h3",{text:"Output folders (vault-relative)"}),new f.Setting(p).setName("PDF folder").addText(e=>e.setPlaceholder("zotero/pdfs").setValue(this.plugin.settings.outputPdfDir).onChange(async t=>{this.plugin.settings.outputPdfDir=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Notes folder").addText(e=>e.setPlaceholder("zotero/notes").setValue(this.plugin.settings.outputNoteDir).onChange(async t=>{this.plugin.settings.outputNoteDir=t.trim(),await this.plugin.saveSettings()})),p.createEl("h3",{text:"Redis Stack"}),new f.Setting(p).setName("Redis URL").addText(e=>e.setPlaceholder("redis://127.0.0.1:6379").setValue(this.plugin.settings.redisUrl).onChange(async t=>{this.plugin.settings.redisUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Index name").addText(e=>e.setPlaceholder("idx:zotero").setValue(this.plugin.settings.redisIndex).onChange(async t=>{this.plugin.settings.redisIndex=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Key prefix").addText(e=>e.setPlaceholder("zotero:chunk:").setValue(this.plugin.settings.redisPrefix).onChange(async t=>{this.plugin.settings.redisPrefix=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Auto-start Redis Stack (Docker Compose)").setDesc("Requires Docker Desktop running and your vault path shared with Docker.").addToggle(e=>e.setValue(this.plugin.settings.autoStartRedis).onChange(async t=>{this.plugin.settings.autoStartRedis=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("Start Redis Stack now").setDesc("Runs Docker Compose with the vault data directory.").addButton(e=>e.setButtonText("Start").onClick(async()=>{await this.plugin.startRedisStack()})),p.createEl("h3",{text:"Embeddings (LM Studio)"}),new f.Setting(p).setName("Embeddings base URL").addText(e=>e.setPlaceholder("http://localhost:1234/v1").setValue(this.plugin.settings.embedBaseUrl).onChange(async t=>{this.plugin.settings.embedBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Embeddings API key").addText(e=>e.setPlaceholder("lm-studio").setValue(this.plugin.settings.embedApiKey).onChange(async t=>{this.plugin.settings.embedApiKey=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Embeddings model").addText(e=>e.setPlaceholder("google/embedding-gemma-300m").setValue(this.plugin.settings.embedModel).onChange(async t=>{this.plugin.settings.embedModel=t.trim(),await this.plugin.saveSettings()})),p.createEl("h3",{text:"Chat LLM"}),new f.Setting(p).setName("Chat base URL").setDesc("OpenAI-compatible chat endpoint base URL").addText(e=>e.setPlaceholder("http://localhost:1234/v1").setValue(this.plugin.settings.chatBaseUrl).onChange(async t=>{this.plugin.settings.chatBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Chat API key").addText(e=>e.setPlaceholder("lm-studio").setValue(this.plugin.settings.chatApiKey).onChange(async t=>{this.plugin.settings.chatApiKey=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Chat model").addText(e=>e.setPlaceholder("meta-llama/llama-3.1-405b-instruct").setValue(this.plugin.settings.chatModel).onChange(async t=>{this.plugin.settings.chatModel=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Temperature").addText(e=>e.setPlaceholder("0.2").setValue(String(this.plugin.settings.chatTemperature)).onChange(async t=>{let r=Number.parseFloat(t);this.plugin.settings.chatTemperature=Number.isFinite(r)?r:.2,await this.plugin.saveSettings()})),new f.Setting(p).setName("Chat panel location").setDesc("Where to open the chat view by default.").addDropdown(e=>e.addOption("right","Right sidebar").addOption("main","Main window").setValue(this.plugin.settings.chatPaneLocation).onChange(async t=>{this.plugin.settings.chatPaneLocation=t,await this.plugin.saveSettings()})),p.createEl("h3",{text:"Docling"}),new f.Setting(p).setName("OCR mode").setDesc("auto, force, or off").addDropdown(e=>e.addOption("auto","auto").addOption("force","force").addOption("off","off").setValue(this.plugin.settings.ocrMode).onChange(async t=>{this.plugin.settings.ocrMode=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("Chunking").setDesc("page or section").addDropdown(e=>e.addOption("page","page").addOption("section","section").setValue(this.plugin.settings.chunkingMode).onChange(async t=>{this.plugin.settings.chunkingMode=t,await this.plugin.saveSettings()})),p.createEl("h4",{text:"OCR cleanup (optional)"}),new f.Setting(p).setName("LLM cleanup for low-quality chunks").setDesc("Optional OpenAI-compatible cleanup for poor OCR. Can be slow/costly.").addToggle(e=>e.setValue(this.plugin.settings.enableLlmCleanup).onChange(async t=>{this.plugin.settings.enableLlmCleanup=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup base URL").setDesc("OpenAI-compatible endpoint, e.g. http://127.0.0.1:1234/v1").addText(e=>e.setPlaceholder("http://127.0.0.1:1234/v1").setValue(this.plugin.settings.llmCleanupBaseUrl).onChange(async t=>{this.plugin.settings.llmCleanupBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup API key").setDesc("Optional API key for the cleanup endpoint.").addText(e=>e.setPlaceholder("sk-...").setValue(this.plugin.settings.llmCleanupApiKey).onChange(async t=>{this.plugin.settings.llmCleanupApiKey=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup model").setDesc("Model to use for cleanup.").addText(e=>e.setPlaceholder("openai/gpt-oss-20b").setValue(this.plugin.settings.llmCleanupModel).onChange(async t=>{this.plugin.settings.llmCleanupModel=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup temperature").setDesc("Lower is more conservative.").addText(e=>e.setPlaceholder("0.0").setValue(String(this.plugin.settings.llmCleanupTemperature)).onChange(async t=>{let r=Number.parseFloat(t);this.plugin.settings.llmCleanupTemperature=Number.isFinite(r)?r:0,await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup min quality").setDesc("Only run cleanup when chunk quality is below this threshold (0-1).").addText(e=>e.setPlaceholder("0.35").setValue(String(this.plugin.settings.llmCleanupMinQuality)).onChange(async t=>{let r=Number.parseFloat(t);this.plugin.settings.llmCleanupMinQuality=Number.isFinite(r)?r:.35,await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup max chars").setDesc("Skip cleanup for chunks longer than this limit.").addText(e=>e.setPlaceholder("2000").setValue(String(this.plugin.settings.llmCleanupMaxChars)).onChange(async t=>{let r=Number.parseInt(t,10);this.plugin.settings.llmCleanupMaxChars=Number.isFinite(r)?r:2e3,await this.plugin.saveSettings()}))}};var H={"docling_extract.py":String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.5
+item_json: {{item_json}}`,outputPdfDir:"zotero/pdfs",outputNoteDir:"zotero/notes",chatPaneLocation:"right",redisUrl:"redis://127.0.0.1:6379",redisIndex:"idx:zotero",redisPrefix:"zotero:chunk:",embedBaseUrl:"http://localhost:1234/v1",embedApiKey:"lm-studio",embedModel:"google/embedding-gemma-300m",chatBaseUrl:"http://127.0.0.1:1234/v1",chatApiKey:"",chatModel:"openai/gpt-oss-20b",chatTemperature:.2,ocrMode:"auto",chunkingMode:"page",ocrQualityThreshold:.5,enableLlmCleanup:!1,llmCleanupBaseUrl:"http://127.0.0.1:1234/v1",llmCleanupApiKey:"",llmCleanupModel:"openai/gpt-oss-20b",llmCleanupTemperature:0,llmCleanupMinQuality:.35,llmCleanupMaxChars:2e3},F=class extends f.PluginSettingTab{constructor(p,e){super(p,e),this.plugin=e}display(){let{containerEl:p}=this;p.empty(),p.createEl("h2",{text:"Zotero RAG Settings"}),new f.Setting(p).setName("Zotero base URL").setDesc("Local Zotero API base URL, e.g. http://127.0.0.1:23119/api").addText(e=>e.setPlaceholder("http://127.0.0.1:23119/api").setValue(this.plugin.settings.zoteroBaseUrl).onChange(async t=>{this.plugin.settings.zoteroBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Zotero user ID").setDesc("Use 0 for local library. You can also enter users/<id> or groups/<id>.").addText(e=>e.setPlaceholder("123456").setValue(this.plugin.settings.zoteroUserId).onChange(async t=>{this.plugin.settings.zoteroUserId=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Python path").setDesc("Path to python3").addText(e=>e.setPlaceholder("python3").setValue(this.plugin.settings.pythonPath).onChange(async t=>{this.plugin.settings.pythonPath=t.trim()||"python3",await this.plugin.saveSettings()})),new f.Setting(p).setName("Copy PDFs into vault").setDesc("Disable to use Zotero storage paths directly.").addToggle(e=>e.setValue(this.plugin.settings.copyPdfToVault).onChange(async t=>{this.plugin.settings.copyPdfToVault=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("Frontmatter template").setDesc("Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}, {{item_json}}").addTextArea(e=>{e.inputEl.rows=8,e.setValue(this.plugin.settings.frontmatterTemplate).onChange(async t=>{this.plugin.settings.frontmatterTemplate=t,await this.plugin.saveSettings()})}),new f.Setting(p).setName("Docker path").setDesc("CLI path for Docker (used to start Redis Stack).").addText(e=>e.setPlaceholder("docker").setValue(this.plugin.settings.dockerPath).onChange(async t=>{this.plugin.settings.dockerPath=t.trim()||"docker",await this.plugin.saveSettings()})),p.createEl("h3",{text:"Output folders (vault-relative)"}),new f.Setting(p).setName("PDF folder").addText(e=>e.setPlaceholder("zotero/pdfs").setValue(this.plugin.settings.outputPdfDir).onChange(async t=>{this.plugin.settings.outputPdfDir=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Notes folder").addText(e=>e.setPlaceholder("zotero/notes").setValue(this.plugin.settings.outputNoteDir).onChange(async t=>{this.plugin.settings.outputNoteDir=t.trim(),await this.plugin.saveSettings()})),p.createEl("h3",{text:"Redis Stack"}),new f.Setting(p).setName("Redis URL").addText(e=>e.setPlaceholder("redis://127.0.0.1:6379").setValue(this.plugin.settings.redisUrl).onChange(async t=>{this.plugin.settings.redisUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Index name").addText(e=>e.setPlaceholder("idx:zotero").setValue(this.plugin.settings.redisIndex).onChange(async t=>{this.plugin.settings.redisIndex=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Key prefix").addText(e=>e.setPlaceholder("zotero:chunk:").setValue(this.plugin.settings.redisPrefix).onChange(async t=>{this.plugin.settings.redisPrefix=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Auto-start Redis Stack (Docker Compose)").setDesc("Requires Docker Desktop running and your vault path shared with Docker.").addToggle(e=>e.setValue(this.plugin.settings.autoStartRedis).onChange(async t=>{this.plugin.settings.autoStartRedis=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("Start Redis Stack now").setDesc("Restarts Docker Compose with the vault data directory.").addButton(e=>e.setButtonText("Start").onClick(async()=>{await this.plugin.startRedisStack()})),p.createEl("h3",{text:"Embeddings (LM Studio)"}),new f.Setting(p).setName("Embeddings base URL").addText(e=>e.setPlaceholder("http://localhost:1234/v1").setValue(this.plugin.settings.embedBaseUrl).onChange(async t=>{this.plugin.settings.embedBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Embeddings API key").addText(e=>e.setPlaceholder("lm-studio").setValue(this.plugin.settings.embedApiKey).onChange(async t=>{this.plugin.settings.embedApiKey=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Embeddings model").addText(e=>e.setPlaceholder("google/embedding-gemma-300m").setValue(this.plugin.settings.embedModel).onChange(async t=>{this.plugin.settings.embedModel=t.trim(),await this.plugin.saveSettings()})),p.createEl("h3",{text:"Chat LLM"}),new f.Setting(p).setName("Chat base URL").setDesc("OpenAI-compatible chat endpoint base URL").addText(e=>e.setPlaceholder("http://localhost:1234/v1").setValue(this.plugin.settings.chatBaseUrl).onChange(async t=>{this.plugin.settings.chatBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Chat API key").addText(e=>e.setPlaceholder("lm-studio").setValue(this.plugin.settings.chatApiKey).onChange(async t=>{this.plugin.settings.chatApiKey=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Chat model").addText(e=>e.setPlaceholder("meta-llama/llama-3.1-405b-instruct").setValue(this.plugin.settings.chatModel).onChange(async t=>{this.plugin.settings.chatModel=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("Temperature").addText(e=>e.setPlaceholder("0.2").setValue(String(this.plugin.settings.chatTemperature)).onChange(async t=>{let n=Number.parseFloat(t);this.plugin.settings.chatTemperature=Number.isFinite(n)?n:.2,await this.plugin.saveSettings()})),new f.Setting(p).setName("Chat panel location").setDesc("Where to open the chat view by default.").addDropdown(e=>e.addOption("right","Right sidebar").addOption("main","Main window").setValue(this.plugin.settings.chatPaneLocation).onChange(async t=>{this.plugin.settings.chatPaneLocation=t,await this.plugin.saveSettings()})),p.createEl("h3",{text:"Docling"}),new f.Setting(p).setName("OCR mode").setDesc("auto: skip OCR when text is readable; force if bad: OCR only when text looks poor; force: always OCR.").addDropdown(e=>e.addOption("auto","auto").addOption("force_low_quality","force if quality is bad").addOption("force","force").setValue(this.plugin.settings.ocrMode).onChange(async t=>{this.plugin.settings.ocrMode=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("Text quality threshold").setDesc("Lower values are stricter; below this threshold the text is treated as low quality.").addSlider(e=>{e.setLimits(0,1,.05).setValue(this.plugin.settings.ocrQualityThreshold).setDynamicTooltip().onChange(async t=>{this.plugin.settings.ocrQualityThreshold=t,await this.plugin.saveSettings()})}),new f.Setting(p).setName("Chunking").setDesc("page or section").addDropdown(e=>e.addOption("page","page").addOption("section","section").setValue(this.plugin.settings.chunkingMode).onChange(async t=>{this.plugin.settings.chunkingMode=t,await this.plugin.saveSettings()})),p.createEl("h4",{text:"OCR cleanup (optional)"}),new f.Setting(p).setName("LLM cleanup for low-quality chunks").setDesc("Optional OpenAI-compatible cleanup for poor OCR. Can be slow/costly.").addToggle(e=>e.setValue(this.plugin.settings.enableLlmCleanup).onChange(async t=>{this.plugin.settings.enableLlmCleanup=t,await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup base URL").setDesc("OpenAI-compatible endpoint, e.g. http://127.0.0.1:1234/v1").addText(e=>e.setPlaceholder("http://127.0.0.1:1234/v1").setValue(this.plugin.settings.llmCleanupBaseUrl).onChange(async t=>{this.plugin.settings.llmCleanupBaseUrl=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup API key").setDesc("Optional API key for the cleanup endpoint.").addText(e=>e.setPlaceholder("sk-...").setValue(this.plugin.settings.llmCleanupApiKey).onChange(async t=>{this.plugin.settings.llmCleanupApiKey=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup model").setDesc("Model to use for cleanup.").addText(e=>e.setPlaceholder("openai/gpt-oss-20b").setValue(this.plugin.settings.llmCleanupModel).onChange(async t=>{this.plugin.settings.llmCleanupModel=t.trim(),await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup temperature").setDesc("Lower is more conservative.").addText(e=>e.setPlaceholder("0.0").setValue(String(this.plugin.settings.llmCleanupTemperature)).onChange(async t=>{let n=Number.parseFloat(t);this.plugin.settings.llmCleanupTemperature=Number.isFinite(n)?n:0,await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup min quality").setDesc("Only run cleanup when chunk quality is below this threshold (0-1).").addText(e=>e.setPlaceholder("0.35").setValue(String(this.plugin.settings.llmCleanupMinQuality)).onChange(async t=>{let n=Number.parseFloat(t);this.plugin.settings.llmCleanupMinQuality=Number.isFinite(n)?n:.35,await this.plugin.saveSettings()})),new f.Setting(p).setName("LLM cleanup max chars").setDesc("Skip cleanup for chunks longer than this limit.").addText(e=>e.setPlaceholder("2000").setValue(String(this.plugin.settings.llmCleanupMaxChars)).onChange(async t=>{let n=Number.parseInt(t,10);this.plugin.settings.llmCleanupMaxChars=Number.isFinite(n)?n:2e3,await this.plugin.saveSettings()}))}};var G={"docling_extract.py":`#!/usr/bin/env python3
+# zotero-redisearch-rag tool version: 0.1.6
 import argparse
 import json
 import logging
 import os
 import re
+import statistics
+import shutil
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -22,7 +24,7 @@ LOGGER = logging.getLogger("docling_extract")
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\n")
+    sys.stderr.write(message + "\\n")
 
 
 @dataclass
@@ -38,7 +40,33 @@ class DoclingProcessingConfig:
     quality_alpha_ratio_threshold: float = 0.6
     quality_suspicious_token_threshold: float = 0.25
     quality_min_avg_chars_per_page: int = 80
+    quality_confidence_threshold: float = 0.5
+    quality_use_wordfreq: bool = True
+    quality_wordfreq_min_zipf: float = 3.0
+    column_detect_enable: bool = True
+    column_detect_dpi: int = 150
+    column_detect_max_pages: int = 3
+    column_detect_crop_top_ratio: float = 0.08
+    column_detect_crop_bottom_ratio: float = 0.08
+    column_detect_threshold_std_mult: float = 1.0
+    column_detect_threshold_min: int = 120
+    column_detect_threshold_max: int = 210
+    column_detect_text_percentile: float = 0.7
+    column_detect_min_text_density: float = 0.02
+    column_detect_gap_threshold_ratio: float = 0.2
+    column_detect_min_gap_density: float = 0.01
+    column_detect_min_gap_ratio: float = 0.03
+    column_detect_min_pages_ratio: float = 0.4
+    column_detect_smooth_window: int = 5
+    page_range_sample_tokens: int = 200
+    page_range_min_overlap: float = 0.02
+    page_range_min_hits: int = 5
+    page_range_top_k: int = 5
+    page_range_peak_ratio: float = 0.5
+    page_range_cluster_gap: int = 1
+    page_range_max_span_ratio: float = 0.7
     per_page_ocr_on_low_quality: bool = True
+    force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
     enable_dictionary_correction: bool = False
     dictionary_path: Optional[str] = None
@@ -75,6 +103,13 @@ class TextQuality:
     alpha_ratio: float
     suspicious_token_ratio: float
     confidence_proxy: float
+    dictionary_hit_ratio: Optional[float] = None
+
+@dataclass
+class ColumnLayoutDetection:
+    detected: bool
+    page_ratio: float
+    reason: str
 
 @dataclass
 class DoclingConversionResult:
@@ -84,32 +119,75 @@ class DoclingConversionResult:
 
 
 def normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\\s+", " ", text).strip()
 
 
 def normalize_whitespace(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.replace("\\r\\n", "\\n").replace("\\r", "\\n")
+    text = re.sub(r"[ \\t]+", " ", text)
+    text = re.sub(r"\\n{3,}", "\\n\\n", text)
     return text.strip()
 
 
 def dehyphenate_text(text: str) -> str:
-    return re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
+    return re.sub(r"(?<=\\w)-\\s*\\n\\s*(?=\\w)", "", text)
 
 
 def replace_ligatures(text: str) -> str:
     return (
-        text.replace("\ufb01", "fi")
-        .replace("\ufb02", "fl")
-        .replace("\ufb03", "ffi")
-        .replace("\ufb04", "ffl")
+        text.replace("\\ufb01", "fi")
+        .replace("\\ufb02", "fl")
+        .replace("\\ufb03", "ffi")
+        .replace("\\ufb04", "ffl")
     )
 
 
-def estimate_text_quality(pages: Sequence[Dict[str, Any]]) -> TextQuality:
+def select_wordfreq_languages(languages: str) -> List[str]:
+    lang = (languages or "").lower()
+    selected: List[str] = []
+    if any(token in lang for token in ("deu", "ger", "de", "german", "deutsch")):
+        selected.append("de")
+    if any(token in lang for token in ("eng", "en", "english")):
+        selected.append("en")
+    if not selected:
+        selected.append("en")
+    return selected
+
+
+def compute_dictionary_hit_ratio(
+    tokens: Sequence[str],
+    languages: str,
+    min_zipf: float,
+) -> Optional[float]:
+    try:
+        from wordfreq import zipf_frequency
+    except Exception:
+        return None
+
+    if not tokens:
+        return None
+    lang_codes = select_wordfreq_languages(languages)
+    hits = 0
+    total = 0
+    for token in tokens:
+        lower = token.lower()
+        if len(lower) < 2:
+            continue
+        total += 1
+        if any(zipf_frequency(lower, lang) >= min_zipf for lang in lang_codes):
+            hits += 1
+    if not total:
+        return None
+    return hits / total
+
+
+def estimate_text_quality(
+    pages: Sequence[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+    languages: Optional[str] = None,
+) -> TextQuality:
     if not pages:
-        return TextQuality(0.0, 0.0, 1.0, 0.0)
+        return TextQuality(0.0, 0.0, 1.0, 0.0, None)
 
     texts = [str(page.get("text", "")) for page in pages]
     total_chars = sum(len(text) for text in texts)
@@ -120,13 +198,23 @@ def estimate_text_quality(pages: Sequence[Dict[str, Any]]) -> TextQuality:
     suspicious_tokens = [
         token for token in tokens
         if (sum(char.isdigit() for char in token) / max(1, len(token))) > 0.5
-        or re.search(r"(.)\1\1", token)
+        or re.search(r"(.)\\1\\1", token)
     ]
     suspicious_ratio = len(suspicious_tokens) / max(1, len(tokens))
 
     avg_chars = total_chars / max(1, len(pages))
-    confidence = max(0.0, min(1.0, alpha_ratio * (1.0 - suspicious_ratio)))
-    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence)
+    dictionary_hit_ratio = None
+    if config and config.quality_use_wordfreq and languages:
+        dictionary_hit_ratio = compute_dictionary_hit_ratio(
+            tokens,
+            languages,
+            config.quality_wordfreq_min_zipf,
+        )
+    confidence = alpha_ratio * (1.0 - suspicious_ratio)
+    if dictionary_hit_ratio is not None:
+        confidence *= 0.4 + (0.6 * dictionary_hit_ratio)
+    confidence = max(0.0, min(1.0, confidence))
+    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, dictionary_hit_ratio)
 
 
 def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: DoclingProcessingConfig) -> bool:
@@ -142,11 +230,19 @@ def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: Doclin
 
 
 def is_low_quality(quality: TextQuality, config: DoclingProcessingConfig) -> bool:
+    if quality.confidence_proxy < config.quality_confidence_threshold:
+        return True
     return (
         quality.avg_chars_per_page < config.quality_min_avg_chars_per_page
         or quality.alpha_ratio < config.quality_alpha_ratio_threshold
         or quality.suspicious_token_ratio > config.quality_suspicious_token_threshold
     )
+
+
+def should_rasterize_text_layer(has_text_layer: bool, low_quality: bool, config: DoclingProcessingConfig) -> bool:
+    if config.ocr_mode == "force":
+        return True
+    return bool(has_text_layer and low_quality and config.force_ocr_on_low_quality_text)
 
 
 def decide_per_page_ocr(
@@ -180,7 +276,7 @@ def select_language_set(
             return config.default_lang_english
         return hint
 
-    if re.search(r"(\bde\b|_de\b|-de\b|deu|german|deutsch)", name):
+    if re.search(r"(\\bde\\b|_de\\b|-de\\b|deu|german|deutsch)", name):
         return config.default_lang_german
     return config.default_lang_english
 
@@ -201,6 +297,7 @@ def decide_ocr_route(
     config: DoclingProcessingConfig,
     languages: str,
 ) -> OcrRouteDecision:
+    low_quality = is_low_quality(quality, config)
     if config.ocr_mode == "off":
         return OcrRouteDecision(
             False,
@@ -215,7 +312,7 @@ def decide_ocr_route(
     if config.ocr_mode == "force":
         ocr_used = True
         route_reason = "OCR forced by config"
-    elif has_text_layer:
+    elif has_text_layer and not (config.force_ocr_on_low_quality_text and low_quality):
         return OcrRouteDecision(
             False,
             "none",
@@ -227,7 +324,10 @@ def decide_ocr_route(
         )
     else:
         ocr_used = True
-        route_reason = "No usable text layer detected"
+        if has_text_layer:
+            route_reason = "Text layer detected but low quality"
+        else:
+            route_reason = "No usable text layer detected"
 
     engine = "docling"
     use_external = False
@@ -239,7 +339,6 @@ def decide_ocr_route(
             engine = config.fallback_ocr_engine
             use_external = True
 
-    low_quality = is_low_quality(quality, config)
     per_page = False
     per_page_reason = "Per-page OCR not applicable"
     if use_external:
@@ -335,11 +434,11 @@ def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str])
 
     dictionary = {word.lower() for word in wordlist}
     replacements = {
-        "ueber": "\u00fcber",
-        "fuer": "f\u00fcr",
-        "koennen": "k\u00f6nnen",
-        "muessen": "m\u00fcssen",
-        "haeufig": "h\u00e4ufig",
+        "ueber": "\\u00fcber",
+        "fuer": "f\\u00fcr",
+        "koennen": "k\\u00f6nnen",
+        "muessen": "m\\u00fcssen",
+        "haeufig": "h\\u00e4ufig",
     }
 
     def replace_match(match: re.Match) -> str:
@@ -353,7 +452,7 @@ def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str])
                 return replacement.capitalize()
             return replacement
         if dictionary:
-            for ascii_seq, umlaut in (("ae", "\u00e4"), ("oe", "\u00f6"), ("ue", "\u00fc")):
+            for ascii_seq, umlaut in (("ae", "\\u00e4"), ("oe", "\\u00f6"), ("ue", "\\u00fc")):
                 if ascii_seq in lower:
                     candidate = lower.replace(ascii_seq, umlaut)
                     if candidate in dictionary:
@@ -370,7 +469,8 @@ def should_apply_llm_correction(text: str, config: DoclingProcessingConfig) -> b
         return False
     if config.llm_correction_max_chars and len(text) > config.llm_correction_max_chars:
         return False
-    quality = estimate_text_quality([{"text": text}])
+    languages = select_language_set(config.language_hint, "", config)
+    quality = estimate_text_quality([{"text": text}], config, languages)
     return quality.confidence_proxy < config.llm_correction_min_quality
 
 
@@ -527,7 +627,7 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
         if current_title or current_lines:
             sections.append({
                 "title": current_title.strip(),
-                "text": "\n".join(current_lines).strip(),
+                "text": "\\n".join(current_lines).strip(),
             })
         current_title = ""
         current_lines = []
@@ -543,7 +643,104 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     return sections
 
 
-def find_page_range(section_text: str, pages: List[Dict[str, Any]]) -> Tuple[int, int]:
+_PAGE_RANGE_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "over",
+    "under", "after", "before", "were", "was", "are", "is", "its", "their",
+    "then", "than", "than", "which", "when", "where", "have", "has", "had",
+    "into", "onto", "upon", "your", "yours", "they", "them", "these", "those",
+    "will", "would", "could", "should", "about", "there", "here", "while",
+    "what", "why", "how", "not", "but", "you", "your", "our", "ours", "his",
+    "her", "she", "him", "she", "him", "its", "also", "such", "been", "being",
+    "out", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "more", "most", "some", "many", "few", "each", "per",
+}
+
+
+def tokenize_for_page_range(text: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z0-9]{3,}", text.lower())
+    return [token for token in tokens if token not in _PAGE_RANGE_STOPWORDS]
+
+
+def sample_tokens(tokens: Sequence[str], max_tokens: int) -> List[str]:
+    if max_tokens <= 0 or len(tokens) <= max_tokens:
+        return list(tokens)
+    step = max(1, len(tokens) // max_tokens)
+    return list(tokens[::step])
+
+
+def compute_page_overlap(
+    section_text: str,
+    pages: List[Dict[str, Any]],
+    config: DoclingProcessingConfig,
+) -> List[Tuple[float, int, int]]:
+    section_tokens = tokenize_for_page_range(section_text)
+    if not section_tokens:
+        return []
+    sample = sample_tokens(section_tokens, config.page_range_sample_tokens)
+    sample_set = set(sample)
+    total = len(sample_set)
+    results: List[Tuple[float, int, int]] = []
+    for page in pages:
+        page_text = str(page.get("text", ""))
+        page_tokens = set(tokenize_for_page_range(page_text))
+        hits = len(sample_set & page_tokens)
+        ratio = hits / max(1, total)
+        results.append((ratio, hits, int(page.get("page_num", 0))))
+    return results
+
+
+def select_overlap_cluster(
+    overlap_scores: Sequence[Tuple[float, int, int]],
+    config: DoclingProcessingConfig,
+) -> List[int]:
+    if not overlap_scores:
+        return []
+    max_ratio = max(score[0] for score in overlap_scores)
+    max_hits = max(score[1] for score in overlap_scores)
+    ratio_cutoff = max(config.page_range_min_overlap, max_ratio * config.page_range_peak_ratio)
+    hits_cutoff = max(config.page_range_min_hits, int(max_hits * config.page_range_peak_ratio))
+    candidates = [
+        (ratio, hits, page_num)
+        for ratio, hits, page_num in overlap_scores
+        if ratio >= ratio_cutoff or hits >= hits_cutoff
+    ]
+    if not candidates:
+        candidates = sorted(overlap_scores, reverse=True)[: config.page_range_top_k]
+
+    candidates.sort(key=lambda item: item[2])
+    clusters: List[List[Tuple[float, int, int]]] = []
+    current: List[Tuple[float, int, int]] = []
+    for entry in candidates:
+        if not current:
+            current.append(entry)
+            continue
+        if entry[2] - current[-1][2] <= config.page_range_cluster_gap:
+            current.append(entry)
+        else:
+            clusters.append(current)
+            current = [entry]
+    if current:
+        clusters.append(current)
+
+    def cluster_score(cluster: Sequence[Tuple[float, int, int]]) -> Tuple[float, float]:
+        ratios = [item[0] for item in cluster]
+        return (sum(ratios), max(ratios))
+
+    best_cluster = max(clusters, key=cluster_score)
+    page_nums = [item[2] for item in best_cluster]
+    if len(page_nums) > 1:
+        span_ratio = (max(page_nums) - min(page_nums) + 1) / max(1, len(overlap_scores))
+        if span_ratio > config.page_range_max_span_ratio:
+            trimmed = sorted(best_cluster, reverse=True)[: config.page_range_top_k]
+            page_nums = [item[2] for item in trimmed]
+    return page_nums
+
+
+def find_page_range(
+    section_text: str,
+    pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+) -> Tuple[int, int]:
     if not pages:
         return 0, 0
 
@@ -568,6 +765,16 @@ def find_page_range(section_text: str, pages: List[Dict[str, Any]]) -> Tuple[int
         if snippet_end and snippet_end in page_clean:
             page_end = page.get("page_num", 0)
             break
+
+    if page_start == 0 or page_end == 0:
+        config = config or DoclingProcessingConfig()
+        overlap_scores = compute_page_overlap(cleaned, pages, config)
+        page_nums = select_overlap_cluster(overlap_scores, config)
+        if page_nums:
+            if page_start == 0:
+                page_start = min(page_nums)
+            if page_end == 0:
+                page_end = max(page_nums)
 
     if page_start == 0:
         page_start = pages[0].get("page_num", 0)
@@ -642,10 +849,186 @@ def build_converter(config: DoclingProcessingConfig, decision: OcrRouteDecision)
     return DocumentConverter(format_options=format_options)
 
 
+def find_poppler_path() -> Optional[str]:
+    env_path = os.environ.get("POPPLER_PATH")
+    if env_path and os.path.isfile(os.path.join(env_path, "pdftoppm")):
+        return env_path
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm:
+        return os.path.dirname(pdftoppm)
+    for candidate in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+        if os.path.isfile(os.path.join(candidate, "pdftoppm")):
+            return candidate
+    return None
+
+
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
     from pdf2image import convert_from_path
 
+    poppler_path = find_poppler_path()
+    if poppler_path:
+        if shutil.which("pdftoppm") is None:
+            LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+        return convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
     return convert_from_path(pdf_path, dpi=dpi)
+
+
+def render_pdf_pages_sample(pdf_path: str, dpi: int, max_pages: int) -> List[Any]:
+    from pdf2image import convert_from_path
+
+    if max_pages <= 0:
+        return []
+    poppler_path = find_poppler_path()
+    kwargs = {"dpi": dpi, "first_page": 1, "last_page": max_pages}
+    if poppler_path:
+        if shutil.which("pdftoppm") is None:
+            LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+        kwargs["poppler_path"] = poppler_path
+    return convert_from_path(pdf_path, **kwargs)
+
+
+def compute_column_density(
+    image: Any,
+    config: DoclingProcessingConfig,
+    target_width: int = 300,
+) -> List[float]:
+    gray = image.convert("L")
+    width, height = gray.size
+    if width > target_width:
+        scale = target_width / max(1, width)
+        gray = gray.resize((target_width, max(1, int(height * scale))))
+    width, height = gray.size
+    crop_top = int(height * config.column_detect_crop_top_ratio)
+    crop_bottom = int(height * config.column_detect_crop_bottom_ratio)
+    if crop_top + crop_bottom < height - 1:
+        gray = gray.crop((0, crop_top, width, height - crop_bottom))
+
+    try:
+        import numpy as np
+    except Exception:
+        pixels = list(gray.getdata())
+        w, h = gray.size
+        if w == 0 or h == 0:
+            return []
+        sorted_pixels = sorted(pixels)
+        median = sorted_pixels[len(sorted_pixels) // 2]
+        mean = sum(pixels) / max(1, len(pixels))
+        variance = sum((value - mean) ** 2 for value in pixels) / max(1, len(pixels))
+        std = variance ** 0.5
+        threshold = median - (std * config.column_detect_threshold_std_mult)
+        threshold = min(threshold, config.column_detect_threshold_max)
+        threshold = max(threshold, config.column_detect_threshold_min)
+        densities = [0] * w
+        for y in range(h):
+            row = pixels[y * w:(y + 1) * w]
+            for x, value in enumerate(row):
+                if value < threshold:
+                    densities[x] += 1
+        return [count / h for count in densities]
+
+    arr = np.asarray(gray)
+    if arr.size == 0:
+        return []
+    median = float(np.median(arr))
+    std = float(arr.std())
+    threshold = median - (std * config.column_detect_threshold_std_mult)
+    threshold = min(threshold, config.column_detect_threshold_max)
+    threshold = max(threshold, config.column_detect_threshold_min)
+    mask = arr < threshold
+    return mask.mean(axis=0).tolist()
+
+
+def smooth_density(density: Sequence[float], window: int) -> List[float]:
+    if window <= 1 or not density:
+        return list(density)
+    size = max(1, int(window))
+    half = size // 2
+    smoothed: List[float] = []
+    for idx in range(len(density)):
+        start = max(0, idx - half)
+        end = min(len(density), idx + half + 1)
+        smoothed.append(sum(density[start:end]) / max(1, end - start))
+    return smoothed
+
+
+def density_percentile(density: Sequence[float], percentile: float) -> float:
+    if not density:
+        return 0.0
+    clamped = max(0.0, min(1.0, percentile))
+    sorted_vals = sorted(density)
+    idx = int(round(clamped * (len(sorted_vals) - 1)))
+    return sorted_vals[idx]
+
+
+def count_column_gaps(
+    density: Sequence[float],
+    config: DoclingProcessingConfig,
+) -> int:
+    if not density:
+        return 0
+    total = len(density)
+    margin = max(1, int(total * 0.05))
+    start = margin
+    end = max(start + 1, total - margin)
+    core = density[start:end]
+    if not core:
+        return 0
+    text_level = density_percentile(core, config.column_detect_text_percentile)
+    if text_level < config.column_detect_min_text_density:
+        return 0
+    threshold = max(config.column_detect_min_gap_density, text_level * config.column_detect_gap_threshold_ratio)
+    min_gap = max(1, int(len(core) * config.column_detect_min_gap_ratio))
+
+    gaps = 0
+    idx = 0
+    while idx < len(core):
+        if core[idx] < threshold:
+            gap_start = idx
+            while idx < len(core) and core[idx] < threshold:
+                idx += 1
+            if idx - gap_start >= min_gap:
+                gaps += 1
+        else:
+            idx += 1
+    return gaps
+
+
+def detect_multicolumn_layout(
+    images: Sequence[Any],
+    config: DoclingProcessingConfig,
+) -> ColumnLayoutDetection:
+    if not images:
+        return ColumnLayoutDetection(False, 0.0, "No pages available")
+    sample = list(images[: config.column_detect_max_pages])
+    if not sample:
+        return ColumnLayoutDetection(False, 0.0, "No sample pages")
+
+    hits = 0
+    for image in sample:
+        density = compute_column_density(image, config)
+        density = smooth_density(density, config.column_detect_smooth_window)
+        gaps = count_column_gaps(density, config)
+        if gaps >= 1:
+            hits += 1
+    ratio = hits / max(1, len(sample))
+    detected = ratio >= config.column_detect_min_pages_ratio
+    reason = f"{hits}/{len(sample)} pages show column gutters"
+    return ColumnLayoutDetection(detected, ratio, reason)
+
+
+def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
+    from tempfile import NamedTemporaryFile
+
+    images = render_pdf_pages(pdf_path, dpi)
+    if not images:
+        raise RuntimeError("Failed to render PDF pages for rasterization.")
+
+    temp_file = NamedTemporaryFile(delete=False, suffix=".pdf")
+    temp_file.close()
+    first = images[0]
+    rest = images[1:]
+    first.save(temp_file.name, format="PDF", save_all=True, append_images=rest)
+    return temp_file.name
 
 
 def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -675,7 +1058,7 @@ def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[D
                             confidences.append(float(text_part[1]))
                     else:
                         lines.append(str(text_part))
-        pages.append({"page_num": idx, "text": "\n".join(lines)})
+        pages.append({"page_num": idx, "text": "\\n".join(lines)})
 
     avg_conf = sum(confidences) / len(confidences) if confidences else None
     return pages, {"ocr_confidence_avg": avg_conf}
@@ -705,20 +1088,74 @@ def run_external_ocr_pages(
     return [], {}
 
 
+def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict[str, Any]:
+    analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
+    has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
+    languages = select_language_set(config.language_hint, pdf_path, config)
+    quality = estimate_text_quality(analysis_pages, config, languages)
+    low_quality = is_low_quality(quality, config)
+    return {
+        "text_layer_detected": has_text_layer,
+        "text_layer_low_quality": has_text_layer and low_quality,
+        "avg_chars_per_page": quality.avg_chars_per_page,
+        "alpha_ratio": quality.alpha_ratio,
+        "suspicious_token_ratio": quality.suspicious_token_ratio,
+        "confidence_proxy": quality.confidence_proxy,
+        "dictionary_hit_ratio": quality.dictionary_hit_ratio,
+    }
+
+
 def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> DoclingConversionResult:
     analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
-    quality = estimate_text_quality(analysis_pages)
     languages = select_language_set(config.language_hint, pdf_path, config)
+    quality = estimate_text_quality(analysis_pages, config, languages)
+    low_quality = is_low_quality(quality, config)
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
+    rasterized_source = False
+    rasterized_pdf_path = ""
+    rasterize_error: Optional[str] = None
+    column_layout: Optional[ColumnLayoutDetection] = None
+    if should_rasterize_text_layer(has_text_layer, low_quality, config):
+        try:
+            rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
+            rasterized_source = True
+            LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
+        except Exception as exc:
+            rasterize_error = str(exc)
+            LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
+    if rasterized_source:
+        decision.per_page_ocr = False
+        decision.per_page_reason = "Rasterized PDF for Docling OCR"
 
+    if config.column_detect_enable and decision.ocr_used and (rasterized_source or not has_text_layer):
+        try:
+            sample_images = render_pdf_pages_sample(
+                pdf_path,
+                config.column_detect_dpi,
+                config.column_detect_max_pages,
+            )
+            column_layout = detect_multicolumn_layout(sample_images, config)
+            LOGGER.info(
+                "Column layout detection: %s (%s)",
+                column_layout.detected,
+                column_layout.reason,
+            )
+            if column_layout.detected and decision.use_external_ocr and decision.per_page_ocr:
+                decision.per_page_ocr = False
+                decision.per_page_reason = "Columns detected; keep Docling layout"
+        except Exception as exc:
+            LOGGER.warning("Column layout detection failed: %s", exc)
+
+    dict_ratio = "n/a" if quality.dictionary_hit_ratio is None else f"{quality.dictionary_hit_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
         quality.suspicious_token_ratio,
+        dict_ratio,
     )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
@@ -736,7 +1173,8 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         LOGGER.info("External OCR unavailable; relying on Docling OCR.")
 
     converter = build_converter(config, decision)
-    result = converter.convert(pdf_path)
+    docling_input = rasterized_pdf_path or pdf_path
+    result = converter.convert(docling_input)
     doc = result.document if hasattr(result, "document") else result
     markdown = export_markdown(doc)
     pages = extract_pages(doc)
@@ -746,15 +1184,20 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
             pages = fallback_pages
 
     ocr_stats: Dict[str, Any] = {}
-    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr:
+    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and not rasterized_source:
         try:
             ocr_pages, ocr_stats = run_external_ocr_pages(pdf_path, decision.ocr_engine, languages, config)
             if ocr_pages:
                 pages = ocr_pages
                 if config.postprocess_markdown and not markdown.strip():
-                    markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
+                    markdown = "\\n\\n".join(page.get("text", "") for page in ocr_pages)
         except Exception as exc:
             LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
+    if rasterized_source and rasterized_pdf_path:
+        try:
+            os.unlink(rasterized_pdf_path)
+        except Exception:
+            pass
 
     metadata = {
         "ocr_used": decision.ocr_used,
@@ -763,10 +1206,18 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         "route_reason": decision.route_reason,
         "per_page_reason": decision.per_page_reason,
         "text_layer_detected": has_text_layer,
+        "text_layer_low_quality": has_text_layer and low_quality,
+        "rasterized_source_pdf": rasterized_source,
+        "rasterize_failed": bool(rasterize_error),
+        "rasterize_error": rasterize_error,
+        "column_layout_detected": column_layout.detected if column_layout else None,
+        "column_layout_ratio": column_layout.page_ratio if column_layout else None,
+        "column_layout_reason": column_layout.reason if column_layout else None,
         "avg_chars_per_page": quality.avg_chars_per_page,
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
+        "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
     metadata.update(ocr_stats)
@@ -803,6 +1254,7 @@ def build_chunks_section(
     doc_id: str,
     markdown: str,
     pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str], str]] = None,
 ) -> List[Dict[str, Any]]:
     sections = split_markdown_sections(markdown)
@@ -820,7 +1272,7 @@ def build_chunks_section(
         cleaned = normalize_text(text)
         if not cleaned:
             continue
-        page_start, page_end = find_page_range(cleaned, pages)
+        page_start, page_end = find_page_range(cleaned, pages, config)
         base_id = slugify(title) or f"section-{idx}"
         if base_id in seen_ids:
             seen_ids[base_id] += 1
@@ -842,11 +1294,22 @@ def build_chunks_section(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract PDF content with Docling and produce chunks.")
     parser.add_argument("--pdf", required=True, help="Path to PDF")
-    parser.add_argument("--doc-id", required=True, help="Document identifier")
-    parser.add_argument("--out-json", required=True, help="Output JSON path")
-    parser.add_argument("--out-md", required=True, help="Output markdown path")
+    parser.add_argument("--doc-id", help="Document identifier")
+    parser.add_argument("--out-json", help="Output JSON path")
+    parser.add_argument("--out-md", help="Output markdown path")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
+    parser.add_argument(
+        "--force-ocr-low-quality",
+        action="store_true",
+        help="Force OCR when text layer appears low quality",
+    )
+    parser.add_argument(
+        "--quality-threshold",
+        type=float,
+        help="Confidence threshold for treating text as low quality (0-1)",
+    )
+    parser.add_argument("--quality-only", action="store_true", help="Output text-layer quality JSON and exit")
     parser.add_argument("--enable-llm-cleanup", action="store_true", help="Enable LLM cleanup for low-quality chunks")
     parser.add_argument("--llm-cleanup-base-url", help="OpenAI-compatible base URL for LLM cleanup")
     parser.add_argument("--llm-cleanup-api-key", help="API key for LLM cleanup")
@@ -862,6 +1325,20 @@ def main() -> int:
         eprint(f"PDF not found: {args.pdf}")
         return 2
 
+    if args.quality_only:
+        config = DoclingProcessingConfig(ocr_mode=args.ocr)
+        if args.force_ocr_low_quality:
+            config.force_ocr_on_low_quality_text = True
+        if args.quality_threshold is not None:
+            config.quality_confidence_threshold = args.quality_threshold
+        report = build_quality_report(args.pdf, config)
+        print(json.dumps(report))
+        return 0
+
+    if not args.doc_id or not args.out_json or not args.out_md:
+        eprint("Missing required arguments: --doc-id, --out-json, --out-md")
+        return 2
+
     try:
         out_json_dir = os.path.dirname(args.out_json)
         out_md_dir = os.path.dirname(args.out_md)
@@ -874,6 +1351,10 @@ def main() -> int:
         return 2
 
     config = DoclingProcessingConfig(ocr_mode=args.ocr)
+    if args.force_ocr_low_quality:
+        config.force_ocr_on_low_quality_text = True
+    if args.quality_threshold is not None:
+        config.quality_confidence_threshold = args.quality_threshold
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
     if args.llm_cleanup_base_url:
@@ -925,7 +1406,13 @@ def main() -> int:
             ]
 
         if args.chunking == "section":
-            chunks = build_chunks_section(args.doc_id, markdown, pages, postprocess=postprocess_fn)
+            chunks = build_chunks_section(
+                args.doc_id,
+                markdown,
+                pages,
+                config=config,
+                postprocess=postprocess_fn,
+            )
         else:
             chunks = build_chunks_page(args.doc_id, pages)
     except Exception as exc:
@@ -953,8 +1440,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-`,"index_redisearch.py":String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.5
+`,"index_redisearch.py":`#!/usr/bin/env python3
+# zotero-redisearch-rag tool version: 0.1.6
 import argparse
 import json
 import math
@@ -968,7 +1455,7 @@ import requests
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\n")
+    sys.stderr.write(message + "\\n")
 
 
 def normalize_vector(values: List[float]) -> List[float]:
@@ -1142,8 +1629,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-`,"rag_query_redisearch.py":String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.5
+`,"rag_query_redisearch.py":`#!/usr/bin/env python3
+# zotero-redisearch-rag tool version: 0.1.6
 import argparse
 import json
 import math
@@ -1156,7 +1643,7 @@ import requests
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\n")
+    sys.stderr.write(message + "\\n")
 
 
 def normalize_vector(values: List[float]) -> List[float]:
@@ -1351,10 +1838,10 @@ def build_context(retrieved: List[Dict[str, Any]]) -> str:
         pages = f"{page_start}-{page_end}"
         block = (
             f"<Document source='{source_pdf}' pages='{pages}' doc_id='{doc_id}' "
-            f"chunk_id='{chunk_id}' score='{score}'>\n{text}\n</Document>"
+            f"chunk_id='{chunk_id}' score='{score}'>\\n{text}\\n</Document>"
         )
         blocks.append(block)
-    return "\n\n".join(blocks)
+    return "\\n\\n".join(blocks)
 
 
 def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1443,7 +1930,7 @@ def main() -> int:
         "Use ONLY the provided context. If insufficient, say you do not know. "
         "Provide citations by doc_id and pages."
     )
-    user_prompt = f"Question: {args.query}\n\nContext:\n{context}"
+    user_prompt = f"Question: {args.query}\\n\\nContext:\\n{context}"
 
     citations = build_citations(retrieved)
 
@@ -1501,8 +1988,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-`,"batch_index_pyzotero.py":String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.5
+`,"batch_index_pyzotero.py":`#!/usr/bin/env python3
+# zotero-redisearch-rag tool version: 0.1.6
 import argparse
 import json
 import os
@@ -1516,7 +2003,7 @@ from tqdm import tqdm
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\n")
+    sys.stderr.write(message + "\\n")
 
 
 def ensure_dir(path: Path) -> None:
@@ -1705,7 +2192,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-`,"ocr_wordlist.txt":String.raw`# zotero-redisearch-rag tool version: 0.1.5
+`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.1.6
 # Minimal English/German wordlist for optional OCR correction
 abstract
 analysis
@@ -1772,31 +2259,33 @@ abbildung
 tabelle
 methode
 analyse
-`,"docker-compose.yml":String.raw`# zotero-redisearch-rag tool version: 0.1.5
+`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.1.6
 services:
   redis-stack:
     image: redis/redis-stack-server:latest
     container_name: redis-stack
-    command: ["redis-stack-server", "/redis-stack.conf"]
+    command: ["redis-stack-server", "/redis-stack.conf", "--dir", "/data"]
+    environment:
+      - REDIS_ARGS=
     ports:
       - "6379:6379"
     volumes:
       - "\${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
       - "./redis-stack.conf:/redis-stack.conf:ro"
-`,"redis-stack.conf":String.raw`# zotero-redisearch-rag tool version: 0.1.5
+`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.1.6
 # Redis Stack persistence config for local RAG index
 appendonly yes
 appendfsync everysec
 
 dir /data
-`};var T=require("obsidian"),F="zotero-redisearch-rag-chat",A=class extends T.ItemView{constructor(e,t){super(e);this.messages=[];this.messageEls=new Map;this.pendingRender=new Map;this.busy=!1;this.plugin=t}getViewType(){return F}getDisplayText(){return"Zotero RAG Chat"}async onOpen(){let{containerEl:e}=this;e.empty(),e.addClass("zrr-chat-view");let t=e.createEl("div",{cls:"zrr-chat-header"});t.createEl("div",{cls:"zrr-chat-title",text:"Zotero RAG Chat"}),this.clearButton=t.createEl("button",{cls:"zrr-chat-clear",text:"Clear"}),this.clearButton.addEventListener("click",()=>this.clearChat()),this.messagesEl=e.createEl("div",{cls:"zrr-chat-messages"});let r=e.createEl("div",{cls:"zrr-chat-input"});this.inputEl=r.createEl("textarea",{cls:"zrr-chat-textarea",attr:{placeholder:"Ask your Zotero library..."}}),this.sendButton=r.createEl("button",{cls:"zrr-chat-send",text:"Send"}),this.sendButton.addEventListener("click",()=>this.handleSend()),this.inputEl.addEventListener("keydown",s=>{s.key==="Enter"&&!s.shiftKey&&(s.preventDefault(),this.handleSend())}),await this.loadHistory(),await this.renderAll()}focusInput(){var e;(e=this.inputEl)==null||e.focus()}async loadHistory(){try{this.messages=await this.plugin.loadChatHistory()}catch(e){console.error(e),this.messages=[]}}async saveHistory(){try{await this.plugin.saveChatHistory(this.messages)}catch(e){console.error(e)}}async renderAll(){this.messagesEl.empty(),this.messageEls.clear();for(let e of this.messages)await this.renderMessage(e);this.scrollToBottom()}async renderMessage(e){let t=this.messagesEl.createEl("div",{cls:`zrr-chat-message zrr-chat-${e.role}`});t.createEl("div",{cls:"zrr-chat-meta"}).setText(e.role==="user"?"You":"Assistant");let s=t.createEl("div",{cls:"zrr-chat-content"}),i=t.createEl("div",{cls:"zrr-chat-citations"});this.messageEls.set(e.id,{wrapper:t,content:s,citations:i}),await this.renderMessageContent(e)}scheduleRender(e){if(this.pendingRender.has(e.id))return;let t=window.setTimeout(async()=>{this.pendingRender.delete(e.id),await this.renderMessageContent(e),this.scrollToBottom()},80);this.pendingRender.set(e.id,t)}async renderMessageContent(e){var r;let t=this.messageEls.get(e.id);t&&(t.content.empty(),t.citations.empty(),await T.MarkdownRenderer.renderMarkdown(e.content||"",t.content,"",this.plugin),await this.renderCitations(t.citations,(r=e.citations)!=null?r:[]))}async renderCitations(e,t){if(e.empty(),!t.length)return;e.createEl("div",{cls:"zrr-chat-citations-label",text:"Citations"});let r=e.createEl("ul",{cls:"zrr-chat-citation-list"});for(let s of t){let i=await this.plugin.resolveCitationDisplay(s),n=r.createEl("li");n.createEl("a",{text:i.label,href:"#"}).addEventListener("click",c=>{c.preventDefault(),this.plugin.openCitationTarget(s,i)}),i.zoteroUrl&&(n.createEl("span",{text:" \xB7 "}),n.createEl("a",{text:"Zotero",href:"#"}).addEventListener("click",d=>{d.preventDefault(),this.plugin.openExternalUrl(i.zoteroUrl)}))}}scrollToBottom(){this.messagesEl.scrollTop=this.messagesEl.scrollHeight}async handleSend(){if(this.busy)return;let e=this.inputEl.value.trim();if(!e){new T.Notice("Query cannot be empty.");return}if(!this.plugin.settings.chatBaseUrl){new T.Notice("Chat base URL must be set in settings.");return}this.inputEl.value="",this.busy=!0,this.sendButton.disabled=!0;let t={id:this.generateId(),role:"user",content:e,createdAt:new Date().toISOString()};this.messages.push(t),await this.renderMessage(t),this.scrollToBottom(),await this.saveHistory();let r={id:this.generateId(),role:"assistant",content:"",citations:[],createdAt:new Date().toISOString()};this.messages.push(r),await this.renderMessage(r),this.scrollToBottom();let s=!1;try{await this.plugin.runRagQueryStreaming(e,i=>{s=!0,r.content+=i,this.scheduleRender(r)},i=>{(!s&&(i!=null&&i.answer)||i!=null&&i.answer)&&(r.content=i.answer),Array.isArray(i==null?void 0:i.citations)&&(r.citations=i.citations),this.scheduleRender(r)})}catch(i){console.error(i),r.content="Failed to fetch answer. See console for details.",this.scheduleRender(r)}finally{this.busy=!1,this.sendButton.disabled=!1,await this.saveHistory()}}async clearChat(){this.messages=[],await this.saveHistory(),await this.renderAll()}generateId(){return typeof crypto!="undefined"&&"randomUUID"in crypto?crypto.randomUUID():`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`}};var B=class extends l.Modal{constructor(p,e,t,r,s="Value cannot be empty."){super(p),this.titleText=e,this.placeholder=t,this.onSubmit=r,this.emptyMessage=s}onOpen(){let{contentEl:p}=this;p.empty(),p.createEl("h3",{text:this.titleText});let e=p.createEl("input",{type:"text",placeholder:this.placeholder});e.style.width="100%",e.focus();let t=p.createEl("button",{text:"Submit"});t.style.marginTop="0.75rem";let r=()=>{let s=e.value.trim();if(!s){new l.Notice(this.emptyMessage);return}this.close(),this.onSubmit(s)};t.addEventListener("click",r),e.addEventListener("keydown",s=>{s.key==="Enter"&&r()})}};var O=class extends l.Plugin{constructor(){super(...arguments);this.docIndex=null}async onload(){await this.loadSettings(),await this.migrateCachePaths(),this.addSettingTab(new q(this.app,this)),this.registerView(F,e=>new A(e,this)),this.setupStatusBar();try{await this.ensureBundledTools()}catch(e){console.error("Failed to sync bundled tools",e)}this.addCommand({id:"import-zotero-item-index",name:"Import Zotero item and index (Docling -> RedisSearch)",callback:()=>this.importZoteroItem()}),this.addCommand({id:"ask-zotero-library",name:"Ask my Zotero library (RAG via RedisSearch)",callback:()=>this.askZoteroLibrary()}),this.addCommand({id:"open-zotero-chat",name:"Open Zotero RAG chat panel",callback:()=>this.openChatView(!0)}),this.addCommand({id:"rebuild-zotero-note-cache",name:"Rebuild Zotero note from cache (Docling + RedisSearch)",callback:()=>this.rebuildNoteFromCache()}),this.addCommand({id:"rebuild-doc-index-cache",name:"Rebuild doc index from cache",callback:()=>this.rebuildDocIndexFromCache()}),this.addCommand({id:"recreate-missing-notes-cache",name:"Recreate missing notes from cache (Docling + RedisSearch)",callback:()=>this.recreateMissingNotesFromCache()}),this.addCommand({id:"start-redis-stack",name:"Start Redis Stack (Docker Compose)",callback:()=>this.startRedisStack()}),this.settings.autoStartRedis&&this.startRedisStack(!0)}async loadSettings(){this.settings=Object.assign({},V,await this.loadData())}async saveSettings(){await this.saveData(this.settings)}async importZoteroItem(){var C,x;try{await this.ensureBundledTools()}catch(o){new l.Notice("Failed to sync bundled tools. See console for details."),console.error(o);return}let e;try{e=await this.promptZoteroItem()}catch(o){new l.Notice("Zotero search failed. See console for details."),console.error(o);return}if(!e){new l.Notice("No Zotero item selected.");return}let t=(C=e.data)!=null?C:e;!t.key&&e.key&&(t.key=e.key);let r=this.getDocId(t);if(!r){new l.Notice("Could not resolve a stable doc_id from Zotero item.");return}let s=await this.resolvePdfAttachment(t,r);if(!s){new l.Notice("No PDF attachment found for item.");return}this.showStatusProgress("Preparing...",5);let i=typeof t.title=="string"?t.title:"",n=this.sanitizeFileName(i)||r,a=await this.resolveUniqueBaseName(n,r),c=(0,l.normalizePath)(`${this.settings.outputPdfDir}/${a}.pdf`),d=(0,l.normalizePath)(`${P}/${r}.json`),u=(0,l.normalizePath)(`${S}/${r}.json`),g=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${a}.md`);try{await this.ensureFolder(P),await this.ensureFolder(S),await this.ensureFolder(this.settings.outputNoteDir),this.settings.copyPdfToVault&&await this.ensureFolder(this.settings.outputPdfDir)}catch(o){new l.Notice("Failed to create output folders."),console.error(o),this.clearStatusProgress();return}let m="",_="";try{if(this.settings.copyPdfToVault){let o=s.filePath?await E.promises.readFile(s.filePath):await this.downloadZoteroPdf(s.key);await this.app.vault.adapter.writeBinary(c,this.bufferToArrayBuffer(o)),m=this.getAbsoluteVaultPath(c),_=`[[${c}]]`}else{if(!s.filePath){new l.Notice("PDF file path missing. Enable PDF copying or check Zotero storage."),this.clearStatusProgress();return}m=s.filePath,_=`[PDF](${(0,R.pathToFileURL)(s.filePath).toString()})`}}catch(o){new l.Notice("Failed to download PDF attachment."),console.error(o),this.clearStatusProgress();return}try{await this.app.vault.adapter.write(d,JSON.stringify(e,null,2))}catch(o){new l.Notice("Failed to write Zotero item JSON."),console.error(o),this.clearStatusProgress();return}let y=this.getPluginDir(),b=h.default.join(y,"tools","docling_extract.py"),k=h.default.join(y,"tools","index_redisearch.py");try{this.showStatusProgress("Docling extraction...",null),await this.runPython(b,this.buildDoclingArgs(m,r,u,g))}catch(o){new l.Notice("Docling extraction failed. See console for details."),console.error(o),this.clearStatusProgress();return}try{this.showStatusProgress("Indexing chunks...",0),await this.runPythonStreaming(k,["--chunks-json",this.getAbsoluteVaultPath(u),"--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--progress"],o=>{if((o==null?void 0:o.type)==="progress"&&o.total){let v=Math.round(o.current/o.total*100);this.showStatusProgress(`Indexing chunks ${o.current}/${o.total}`,v)}},()=>{})}catch(o){new l.Notice("RedisSearch indexing failed. See console for details."),console.error(o),this.clearStatusProgress();return}try{let o=await this.app.vault.adapter.read(g),v=this.buildNoteMarkdown(t,(x=e.meta)!=null?x:{},r,_,d,o);await this.app.vault.adapter.write(g,v)}catch(o){new l.Notice("Failed to finalize note markdown."),console.error(o),this.clearStatusProgress();return}try{await this.updateDocIndex({doc_id:r,note_path:g,note_title:a,zotero_title:i,pdf_path:m,attachment_key:s.key})}catch(o){console.error("Failed to update doc index",o)}this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),new l.Notice(`Indexed Zotero item ${r}.`)}async askZoteroLibrary(){await this.openChatView(!0)}getChatLeaf(){var e;return this.settings.chatPaneLocation==="right"?(e=this.app.workspace.getRightLeaf(!1))!=null?e:this.app.workspace.getLeaf("split"):this.app.workspace.getLeaf("tab")}async openChatView(e=!1){let t=this.getChatLeaf();await t.setViewState({type:F,active:!0}),this.app.workspace.revealLeaf(t);let r=t.view;return r instanceof A&&e&&r.focusInput(),r}async loadChatHistory(){let e=this.app.vault.adapter,t=(0,l.normalizePath)(`${D}/chat.json`);if(!await e.exists(t))return[];let r=await e.read(t),s;try{s=JSON.parse(r)}catch(n){return[]}let i=Array.isArray(s)?s:s==null?void 0:s.messages;return Array.isArray(i)?i.filter(n=>n&&typeof n.content=="string").map(n=>({id:n.id||this.generateChatId(),role:n.role==="assistant"?"assistant":"user",content:n.content,citations:Array.isArray(n.citations)?n.citations:[],createdAt:n.createdAt||new Date().toISOString()})):[]}async saveChatHistory(e){await this.ensureFolder(D);let t=this.app.vault.adapter,r=(0,l.normalizePath)(`${D}/chat.json`),s={version:1,messages:e};await t.write(r,JSON.stringify(s,null,2))}async runRagQueryStreaming(e,t,r){await this.ensureBundledTools();let s=this.getPluginDir(),i=h.default.join(s,"tools","rag_query_redisearch.py"),n=["--query",e,"--k","5","--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--chat-base-url",this.settings.chatBaseUrl,"--chat-api-key",this.settings.chatApiKey,"--chat-model",this.settings.chatModel,"--temperature",String(this.settings.chatTemperature),"--stream"];return this.runPythonStreaming(i,n,a=>{if((a==null?void 0:a.type)==="delta"&&typeof a.content=="string"){t(a.content);return}if((a==null?void 0:a.type)==="final"){r(a);return}a!=null&&a.answer&&r(a)},r)}async resolveCitationDisplay(e){var d,u;let t=await this.getDocIndexEntry(e.doc_id);(!t||!t.note_title||!t.zotero_title||!t.note_path||!t.pdf_path)&&(t=await this.hydrateDocIndexFromCache(e.doc_id));let r=(t==null?void 0:t.zotero_title)||(t==null?void 0:t.note_title)||e.doc_id||"?",s=e.pages||`${(d=e.page_start)!=null?d:"?"}-${(u=e.page_end)!=null?u:"?"}`,i=`${r} pages ${s}`,n=e.page_start?String(e.page_start):"",a=(t==null?void 0:t.pdf_path)||e.source_pdf||"",c=e.doc_id?this.buildZoteroDeepLink(e.doc_id,t==null?void 0:t.attachment_key,n):void 0;return{label:i,notePath:t==null?void 0:t.note_path,pdfPath:a||void 0,zoteroUrl:c,pageStart:n||void 0}}async openCitationTarget(e,t){let r=t!=null?t:await this.resolveCitationDisplay(e);if(r.notePath){await this.openNoteInMain(r.notePath);return}if(!(r.pdfPath&&await this.openPdfInMain(r.pdfPath,r.pageStart))){if(r.zoteroUrl){this.openExternalUrl(r.zoteroUrl);return}new l.Notice("Unable to open citation target.")}}async rebuildNoteFromCache(){let e=await this.promptDocId();if(!e){new l.Notice("No doc_id provided.");return}await this.rebuildNoteFromCacheForDocId(e,!0)&&new l.Notice(`Rebuilt Zotero note for ${e}.`)}async rebuildDocIndexFromCache(){var d,u,g;let e=this.app.vault.adapter,t=await this.listDocIds(P),r=await this.listDocIds(S),s=await this.scanNotesForDocIds(this.settings.outputNoteDir),i=Object.keys(s),n=Array.from(new Set([...t,...r,...i]));if(n.length===0){new l.Notice("No cached items found.");return}this.showStatusProgress("Rebuilding doc index...",0);let a=await this.getDocIndex(),c=0;for(let m of n){c+=1;let _={},y=s[m];y&&(_.note_path=y.note_path,_.note_title=y.note_title);let b=(0,l.normalizePath)(`${P}/${m}.json`);if(await e.exists(b))try{let x=await e.read(b),o=JSON.parse(x),v=(u=(d=o==null?void 0:o.data)!=null?d:o)!=null?u:{},L=typeof v.title=="string"?v.title:"";L&&(_.zotero_title=L);let Z=this.sanitizeFileName(L)||m,M=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${Z}.md`),$=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${Z}-${m}.md`);await e.exists(M)?(_.note_path=M,_.note_title=h.default.basename(M,".md")):await e.exists($)&&(_.note_path=$,_.note_title=h.default.basename($,".md"))}catch(x){console.error("Failed to read cached item JSON",x)}let k=(0,l.normalizePath)(`${S}/${m}.json`);if(await e.exists(k))try{let x=await e.read(k),o=JSON.parse(x);typeof(o==null?void 0:o.source_pdf)=="string"&&(_.pdf_path=o.source_pdf)}catch(x){console.error("Failed to read cached chunks JSON",x)}if(Object.keys(_).length>0){let o={...(g=a[m])!=null?g:{doc_id:m},..._,doc_id:m,updated_at:new Date().toISOString()};!o.note_title&&o.note_path&&(o.note_title=h.default.basename(o.note_path,".md")),a[m]=o}let C=Math.round(c/n.length*100);this.showStatusProgress(`Rebuilding doc index ${c}/${n.length}`,C)}await this.saveDocIndex(a),this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),new l.Notice(`Rebuilt doc index for ${n.length} items.`)}async recreateMissingNotesFromCache(){let e=this.app.vault.adapter,t=await this.listDocIds(P),r=await this.listDocIds(S),s=await this.scanNotesForDocIds(this.settings.outputNoteDir),i=Object.keys(s),n=Array.from(new Set([...t,...r,...i]));if(n.length===0){new l.Notice("No cached items found.");return}let a=[];for(let d of n){if(s[d])continue;let u=await this.getDocIndexEntry(d);if(u!=null&&u.note_path&&await e.exists(u.note_path))continue;let g=await this.inferNotePathFromCache(d);g&&await e.exists(g)||a.push(d)}if(a.length===0){new l.Notice("No missing notes detected.");return}this.showStatusProgress("Recreating missing notes...",0);let c=0;for(let d=0;d<a.length;d+=1){let u=a[d],g=Math.round((d+1)/a.length*100);this.showStatusProgress(`Recreating ${d+1}/${a.length}`,g),await this.rebuildNoteFromCacheForDocId(u,!1)&&(c+=1)}this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),new l.Notice(`Recreated ${c}/${a.length} missing notes.`)}async promptZoteroItem(){return new Promise(e=>{new j(this.app,this,e).open()})}async listDocIds(e){let t=this.app.vault.adapter,r=(0,l.normalizePath)(e);return await t.exists(r)?(await t.list(r)).files.filter(i=>i.endsWith(".json")).map(i=>h.default.basename(i,".json")):[]}async listMarkdownFiles(e){let t=this.app.vault.adapter,r=(0,l.normalizePath)(e);if(!await t.exists(r))return[];let s=[r],i=[];for(;s.length>0;){let n=s.pop();if(!n)continue;let a=await t.list(n);for(let c of a.files)c.endsWith(".md")&&i.push(c);for(let c of a.folders)s.push(c)}return i}extractDocIdFromFrontmatter(e){let t=e.match(/^---\s*\n([\s\S]*?)\n---/);if(!t)return null;let s=t[1].split(/\r?\n/);for(let i of s){let n=i.trim();if(!n||n.startsWith("#"))continue;let a=n.split(":");if(a.length<2)continue;let c=a[0].trim().toLowerCase();if(c!=="doc_id"&&c!=="zotero_key")continue;let u=n.slice(n.indexOf(":")+1).trim().replace(/^["']|["']$/g,"").trim();if(u)return u}return null}async scanNotesForDocIds(e){let t=this.app.vault.adapter,r=await this.listMarkdownFiles(e),s={};for(let i of r)try{let n=await t.read(i),a=this.extractDocIdFromFrontmatter(n);if(!a)continue;s[a]={doc_id:a,note_path:i,note_title:h.default.basename(i,".md"),updated_at:new Date().toISOString()}}catch(n){console.error("Failed to read note for doc_id scan",n)}return s}setupStatusBar(){let e=this.addStatusBarItem();e.addClass("zrr-status-progress"),e.addClass("status-bar-item-segment"),e.style.display="none";let t=e.createEl("span",{text:"Idle"});t.addClass("zrr-status-label");let s=e.createEl("div",{cls:"zrr-status-bar"}).createEl("div",{cls:"zrr-status-bar-inner"});this.statusBarEl=e,this.statusLabelEl=t,this.statusBarInnerEl=s}showStatusProgress(e,t){if(!(!this.statusBarEl||!this.statusLabelEl||!this.statusBarInnerEl))if(this.statusBarEl.style.display="flex",this.statusLabelEl.setText(e),t===null)this.statusBarInnerEl.addClass("indeterminate"),this.statusBarInnerEl.style.width="40%";else{this.statusBarInnerEl.removeClass("indeterminate");let r=Math.max(0,Math.min(100,t));this.statusBarInnerEl.style.width=`${r}%`}}clearStatusProgress(){!this.statusBarEl||!this.statusBarInnerEl||(this.statusBarEl.style.display="none",this.statusBarInnerEl.removeClass("indeterminate"),this.statusBarInnerEl.style.width="0%")}async promptDocId(){return new Promise(e=>{new B(this.app,"Rebuild Zotero note from cache","Enter Zotero doc_id (e.g., ABC123)",t=>e(t),"Doc ID cannot be empty.").open()})}getDocId(e){let t=[e.key,e.itemKey,e.id,e.citationKey];for(let r of t)if(typeof r=="string"&&r.trim())return r.trim();return null}sanitizeFileName(e){let t=e.replace(/[\\/:*?"<>|]/g,"").replace(/\s+/g," ").trim();return t?t.replace(/[.]+$/g,"").trim().replace(/ /g,"-").slice(0,120):""}async resolveUniqueBaseName(e,t){let r=this.app.vault.adapter,s=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${e}.md`),i=(0,l.normalizePath)(`${this.settings.outputPdfDir}/${e}.pdf`),n=await r.exists(s),a=this.settings.copyPdfToVault?await r.exists(i):!1;return n||a?`${e}-${t}`:e}async searchZoteroItems(e){let t=new URLSearchParams;t.set("itemType","-attachment"),t.set("limit","25"),t.set("include","data,meta"),e.trim()&&t.set("q",e.trim());let r=this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${t.toString()}`),s=await this.requestLocalApi(r,`Zotero search failed for ${r}`),i=JSON.parse(s.toString("utf8"));return Array.isArray(i)?i.map(n=>{var a,c,d,u;return{key:(c=n.key)!=null?c:(a=n.data)==null?void 0:a.key,data:(d=n.data)!=null?d:{},meta:(u=n.meta)!=null?u:{}}}).filter(n=>typeof n.key=="string"&&n.key.trim().length>0):[]}async resolvePdfAttachment(e,t){let r=this.pickPdfAttachment(e);if(r)return r;try{let s=await this.fetchZoteroChildren(t);for(let i of s){let n=this.toPdfAttachment(i);if(n)return n}}catch(s){console.error("Failed to fetch Zotero children",s)}return null}pickPdfAttachment(e){var r,s,i;let t=(i=(s=(r=e.attachments)!=null?r:e.children)!=null?s:e.items)!=null?i:[];if(!Array.isArray(t))return null;for(let n of t){let a=this.toPdfAttachment(n);if(a)return a}return null}toPdfAttachment(e){var i,n,a,c,d,u;if(((a=(i=e==null?void 0:e.contentType)!=null?i:e==null?void 0:e.mimeType)!=null?a:(n=e==null?void 0:e.data)==null?void 0:n.contentType)!=="application/pdf")return null;let r=(u=(c=e==null?void 0:e.key)!=null?c:e==null?void 0:e.attachmentKey)!=null?u:(d=e==null?void 0:e.data)==null?void 0:d.key;if(!r)return null;let s=this.extractAttachmentPath(e);return s?{key:r,filePath:s}:{key:r}}extractAttachmentPath(e){var r,s,i,n,a,c,d,u;let t=(u=(n=(s=(r=e==null?void 0:e.links)==null?void 0:r.enclosure)==null?void 0:s.href)!=null?n:(i=e==null?void 0:e.enclosure)==null?void 0:i.href)!=null?u:(d=(c=(a=e==null?void 0:e.data)==null?void 0:a.links)==null?void 0:c.enclosure)==null?void 0:d.href;if(typeof t=="string"&&t.startsWith("file://"))try{return(0,R.fileURLToPath)(t)}catch(g){return null}return null}async fetchZoteroChildren(e){let t=this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${e}/children`),r=await this.requestLocalApi(t,`Zotero children request failed for ${t}`);return JSON.parse(r.toString("utf8"))}async downloadZoteroPdf(e){let t=this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${e}/file`),r=await this.requestLocalApiRaw(t),s=await this.followFileRedirect(r);if(s)return s;if(r.statusCode>=300)throw new Error(`Request failed, status ${r.statusCode}`);return r.body}buildZoteroUrl(e){return`${this.settings.zoteroBaseUrl.replace(/\/$/,"")}${e}`}requestLocalApiRaw(e){return new Promise((t,r)=>{let s=new URL(e),n=(s.protocol==="https:"?J.default:G.default).request({method:"GET",hostname:s.hostname,port:s.port||void 0,path:`${s.pathname}${s.search}`,headers:{Accept:"*/*"}},a=>{let c=[];a.on("data",d=>c.push(Buffer.from(d))),a.on("end",()=>{var u;let d=Buffer.concat(c);t({statusCode:(u=a.statusCode)!=null?u:0,headers:a.headers,body:d})})});n.on("error",r),n.end()})}async requestLocalApi(e,t){let r=await this.requestLocalApiRaw(e);if(r.statusCode>=400){let s=r.body.toString("utf8");throw new Error(`${t!=null?t:"Request failed"}, status ${r.statusCode}: ${s||"no response body"}`)}if(r.statusCode>=300)throw new Error(`${t!=null?t:"Request failed"}, status ${r.statusCode}`);return r.body}async followFileRedirect(e){if(e.statusCode<300||e.statusCode>=400)return null;let t=e.headers.location,r=Array.isArray(t)?t[0]:t;if(!r||typeof r!="string")return null;if(r.startsWith("file://")){let s=(0,R.fileURLToPath)(r);return E.promises.readFile(s)}return r.startsWith("http://")||r.startsWith("https://")?this.requestLocalApi(r):null}bufferToArrayBuffer(e){return e.buffer.slice(e.byteOffset,e.byteOffset+e.byteLength)}buildPdfLinkFromSourcePath(e){if(!e)return"";let t=h.default.normalize(this.getVaultBasePath()),r=h.default.normalize(e),s=t.endsWith(h.default.sep)?t:`${t}${h.default.sep}`;return r.startsWith(s)?`[[${(0,l.normalizePath)(h.default.relative(t,r))}]]`:`[PDF](${(0,R.pathToFileURL)(e).toString()})`}async openNoteInMain(e){let t=(0,l.normalizePath)(e);await this.app.workspace.openLinkText(t,"","tab")}async openPdfInMain(e,t){if(!e)return!1;let r=h.default.normalize(this.getVaultBasePath()),s=h.default.normalize(e),i=r.endsWith(h.default.sep)?r:`${r}${h.default.sep}`;if(s.startsWith(i)){let n=(0,l.normalizePath)(h.default.relative(r,s)),a=t?`#page=${t}`:"";return await this.app.workspace.openLinkText(`${n}${a}`,"","tab"),!0}try{return window.open((0,R.pathToFileURL)(e).toString()),!0}catch(n){return!1}}openExternalUrl(e){e&&window.open(e)}buildZoteroDeepLink(e,t,r){if(t){let s=r?`?page=${encodeURIComponent(r)}`:"";return`zotero://open-pdf/library/items/${t}${s}`}return`zotero://select/library/items/${e}`}formatCitationsMarkdown(e){return e.length?e.map(r=>this.formatCitationMarkdown(r)).filter(Boolean).join(`
-`):""}formatCitationMarkdown(e){var n,a;let t=e.doc_id||"?",r=e.pages||`${(n=e.page_start)!=null?n:"?"}-${(a=e.page_end)!=null?a:"?"}`,s=`${t} pages ${r}`,i=e.source_pdf||"";if(i){let c=this.buildPdfLinkFromSourcePath(i);if(c.startsWith("[["))return`- [[${c.slice(2,-2)}|${s}]]`;let d=c.match(/^\[PDF\]\((.+)\)$/);if(d)return`- [${s}](${d[1]})`}return`- ${s}`}generateChatId(){return typeof crypto!="undefined"&&"randomUUID"in crypto?crypto.randomUUID():`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`}getDocIndexPath(){return(0,l.normalizePath)(`${D}/doc_index.json`)}async getDocIndex(){return this.docIndex?this.docIndex:(this.docIndex=await this.loadDocIndexFromDisk(),this.docIndex)}async loadDocIndexFromDisk(){var r;let e=this.app.vault.adapter,t=this.getDocIndexPath();if(!await e.exists(t))return{};try{let s=await e.read(t),i=JSON.parse(s);if(i&&typeof i=="object"){let n=(r=i.entries)!=null?r:i;if(Array.isArray(n)){let a={};for(let c of n)c!=null&&c.doc_id&&(a[String(c.doc_id)]=c);return a}if(n&&typeof n=="object")return n}}catch(s){console.error("Failed to read doc index",s)}return{}}async saveDocIndex(e){await this.ensureFolder(D);let t=this.app.vault.adapter,r=this.getDocIndexPath(),s={version:1,entries:e};await t.write(r,JSON.stringify(s,null,2)),this.docIndex=e}async updateDocIndex(e){var i;let t=await this.getDocIndex(),r=(i=t[e.doc_id])!=null?i:{doc_id:e.doc_id},s={...r,...e,doc_id:e.doc_id,updated_at:new Date().toISOString()};e.note_path===void 0&&r.note_path&&(s.note_path=r.note_path),e.note_title===void 0&&r.note_title&&(s.note_title=r.note_title),e.zotero_title===void 0&&r.zotero_title&&(s.zotero_title=r.zotero_title),e.pdf_path===void 0&&r.pdf_path&&(s.pdf_path=r.pdf_path),e.attachment_key===void 0&&r.attachment_key&&(s.attachment_key=r.attachment_key),t[e.doc_id]=s,await this.saveDocIndex(t)}async hydrateDocIndexFromCache(e){var a,c;if(!e)return null;let t=this.app.vault.adapter,r=await this.getDocIndexEntry(e),s={},i=(0,l.normalizePath)(`${P}/${e}.json`);if(await t.exists(i))try{let d=await t.read(i),u=JSON.parse(d),g=(c=(a=u==null?void 0:u.data)!=null?a:u)!=null?c:{},m=typeof g.title=="string"?g.title:"";if(m&&(s.zotero_title=m),!s.note_title||!s.note_path){let _=this.sanitizeFileName(m)||e,y=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${_}.md`),b=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${_}-${e}.md`),k="";await t.exists(y)?k=y:await t.exists(b)&&(k=b),k&&(s.note_path=k,s.note_title=h.default.basename(k,".md"))}}catch(d){console.error("Failed to read cached item JSON",d)}!s.note_title&&(r!=null&&r.note_path)&&(s.note_title=h.default.basename(r.note_path,".md"));let n=(0,l.normalizePath)(`${S}/${e}.json`);if(await t.exists(n))try{let d=await t.read(n),u=JSON.parse(d);typeof(u==null?void 0:u.source_pdf)=="string"&&(s.pdf_path=u.source_pdf)}catch(d){console.error("Failed to read cached chunks JSON",d)}return Object.keys(s).length>0&&await this.updateDocIndex({doc_id:e,...s}),this.getDocIndexEntry(e)}async getDocIndexEntry(e){var r;return e&&(r=(await this.getDocIndex())[e])!=null?r:null}async inferNotePathFromCache(e){var s,i;let t=this.app.vault.adapter,r=(0,l.normalizePath)(`${P}/${e}.json`);if(!await t.exists(r))return"";try{let n=await t.read(r),a=JSON.parse(n),c=(i=(s=a==null?void 0:a.data)!=null?s:a)!=null?i:{},d=typeof c.title=="string"?c.title:"",u=this.sanitizeFileName(d)||e,g=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${u}.md`),m=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${u}-${e}.md`);if(await t.exists(g))return g;if(await t.exists(m))return m}catch(n){console.error("Failed to infer note path from cache",n)}return""}async rebuildNoteFromCacheForDocId(e,t){var C,x;try{await this.ensureBundledTools()}catch(o){return t&&new l.Notice("Failed to sync bundled tools. See console for details."),console.error(o),!1}let r=this.app.vault.adapter,s=(0,l.normalizePath)(`${P}/${e}.json`),i=(0,l.normalizePath)(`${S}/${e}.json`);if(!await r.exists(s)||!await r.exists(i))return t&&new l.Notice("Cached item or chunks JSON not found."),!1;this.showStatusProgress("Preparing...",5);let n;try{let o=await r.read(s);n=JSON.parse(o)}catch(o){return t&&new l.Notice("Failed to read cached item JSON."),console.error(o),this.clearStatusProgress(),!1}let a;try{let o=await r.read(i);a=JSON.parse(o)}catch(o){return t&&new l.Notice("Failed to read cached chunks JSON."),console.error(o),this.clearStatusProgress(),!1}let c=typeof a.source_pdf=="string"?a.source_pdf:"";if(!c)return t&&new l.Notice("Cached chunk JSON is missing source_pdf."),this.clearStatusProgress(),!1;try{await E.promises.access(c)}catch(o){return t&&new l.Notice("Cached source PDF path is not accessible."),console.error(o),this.clearStatusProgress(),!1}let d=(C=n.data)!=null?C:n,u=typeof d.title=="string"?d.title:"",g="",m=await this.getDocIndexEntry(e);if(m!=null&&m.note_path&&await r.exists(m.note_path)&&(g=(0,l.normalizePath)(m.note_path)),!g){let o=this.sanitizeFileName(u)||e,v=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${o}.md`),L=await r.exists(v)?o:await this.resolveUniqueBaseName(o,e);g=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${L}.md`)}try{await this.ensureFolder(this.settings.outputNoteDir)}catch(o){return t&&new l.Notice("Failed to create notes folder."),console.error(o),this.clearStatusProgress(),!1}let _=this.getPluginDir(),y=h.default.join(_,"tools","docling_extract.py"),b=h.default.join(_,"tools","index_redisearch.py");try{this.showStatusProgress("Docling extraction...",null),await this.runPython(y,this.buildDoclingArgs(c,e,i,g))}catch(o){return t&&new l.Notice("Docling extraction failed. See console for details."),console.error(o),this.clearStatusProgress(),!1}try{this.showStatusProgress("Indexing chunks...",0),await this.runPythonStreaming(b,["--chunks-json",this.getAbsoluteVaultPath(i),"--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--upsert","--progress"],o=>{if((o==null?void 0:o.type)==="progress"&&o.total){let v=Math.round(o.current/o.total*100);this.showStatusProgress(`Indexing chunks ${o.current}/${o.total}`,v)}},()=>{})}catch(o){return t&&new l.Notice("RedisSearch indexing failed. See console for details."),console.error(o),this.clearStatusProgress(),!1}let k=this.buildPdfLinkFromSourcePath(c);try{let o=await this.app.vault.adapter.read(g),v=this.buildNoteMarkdown(d,(x=n.meta)!=null?x:{},e,k,s,o);await this.app.vault.adapter.write(g,v)}catch(o){return t&&new l.Notice("Failed to finalize note markdown."),console.error(o),this.clearStatusProgress(),!1}try{await this.updateDocIndex({doc_id:e,note_path:g,note_title:h.default.basename(g,".md"),zotero_title:u,pdf_path:c})}catch(o){console.error("Failed to update doc index",o)}return!0}getZoteroLibraryPath(){let e=(this.settings.zoteroUserId||"0").trim();return!e||e==="0"?"users/0":e.startsWith("users/")||e.startsWith("groups/")?e:`users/${e}`}async ensureFolder(e){let t=this.app.vault.adapter,r=(0,l.normalizePath)(e).split("/").filter(Boolean),s="";for(let i of r)s=s?`${s}/${i}`:i,await t.exists(s)||await t.mkdir(s)}buildNoteMarkdown(e,t,r,s,i,n){let a=`[[${i}]]`,c=this.renderFrontmatter(e,t,r,s,a);return`${c?`---
-${c}
+`};var q=require("obsidian"),O="zotero-redisearch-rag-chat",N=class extends q.ItemView{constructor(e,t){super(e);this.messages=[];this.messageEls=new Map;this.pendingRender=new Map;this.busy=!1;this.plugin=t}getViewType(){return O}getDisplayText(){return"Zotero RAG Chat"}async onOpen(){let{containerEl:e}=this;e.empty(),e.addClass("zrr-chat-view");let t=e.createEl("div",{cls:"zrr-chat-header"});t.createEl("div",{cls:"zrr-chat-title",text:"Zotero RAG Chat"}),this.clearButton=t.createEl("button",{cls:"zrr-chat-clear",text:"Clear"}),this.clearButton.addEventListener("click",()=>this.clearChat()),this.messagesEl=e.createEl("div",{cls:"zrr-chat-messages"});let n=e.createEl("div",{cls:"zrr-chat-input"});this.inputEl=n.createEl("textarea",{cls:"zrr-chat-textarea",attr:{placeholder:"Ask your Zotero library..."}}),this.sendButton=n.createEl("button",{cls:"zrr-chat-send",text:"Send"}),this.sendButton.addEventListener("click",()=>this.handleSend()),this.inputEl.addEventListener("keydown",r=>{r.key==="Enter"&&!r.shiftKey&&(r.preventDefault(),this.handleSend())}),await this.loadHistory(),await this.renderAll()}focusInput(){var e;(e=this.inputEl)==null||e.focus()}async loadHistory(){try{this.messages=await this.plugin.loadChatHistory()}catch(e){console.error(e),this.messages=[]}}async saveHistory(){try{await this.plugin.saveChatHistory(this.messages)}catch(e){console.error(e)}}async renderAll(){this.messagesEl.empty(),this.messageEls.clear();for(let e of this.messages)await this.renderMessage(e);this.scrollToBottom()}async renderMessage(e){let t=this.messagesEl.createEl("div",{cls:`zrr-chat-message zrr-chat-${e.role}`});t.createEl("div",{cls:"zrr-chat-meta"}).setText(e.role==="user"?"You":"Assistant");let r=t.createEl("div",{cls:"zrr-chat-content"}),s=t.createEl("div",{cls:"zrr-chat-citations"});this.messageEls.set(e.id,{wrapper:t,content:r,citations:s}),await this.renderMessageContent(e)}scheduleRender(e){if(this.pendingRender.has(e.id))return;let t=window.setTimeout(async()=>{this.pendingRender.delete(e.id),await this.renderMessageContent(e),this.scrollToBottom()},80);this.pendingRender.set(e.id,t)}async renderMessageContent(e){var n;let t=this.messageEls.get(e.id);t&&(t.content.empty(),t.citations.empty(),await q.MarkdownRenderer.renderMarkdown(e.content||"",t.content,"",this.plugin),await this.renderCitations(t.citations,(n=e.citations)!=null?n:[]))}async renderCitations(e,t){if(e.empty(),!t.length)return;e.createEl("div",{cls:"zrr-chat-citations-label",text:"Citations"});let n=e.createEl("ul",{cls:"zrr-chat-citation-list"});for(let r of t){let s=await this.plugin.resolveCitationDisplay(r),i=n.createEl("li");i.createEl("a",{text:s.label,href:"#"}).addEventListener("click",o=>{o.preventDefault(),this.plugin.openCitationTarget(r,s)}),s.zoteroUrl&&(i.createEl("span",{text:" \xB7 "}),i.createEl("a",{text:"Zotero",href:"#"}).addEventListener("click",d=>{d.preventDefault(),this.plugin.openExternalUrl(s.zoteroUrl)}))}}scrollToBottom(){this.messagesEl.scrollTop=this.messagesEl.scrollHeight}async handleSend(){if(this.busy)return;let e=this.inputEl.value.trim();if(!e){new q.Notice("Query cannot be empty.");return}if(!this.plugin.settings.chatBaseUrl){new q.Notice("Chat base URL must be set in settings.");return}this.inputEl.value="",this.busy=!0,this.sendButton.disabled=!0;let t={id:this.generateId(),role:"user",content:e,createdAt:new Date().toISOString()};this.messages.push(t),await this.renderMessage(t),this.scrollToBottom(),await this.saveHistory();let n={id:this.generateId(),role:"assistant",content:"",citations:[],createdAt:new Date().toISOString()};this.messages.push(n),await this.renderMessage(n),this.scrollToBottom();let r=!1;try{await this.plugin.runRagQueryStreaming(e,s=>{r=!0,n.content+=s,this.scheduleRender(n)},s=>{(!r&&(s!=null&&s.answer)||s!=null&&s.answer)&&(n.content=s.answer),Array.isArray(s==null?void 0:s.citations)&&(n.citations=s.citations),this.scheduleRender(n)})}catch(s){console.error(s),n.content="Failed to fetch answer. See console for details.",this.scheduleRender(n)}finally{this.busy=!1,this.sendButton.disabled=!1,await this.saveHistory()}}async clearChat(){this.messages=[],await this.saveHistory(),await this.renderAll()}generateId(){return typeof crypto!="undefined"&&"randomUUID"in crypto?crypto.randomUUID():`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`}};var B=class extends l.Modal{constructor(p,e,t,n,r="Value cannot be empty."){super(p),this.titleText=e,this.placeholder=t,this.onSubmit=n,this.emptyMessage=r}onOpen(){let{contentEl:p}=this;p.empty(),p.createEl("h3",{text:this.titleText});let e=p.createEl("input",{type:"text",placeholder:this.placeholder});e.style.width="100%",e.focus();let t=p.createEl("button",{text:"Submit"});t.style.marginTop="0.75rem";let n=()=>{let r=e.value.trim();if(!r){new l.Notice(this.emptyMessage);return}this.close(),this.onSubmit(r)};t.addEventListener("click",n),e.addEventListener("keydown",r=>{r.key==="Enter"&&n()})}};var z=class extends l.Plugin{constructor(){super(...arguments);this.docIndex=null}async onload(){await this.loadSettings(),await this.migrateCachePaths(),this.addSettingTab(new F(this.app,this)),this.registerView(O,e=>new N(e,this)),this.setupStatusBar(),this.registerNoteRenameHandler();try{await this.ensureBundledTools()}catch(e){console.error("Failed to sync bundled tools",e)}this.addCommand({id:"import-zotero-item-index",name:"Import Zotero item and index (Docling -> RedisSearch)",callback:()=>this.importZoteroItem()}),this.addCommand({id:"ask-zotero-library",name:"Ask my Zotero library (RAG via RedisSearch)",callback:()=>this.askZoteroLibrary()}),this.addCommand({id:"open-zotero-chat",name:"Open Zotero RAG chat panel",callback:()=>this.openChatView(!0)}),this.addCommand({id:"rebuild-zotero-note-cache",name:"Rebuild Zotero note from cache (Docling + RedisSearch)",callback:()=>this.rebuildNoteFromCache()}),this.addCommand({id:"rebuild-doc-index-cache",name:"Rebuild doc index from cache",callback:()=>this.rebuildDocIndexFromCache()}),this.addCommand({id:"recreate-missing-notes-cache",name:"Recreate missing notes from cache (Docling + RedisSearch)",callback:()=>this.recreateMissingNotesFromCache()}),this.addCommand({id:"reindex-redis-from-cache",name:"Reindex Redis from cached chunks",callback:()=>this.reindexRedisFromCache()}),this.addCommand({id:"start-redis-stack",name:"Start Redis Stack (Docker Compose)",callback:()=>this.startRedisStack()}),this.settings.autoStartRedis&&this.startRedisStack(!0)}async loadSettings(){this.settings=Object.assign({},V,await this.loadData())}async saveSettings(){await this.saveData(this.settings)}async importZoteroItem(){var b,y;try{await this.ensureBundledTools()}catch(c){new l.Notice("Failed to sync bundled tools. See console for details."),console.error(c);return}let e;try{e=await this.promptZoteroItem()}catch(c){new l.Notice("Zotero search failed. See console for details."),console.error(c);return}if(!e){new l.Notice("No Zotero item selected.");return}let t=(b=e.data)!=null?b:e;!t.key&&e.key&&(t.key=e.key);let n=this.getDocId(t);if(!n){new l.Notice("Could not resolve a stable doc_id from Zotero item.");return}let r=await this.resolvePdfAttachment(t,n);if(!r){new l.Notice("No PDF attachment found for item.");return}this.showStatusProgress("Preparing...",5);let s=typeof t.title=="string"?t.title:"",i=this.sanitizeFileName(s)||n,a=await this.resolveUniqueBaseName(i,n),o=(0,l.normalizePath)(`${this.settings.outputPdfDir}/${a}.pdf`),d=(0,l.normalizePath)(`${S}/${n}.json`),u=(0,l.normalizePath)(`${C}/${n}.json`),_=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${a}.md`);try{await this.ensureFolder(S),await this.ensureFolder(C),await this.ensureFolder(this.settings.outputNoteDir),this.settings.copyPdfToVault&&await this.ensureFolder(this.settings.outputPdfDir)}catch(c){new l.Notice("Failed to create output folders."),console.error(c),this.clearStatusProgress();return}let h="",m="";try{if(this.settings.copyPdfToVault){let c=r.filePath?await L.promises.readFile(r.filePath):await this.downloadZoteroPdf(r.key);await this.app.vault.adapter.writeBinary(o,this.bufferToArrayBuffer(c)),h=this.getAbsoluteVaultPath(o),m=`[[${o}]]`}else{if(!r.filePath){new l.Notice("PDF file path missing. Enable PDF copying or check Zotero storage."),this.clearStatusProgress();return}h=r.filePath,m=`[PDF](${(0,R.pathToFileURL)(r.filePath).toString()})`}}catch(c){new l.Notice("Failed to download PDF attachment."),console.error(c),this.clearStatusProgress();return}try{await this.app.vault.adapter.write(d,JSON.stringify(e,null,2))}catch(c){new l.Notice("Failed to write Zotero item JSON."),console.error(c),this.clearStatusProgress();return}let x=this.getPluginDir(),v=g.default.join(x,"tools","docling_extract.py"),w=g.default.join(x,"tools","index_redisearch.py"),D=null;try{D=await this.readDoclingQualityLabelFromPdf(h),this.showStatusProgress(this.formatStatusLabel("Docling extraction...",D),null),await this.runPython(v,this.buildDoclingArgs(h,n,u,_)),D=await this.readDoclingQualityLabel(u)}catch(c){new l.Notice("Docling extraction failed. See console for details."),console.error(c),this.clearStatusProgress();return}try{this.showStatusProgress(this.formatStatusLabel("Indexing chunks...",D),0),await this.runPythonStreaming(w,["--chunks-json",this.getAbsoluteVaultPath(u),"--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--progress"],c=>{if((c==null?void 0:c.type)==="progress"&&c.total){let P=Math.round(c.current/c.total*100),T=this.formatStatusLabel(`Indexing chunks ${c.current}/${c.total}`,D);this.showStatusProgress(T,P)}},()=>{})}catch(c){new l.Notice("RedisSearch indexing failed. See console for details."),console.error(c),this.clearStatusProgress();return}try{let c=await this.app.vault.adapter.read(_),P=this.buildNoteMarkdown(t,(y=e.meta)!=null?y:{},n,m,d,c);await this.app.vault.adapter.write(_,P)}catch(c){new l.Notice("Failed to finalize note markdown."),console.error(c),this.clearStatusProgress();return}try{await this.updateDocIndex({doc_id:n,note_path:_,note_title:a,zotero_title:s,pdf_path:h,attachment_key:r.key})}catch(c){console.error("Failed to update doc index",c)}this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),new l.Notice(`Indexed Zotero item ${n}.`)}async askZoteroLibrary(){await this.openChatView(!0)}getChatLeaf(){var e;return this.settings.chatPaneLocation==="right"?(e=this.app.workspace.getRightLeaf(!1))!=null?e:this.app.workspace.getLeaf("split"):this.app.workspace.getLeaf("tab")}async openChatView(e=!1){let t=this.getChatLeaf();await t.setViewState({type:O,active:!0}),this.app.workspace.revealLeaf(t);let n=t.view;return n instanceof N&&e&&n.focusInput(),n}async loadChatHistory(){let e=this.app.vault.adapter,t=(0,l.normalizePath)(`${E}/chat.json`);if(!await e.exists(t))return[];let n=await e.read(t),r;try{r=JSON.parse(n)}catch(i){return[]}let s=Array.isArray(r)?r:r==null?void 0:r.messages;return Array.isArray(s)?s.filter(i=>i&&typeof i.content=="string").map(i=>({id:i.id||this.generateChatId(),role:i.role==="assistant"?"assistant":"user",content:i.content,citations:Array.isArray(i.citations)?i.citations:[],createdAt:i.createdAt||new Date().toISOString()})):[]}async saveChatHistory(e){await this.ensureFolder(E);let t=this.app.vault.adapter,n=(0,l.normalizePath)(`${E}/chat.json`),r={version:1,messages:e};await t.write(n,JSON.stringify(r,null,2))}async runRagQueryStreaming(e,t,n){await this.ensureBundledTools();let r=this.getPluginDir(),s=g.default.join(r,"tools","rag_query_redisearch.py"),i=["--query",e,"--k","5","--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--chat-base-url",this.settings.chatBaseUrl,"--chat-api-key",this.settings.chatApiKey,"--chat-model",this.settings.chatModel,"--temperature",String(this.settings.chatTemperature),"--stream"];return this.runPythonStreaming(s,i,a=>{if((a==null?void 0:a.type)==="delta"&&typeof a.content=="string"){t(a.content);return}if((a==null?void 0:a.type)==="final"){n(a);return}a!=null&&a.answer&&n(a)},n)}async resolveCitationDisplay(e){var u,_;let t=await this.getDocIndexEntry(e.doc_id);(!t||!t.note_title||!t.zotero_title||!t.note_path||!t.pdf_path)&&(t=await this.hydrateDocIndexFromCache(e.doc_id));let n=e.doc_id?await this.resolveNotePathForDocId(e.doc_id):t==null?void 0:t.note_path,r=(t==null?void 0:t.zotero_title)||(t==null?void 0:t.note_title)||(n?g.default.basename(n,".md"):e.doc_id||"?"),s=e.pages||`${(u=e.page_start)!=null?u:"?"}-${(_=e.page_end)!=null?_:"?"}`,i=`${r} pages ${s}`,a=e.page_start?String(e.page_start):"",o=(t==null?void 0:t.pdf_path)||e.source_pdf||"",d=e.doc_id?this.buildZoteroDeepLink(e.doc_id,t==null?void 0:t.attachment_key,a):void 0;return{label:i,notePath:n||void 0,pdfPath:o||void 0,zoteroUrl:d,pageStart:a||void 0}}async openCitationTarget(e,t){let n=t!=null?t:await this.resolveCitationDisplay(e);if(n.notePath){await this.openNoteInMain(n.notePath);return}if(!(n.pdfPath&&await this.openPdfInMain(n.pdfPath,n.pageStart))){if(n.zoteroUrl){this.openExternalUrl(n.zoteroUrl);return}new l.Notice("Unable to open citation target.")}}async rebuildNoteFromCache(){let e=await this.promptDocId();if(!e){new l.Notice("No doc_id provided.");return}await this.rebuildNoteFromCacheForDocId(e,!0)&&new l.Notice(`Rebuilt Zotero note for ${e}.`)}async rebuildDocIndexFromCache(){var d,u,_;let e=this.app.vault.adapter,t=await this.listDocIds(S),n=await this.listDocIds(C),r=await this.scanNotesForDocIds(this.settings.outputNoteDir),s=Object.keys(r),i=Array.from(new Set([...t,...n,...s]));if(i.length===0){new l.Notice("No cached items found.");return}this.showStatusProgress("Rebuilding doc index...",0);let a=await this.getDocIndex(),o=0;for(let h of i){o+=1;let m={},x=r[h];x&&(m.note_path=x.note_path,m.note_title=x.note_title);let v=(0,l.normalizePath)(`${S}/${h}.json`);if(await e.exists(v))try{let b=await e.read(v),y=JSON.parse(b),c=(u=(d=y==null?void 0:y.data)!=null?d:y)!=null?u:{},P=typeof c.title=="string"?c.title:"";P&&(m.zotero_title=P);let T=this.sanitizeFileName(P)||h,M=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${T}.md`),$=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${T}-${h}.md`);await e.exists(M)?(m.note_path=M,m.note_title=g.default.basename(M,".md")):await e.exists($)&&(m.note_path=$,m.note_title=g.default.basename($,".md"))}catch(b){console.error("Failed to read cached item JSON",b)}let w=(0,l.normalizePath)(`${C}/${h}.json`);if(await e.exists(w))try{let b=await e.read(w),y=JSON.parse(b);typeof(y==null?void 0:y.source_pdf)=="string"&&(m.pdf_path=y.source_pdf)}catch(b){console.error("Failed to read cached chunks JSON",b)}if(Object.keys(m).length>0){let y={...(_=a[h])!=null?_:{doc_id:h},...m,doc_id:h,updated_at:new Date().toISOString()};!y.note_title&&y.note_path&&(y.note_title=g.default.basename(y.note_path,".md")),a[h]=y}let D=Math.round(o/i.length*100);this.showStatusProgress(`Rebuilding doc index ${o}/${i.length}`,D)}await this.saveDocIndex(a),this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),new l.Notice(`Rebuilt doc index for ${i.length} items.`)}async recreateMissingNotesFromCache(){let e=this.app.vault.adapter,t=await this.listDocIds(S),n=await this.listDocIds(C),r=await this.scanNotesForDocIds(this.settings.outputNoteDir),s=Object.keys(r),i=Array.from(new Set([...t,...n,...s]));if(i.length===0){new l.Notice("No cached items found.");return}let a=[];for(let d of i){if(r[d])continue;let u=await this.getDocIndexEntry(d);if(u!=null&&u.note_path&&await e.exists(u.note_path))continue;let _=await this.inferNotePathFromCache(d);_&&await e.exists(_)||a.push(d)}if(a.length===0){new l.Notice("No missing notes detected.");return}this.showStatusProgress("Recreating missing notes...",0);let o=0;for(let d=0;d<a.length;d+=1){let u=a[d],_=Math.round((d+1)/a.length*100);this.showStatusProgress(`Recreating ${d+1}/${a.length}`,_),await this.rebuildNoteFromCacheForDocId(u,!1)&&(o+=1)}this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),new l.Notice(`Recreated ${o}/${a.length} missing notes.`)}async reindexRedisFromCache(){try{await this.ensureBundledTools()}catch(i){new l.Notice("Failed to sync bundled tools. See console for details."),console.error(i);return}let e=await this.listDocIds(C);if(e.length===0){new l.Notice("No cached chunks found.");return}let t=this.getPluginDir(),n=g.default.join(t,"tools","index_redisearch.py"),r=0,s=0;this.showStatusProgress("Reindexing cached chunks...",0);for(let i of e){r+=1;let a=Math.round(r/e.length*100);this.showStatusProgress(`Reindexing ${r}/${e.length}`,a);let o=(0,l.normalizePath)(`${C}/${i}.json`);try{await this.runPython(n,["--chunks-json",this.getAbsoluteVaultPath(o),"--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--upsert"])}catch(d){s+=1,console.error(`Failed to reindex ${i}`,d)}}this.showStatusProgress("Done",100),window.setTimeout(()=>this.clearStatusProgress(),1200),s===0?new l.Notice(`Reindexed ${e.length} cached items.`):new l.Notice(`Reindexed ${e.length-s}/${e.length} items (see console).`)}async promptZoteroItem(){return new Promise(e=>{new Z(this.app,this,e).open()})}async listDocIds(e){let t=this.app.vault.adapter,n=(0,l.normalizePath)(e);return await t.exists(n)?(await t.list(n)).files.filter(s=>s.endsWith(".json")).map(s=>g.default.basename(s,".json")):[]}async listMarkdownFiles(e){let t=this.app.vault.adapter,n=(0,l.normalizePath)(e);if(!await t.exists(n))return[];let r=[n],s=[];for(;r.length>0;){let i=r.pop();if(!i)continue;let a=await t.list(i);for(let o of a.files)o.endsWith(".md")&&s.push(o);for(let o of a.folders)r.push(o)}return s}extractDocIdFromFrontmatter(e){let t=e.match(/^---\s*\n([\s\S]*?)\n---/);if(!t)return null;let r=t[1].split(/\r?\n/);for(let s of r){let i=s.trim();if(!i||i.startsWith("#"))continue;let a=i.split(":");if(a.length<2)continue;let o=a[0].trim().toLowerCase();if(o!=="doc_id"&&o!=="zotero_key")continue;let u=i.slice(i.indexOf(":")+1).trim().replace(/^["']|["']$/g,"").trim();if(u)return u}return null}async scanNotesForDocIds(e){let t=this.app.vault.adapter,n=await this.listMarkdownFiles(e),r={};for(let s of n)try{let i=await t.read(s),a=this.extractDocIdFromFrontmatter(i);if(!a)continue;r[a]={doc_id:a,note_path:s,note_title:g.default.basename(s,".md"),updated_at:new Date().toISOString()}}catch(i){console.error("Failed to read note for doc_id scan",i)}return r}setupStatusBar(){let e=this.addStatusBarItem();e.addClass("zrr-status-progress"),e.addClass("status-bar-item-segment"),e.style.display="none";let t=e.createEl("span",{text:"Idle"});t.addClass("zrr-status-label");let r=e.createEl("div",{cls:"zrr-status-bar"}).createEl("div",{cls:"zrr-status-bar-inner"});this.statusBarEl=e,this.statusLabelEl=t,this.statusBarInnerEl=r}showStatusProgress(e,t){if(!(!this.statusBarEl||!this.statusLabelEl||!this.statusBarInnerEl))if(this.statusBarEl.style.display="flex",this.statusLabelEl.setText(e),t===null)this.statusBarInnerEl.addClass("indeterminate"),this.statusBarInnerEl.style.width="40%";else{this.statusBarInnerEl.removeClass("indeterminate");let n=Math.max(0,Math.min(100,t));this.statusBarInnerEl.style.width=`${n}%`}}clearStatusProgress(){!this.statusBarEl||!this.statusBarInnerEl||(this.statusBarEl.style.display="none",this.statusBarInnerEl.removeClass("indeterminate"),this.statusBarInnerEl.style.width="0%")}formatStatusLabel(e,t){return t?`${e} (Text layer quality ${t})`:e}async readDoclingQualityLabel(e){var t;try{let n=await this.app.vault.adapter.read(e),r=JSON.parse(n),s=(t=r==null?void 0:r.metadata)==null?void 0:t.confidence_proxy;if(typeof s=="number")return s.toFixed(2)}catch(n){console.warn("Failed to read Docling quality metadata",n)}return null}async readDoclingQualityLabelFromPdf(e){try{let t=this.getPluginDir(),n=g.default.join(t,"tools","docling_extract.py"),r=this.settings.ocrMode==="force_low_quality"?"auto":this.settings.ocrMode,s=["--quality-only","--pdf",e,"--ocr",r];this.settings.ocrMode==="force_low_quality"&&s.push("--force-ocr-low-quality"),s.push("--quality-threshold",String(this.settings.ocrQualityThreshold));let i=await this.runPythonWithOutput(n,s),a=JSON.parse(i),o=a==null?void 0:a.confidence_proxy;if(typeof o=="number")return o.toFixed(2)}catch(t){console.warn("Failed to read Docling quality from PDF",t)}return null}async promptDocId(){return new Promise(e=>{new B(this.app,"Rebuild Zotero note from cache","Enter Zotero doc_id (e.g., ABC123)",t=>e(t),"Doc ID cannot be empty.").open()})}getDocId(e){let t=[e.key,e.itemKey,e.id,e.citationKey];for(let n of t)if(typeof n=="string"&&n.trim())return n.trim();return null}sanitizeFileName(e){let t=e.replace(/[\\/:*?"<>|]/g,"").replace(/\s+/g," ").trim();return t?t.replace(/[.]+$/g,"").trim().slice(0,120):""}registerNoteRenameHandler(){this.registerEvent(this.app.vault.on("rename",async e=>{if(!(!(e instanceof l.TFile)||e.extension!=="md"))try{let t=await this.app.vault.read(e),n=this.extractDocIdFromFrontmatter(t);if(!n)return;await this.updateDocIndex({doc_id:n,note_path:e.path,note_title:g.default.basename(e.path,".md")})}catch(t){console.warn("Failed to update doc index for renamed note",t)}}))}async resolveNotePathForDocId(e){if(!e)return null;let t=this.app.vault.adapter,n=await this.getDocIndexEntry(e);if(n!=null&&n.note_path&&await t.exists(n.note_path))return n.note_path;let s=(await this.scanNotesForDocIds(this.settings.outputNoteDir))[e];return s!=null&&s.note_path?(await this.updateDocIndex({doc_id:e,note_path:s.note_path,note_title:s.note_title}),s.note_path):null}async resolveUniqueBaseName(e,t){let n=this.app.vault.adapter,r=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${e}.md`),s=(0,l.normalizePath)(`${this.settings.outputPdfDir}/${e}.pdf`),i=await n.exists(r),a=this.settings.copyPdfToVault?await n.exists(s):!1;return i||a?`${e}-${t}`:e}async searchZoteroItems(e){let t=new URLSearchParams;t.set("itemType","-attachment"),t.set("limit","25"),t.set("include","data,meta"),e.trim()&&t.set("q",e.trim());let n=this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${t.toString()}`),r=await this.requestLocalApi(n,`Zotero search failed for ${n}`),s=JSON.parse(r.toString("utf8"));return Array.isArray(s)?s.map(i=>{var a,o,d,u;return{key:(o=i.key)!=null?o:(a=i.data)==null?void 0:a.key,data:(d=i.data)!=null?d:{},meta:(u=i.meta)!=null?u:{}}}).filter(i=>typeof i.key=="string"&&i.key.trim().length>0):[]}async resolvePdfAttachment(e,t){let n=this.pickPdfAttachment(e);if(n)return n;try{let r=await this.fetchZoteroChildren(t);for(let s of r){let i=this.toPdfAttachment(s);if(i)return i}}catch(r){console.error("Failed to fetch Zotero children",r)}return null}pickPdfAttachment(e){var n,r,s;let t=(s=(r=(n=e.attachments)!=null?n:e.children)!=null?r:e.items)!=null?s:[];if(!Array.isArray(t))return null;for(let i of t){let a=this.toPdfAttachment(i);if(a)return a}return null}toPdfAttachment(e){var s,i,a,o,d,u;if(((a=(s=e==null?void 0:e.contentType)!=null?s:e==null?void 0:e.mimeType)!=null?a:(i=e==null?void 0:e.data)==null?void 0:i.contentType)!=="application/pdf")return null;let n=(u=(o=e==null?void 0:e.key)!=null?o:e==null?void 0:e.attachmentKey)!=null?u:(d=e==null?void 0:e.data)==null?void 0:d.key;if(!n)return null;let r=this.extractAttachmentPath(e);return r?{key:n,filePath:r}:{key:n}}extractAttachmentPath(e){var n,r,s,i,a,o,d,u;let t=(u=(i=(r=(n=e==null?void 0:e.links)==null?void 0:n.enclosure)==null?void 0:r.href)!=null?i:(s=e==null?void 0:e.enclosure)==null?void 0:s.href)!=null?u:(d=(o=(a=e==null?void 0:e.data)==null?void 0:a.links)==null?void 0:o.enclosure)==null?void 0:d.href;if(typeof t=="string"&&t.startsWith("file://"))try{return(0,R.fileURLToPath)(t)}catch(_){return null}return null}async fetchZoteroChildren(e){let t=this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${e}/children`),n=await this.requestLocalApi(t,`Zotero children request failed for ${t}`);return JSON.parse(n.toString("utf8"))}async downloadZoteroPdf(e){let t=this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${e}/file`),n=await this.requestLocalApiRaw(t),r=await this.followFileRedirect(n);if(r)return r;if(n.statusCode>=300)throw new Error(`Request failed, status ${n.statusCode}`);return n.body}buildZoteroUrl(e){return`${this.settings.zoteroBaseUrl.replace(/\/$/,"")}${e}`}requestLocalApiRaw(e){return new Promise((t,n)=>{let r=new URL(e),i=(r.protocol==="https:"?J.default:H.default).request({method:"GET",hostname:r.hostname,port:r.port||void 0,path:`${r.pathname}${r.search}`,headers:{Accept:"*/*"}},a=>{let o=[];a.on("data",d=>o.push(Buffer.from(d))),a.on("end",()=>{var u;let d=Buffer.concat(o);t({statusCode:(u=a.statusCode)!=null?u:0,headers:a.headers,body:d})})});i.on("error",n),i.end()})}async requestLocalApi(e,t){let n=await this.requestLocalApiRaw(e);if(n.statusCode>=400){let r=n.body.toString("utf8");throw new Error(`${t!=null?t:"Request failed"}, status ${n.statusCode}: ${r||"no response body"}`)}if(n.statusCode>=300)throw new Error(`${t!=null?t:"Request failed"}, status ${n.statusCode}`);return n.body}async followFileRedirect(e){if(e.statusCode<300||e.statusCode>=400)return null;let t=e.headers.location,n=Array.isArray(t)?t[0]:t;if(!n||typeof n!="string")return null;if(n.startsWith("file://")){let r=(0,R.fileURLToPath)(n);return L.promises.readFile(r)}return n.startsWith("http://")||n.startsWith("https://")?this.requestLocalApi(n):null}bufferToArrayBuffer(e){return e.buffer.slice(e.byteOffset,e.byteOffset+e.byteLength)}buildPdfLinkFromSourcePath(e){if(!e)return"";let t=g.default.normalize(this.getVaultBasePath()),n=g.default.normalize(e),r=t.endsWith(g.default.sep)?t:`${t}${g.default.sep}`;return n.startsWith(r)?`[[${(0,l.normalizePath)(g.default.relative(t,n))}]]`:`[PDF](${(0,R.pathToFileURL)(e).toString()})`}async openNoteInMain(e){let t=(0,l.normalizePath)(e);await this.app.workspace.openLinkText(t,"","tab")}async openPdfInMain(e,t){if(!e)return!1;let n=g.default.normalize(this.getVaultBasePath()),r=g.default.normalize(e),s=n.endsWith(g.default.sep)?n:`${n}${g.default.sep}`;if(r.startsWith(s)){let i=(0,l.normalizePath)(g.default.relative(n,r)),a=t?`#page=${t}`:"";return await this.app.workspace.openLinkText(`${i}${a}`,"","tab"),!0}try{return window.open((0,R.pathToFileURL)(e).toString()),!0}catch(i){return!1}}openExternalUrl(e){e&&window.open(e)}buildZoteroDeepLink(e,t,n){if(t){let r=n?`?page=${encodeURIComponent(n)}`:"";return`zotero://open-pdf/library/items/${t}${r}`}return`zotero://select/library/items/${e}`}formatCitationsMarkdown(e){return e.length?e.map(n=>this.formatCitationMarkdown(n)).filter(Boolean).join(`
+`):""}formatCitationMarkdown(e){var i,a;let t=e.doc_id||"?",n=e.pages||`${(i=e.page_start)!=null?i:"?"}-${(a=e.page_end)!=null?a:"?"}`,r=`${t} pages ${n}`,s=e.source_pdf||"";if(s){let o=this.buildPdfLinkFromSourcePath(s);if(o.startsWith("[["))return`- [[${o.slice(2,-2)}|${r}]]`;let d=o.match(/^\[PDF\]\((.+)\)$/);if(d)return`- [${r}](${d[1]})`}return`- ${r}`}generateChatId(){return typeof crypto!="undefined"&&"randomUUID"in crypto?crypto.randomUUID():`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`}getDocIndexPath(){return(0,l.normalizePath)(`${E}/doc_index.json`)}async getDocIndex(){return this.docIndex?this.docIndex:(this.docIndex=await this.loadDocIndexFromDisk(),this.docIndex)}async loadDocIndexFromDisk(){var n;let e=this.app.vault.adapter,t=this.getDocIndexPath();if(!await e.exists(t))return{};try{let r=await e.read(t),s=JSON.parse(r);if(s&&typeof s=="object"){let i=(n=s.entries)!=null?n:s;if(Array.isArray(i)){let a={};for(let o of i)o!=null&&o.doc_id&&(a[String(o.doc_id)]=o);return a}if(i&&typeof i=="object")return i}}catch(r){console.error("Failed to read doc index",r)}return{}}async saveDocIndex(e){await this.ensureFolder(E);let t=this.app.vault.adapter,n=this.getDocIndexPath(),r={version:1,entries:e};await t.write(n,JSON.stringify(r,null,2)),this.docIndex=e}async updateDocIndex(e){var s;let t=await this.getDocIndex(),n=(s=t[e.doc_id])!=null?s:{doc_id:e.doc_id},r={...n,...e,doc_id:e.doc_id,updated_at:new Date().toISOString()};e.note_path===void 0&&n.note_path&&(r.note_path=n.note_path),e.note_title===void 0&&n.note_title&&(r.note_title=n.note_title),e.zotero_title===void 0&&n.zotero_title&&(r.zotero_title=n.zotero_title),e.pdf_path===void 0&&n.pdf_path&&(r.pdf_path=n.pdf_path),e.attachment_key===void 0&&n.attachment_key&&(r.attachment_key=n.attachment_key),t[e.doc_id]=r,await this.saveDocIndex(t)}async hydrateDocIndexFromCache(e){var a,o;if(!e)return null;let t=this.app.vault.adapter,n=await this.getDocIndexEntry(e),r={},s=(0,l.normalizePath)(`${S}/${e}.json`);if(await t.exists(s))try{let d=await t.read(s),u=JSON.parse(d),_=(o=(a=u==null?void 0:u.data)!=null?a:u)!=null?o:{},h=typeof _.title=="string"?_.title:"";if(h&&(r.zotero_title=h),!r.note_title||!r.note_path){let m=this.sanitizeFileName(h)||e,x=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${m}.md`),v=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${m}-${e}.md`),w="";await t.exists(x)?w=x:await t.exists(v)&&(w=v),w&&(r.note_path=w,r.note_title=g.default.basename(w,".md"))}}catch(d){console.error("Failed to read cached item JSON",d)}!r.note_title&&(n!=null&&n.note_path)&&(r.note_title=g.default.basename(n.note_path,".md"));let i=(0,l.normalizePath)(`${C}/${e}.json`);if(await t.exists(i))try{let d=await t.read(i),u=JSON.parse(d);typeof(u==null?void 0:u.source_pdf)=="string"&&(r.pdf_path=u.source_pdf)}catch(d){console.error("Failed to read cached chunks JSON",d)}return Object.keys(r).length>0&&await this.updateDocIndex({doc_id:e,...r}),this.getDocIndexEntry(e)}async getDocIndexEntry(e){var n;return e&&(n=(await this.getDocIndex())[e])!=null?n:null}async inferNotePathFromCache(e){var r,s;let t=this.app.vault.adapter,n=(0,l.normalizePath)(`${S}/${e}.json`);if(!await t.exists(n))return"";try{let i=await t.read(n),a=JSON.parse(i),o=(s=(r=a==null?void 0:a.data)!=null?r:a)!=null?s:{},d=typeof o.title=="string"?o.title:"",u=this.sanitizeFileName(d)||e,_=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${u}.md`),h=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${u}-${e}.md`);if(await t.exists(_))return _;if(await t.exists(h))return h}catch(i){console.error("Failed to infer note path from cache",i)}return""}async rebuildNoteFromCacheForDocId(e,t){var b,y;try{await this.ensureBundledTools()}catch(c){return t&&new l.Notice("Failed to sync bundled tools. See console for details."),console.error(c),!1}let n=this.app.vault.adapter,r=(0,l.normalizePath)(`${S}/${e}.json`),s=(0,l.normalizePath)(`${C}/${e}.json`);if(!await n.exists(r)||!await n.exists(s))return t&&new l.Notice("Cached item or chunks JSON not found."),!1;this.showStatusProgress("Preparing...",5);let i;try{let c=await n.read(r);i=JSON.parse(c)}catch(c){return t&&new l.Notice("Failed to read cached item JSON."),console.error(c),this.clearStatusProgress(),!1}let a;try{let c=await n.read(s);a=JSON.parse(c)}catch(c){return t&&new l.Notice("Failed to read cached chunks JSON."),console.error(c),this.clearStatusProgress(),!1}let o=typeof a.source_pdf=="string"?a.source_pdf:"";if(!o)return t&&new l.Notice("Cached chunk JSON is missing source_pdf."),this.clearStatusProgress(),!1;try{await L.promises.access(o)}catch(c){return t&&new l.Notice("Cached source PDF path is not accessible."),console.error(c),this.clearStatusProgress(),!1}let d=(b=i.data)!=null?b:i,u=typeof d.title=="string"?d.title:"",_="",h=await this.getDocIndexEntry(e);if(h!=null&&h.note_path&&await n.exists(h.note_path)&&(_=(0,l.normalizePath)(h.note_path)),!_){let c=this.sanitizeFileName(u)||e,P=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${c}.md`),T=await n.exists(P)?c:await this.resolveUniqueBaseName(c,e);_=(0,l.normalizePath)(`${this.settings.outputNoteDir}/${T}.md`)}try{await this.ensureFolder(this.settings.outputNoteDir)}catch(c){return t&&new l.Notice("Failed to create notes folder."),console.error(c),this.clearStatusProgress(),!1}let m=this.getPluginDir(),x=g.default.join(m,"tools","docling_extract.py"),v=g.default.join(m,"tools","index_redisearch.py"),w=null;try{w=await this.readDoclingQualityLabelFromPdf(o),this.showStatusProgress(this.formatStatusLabel("Docling extraction...",w),null),await this.runPython(x,this.buildDoclingArgs(o,e,s,_)),w=await this.readDoclingQualityLabel(s)}catch(c){return t&&new l.Notice("Docling extraction failed. See console for details."),console.error(c),this.clearStatusProgress(),!1}try{this.showStatusProgress(this.formatStatusLabel("Indexing chunks...",w),0),await this.runPythonStreaming(v,["--chunks-json",this.getAbsoluteVaultPath(s),"--redis-url",this.settings.redisUrl,"--index",this.settings.redisIndex,"--prefix",this.settings.redisPrefix,"--embed-base-url",this.settings.embedBaseUrl,"--embed-api-key",this.settings.embedApiKey,"--embed-model",this.settings.embedModel,"--upsert","--progress"],c=>{if((c==null?void 0:c.type)==="progress"&&c.total){let P=Math.round(c.current/c.total*100),T=this.formatStatusLabel(`Indexing chunks ${c.current}/${c.total}`,w);this.showStatusProgress(T,P)}},()=>{})}catch(c){return t&&new l.Notice("RedisSearch indexing failed. See console for details."),console.error(c),this.clearStatusProgress(),!1}let D=this.buildPdfLinkFromSourcePath(o);try{let c=await this.app.vault.adapter.read(_),P=this.buildNoteMarkdown(d,(y=i.meta)!=null?y:{},e,D,r,c);await this.app.vault.adapter.write(_,P)}catch(c){return t&&new l.Notice("Failed to finalize note markdown."),console.error(c),this.clearStatusProgress(),!1}try{await this.updateDocIndex({doc_id:e,note_path:_,note_title:g.default.basename(_,".md"),zotero_title:u,pdf_path:o})}catch(c){console.error("Failed to update doc index",c)}return!0}getZoteroLibraryPath(){let e=(this.settings.zoteroUserId||"0").trim();return!e||e==="0"?"users/0":e.startsWith("users/")||e.startsWith("groups/")?e:`users/${e}`}async ensureFolder(e){let t=this.app.vault.adapter,n=(0,l.normalizePath)(e).split("/").filter(Boolean),r="";for(let s of n)r=r?`${r}/${s}`:s,await t.exists(r)||await t.mkdir(r)}buildNoteMarkdown(e,t,n,r,s,i){let a=`[[${s}]]`,o=this.renderFrontmatter(e,t,n,r,a);return`${o?`---
+${o}
 ---
 
-`:""}PDF: ${s}
+`:""}PDF: ${r}
 
 Item JSON: ${a}
 
-${n}`}renderFrontmatter(e,t,r,s,i){var c;let n=(c=this.settings.frontmatterTemplate)!=null?c:"";if(!n.trim())return"";let a=this.buildTemplateVars(e,t,r,s,i);return n.replace(/{{\s*([a-z0-9_]+)\s*}}/gi,(d,u)=>{var g;return(g=a[u])!=null?g:""}).trim()}buildTemplateVars(e,t,r,s,i){let n=typeof e.title=="string"?e.title:"",a=typeof e.shortTitle=="string"?e.shortTitle:"",c=typeof e.date=="string"?e.date:"",d=typeof(t==null?void 0:t.parsedDate)=="string"?t.parsedDate:"",u=this.extractYear(d||c),m=(Array.isArray(e.creators)?e.creators:[]).filter(o=>o.creatorType==="author").map(o=>this.formatCreatorName(o)),_=m.join("; "),y=Array.isArray(e.tags)?e.tags.map(o=>typeof o=="string"?o:o==null?void 0:o.tag).filter(Boolean):[],b=y.join("; "),k=typeof e.itemType=="string"?e.itemType:"",C=typeof(t==null?void 0:t.creatorSummary)=="string"?t.creatorSummary:"",x={doc_id:r,zotero_key:typeof e.key=="string"?e.key:r,title:n,short_title:a,date:c,year:u,authors:_,tags:b,item_type:k,creator_summary:C,pdf_link:this.escapeYamlString(s),item_json:this.escapeYamlString(i)};for(let[o,v]of Object.entries(x))x[`${o}_yaml`]=this.escapeYamlString(v);return x.authors_yaml=this.toYamlList(m),x.tags_yaml=this.toYamlList(y),x}extractYear(e){if(!e)return"";let t=e.match(/\b(\d{4})\b/);return t?t[1]:""}formatCreatorName(e){if(!e||typeof e!="object")return"";if(e.name)return String(e.name);let t=e.firstName?String(e.firstName):"",r=e.lastName?String(e.lastName):"";return[r,t].filter(Boolean).join(", ")||`${t} ${r}`.trim()}escapeYamlString(e){return`"${String(e).replace(/\\/g,"\\\\").replace(/"/g,'\\"')}"`}toYamlList(e){return e.length?e.map(t=>`  - ${this.escapeYamlString(t)}`).join(`
-`):'  - ""'}getVaultBasePath(){var r;let e=this.app.vault.adapter;if(e instanceof l.FileSystemAdapter)return e.getBasePath();let t=(r=e.getBasePath)==null?void 0:r.call(e);if(t)return t;throw new Error("Vault base path is unavailable.")}getPluginDir(){var s;let e=this.getVaultBasePath(),t=(s=this.manifest.dir)!=null?s:this.manifest.id;if(!t)throw new Error("Plugin directory is unavailable.");let r=h.default.isAbsolute(t)?t:h.default.join(e,t);return h.default.normalize(r)}async ensureBundledTools(){let e=this.getPluginDir(),t=h.default.join(e,"tools");await E.promises.mkdir(t,{recursive:!0});for(let[r,s]of Object.entries(H)){let i=h.default.join(t,r),n=!0;try{await E.promises.readFile(i,"utf8")===s&&(n=!1)}catch(a){}n&&await E.promises.writeFile(i,s,"utf8")}}async migrateCachePaths(){let e="zotero/items",t="zotero/chunks",r=P,s=S,i=this.app.vault.adapter,n=(0,l.normalizePath)(e),a=(0,l.normalizePath)(t),c=(0,l.normalizePath)(r),d=(0,l.normalizePath)(s),u=c.split("/").slice(0,-1).join("/"),g=d.split("/").slice(0,-1).join("/");u&&await this.ensureFolder(u),g&&await this.ensureFolder(g);let m=await i.exists(n),_=await i.exists(a),y=await i.exists(c),b=await i.exists(d);m&&!y&&await i.rename(n,c),_&&!b&&await i.rename(a,d)}getAbsoluteVaultPath(e){let t=this.getVaultBasePath(),r=h.default.isAbsolute(e)?e:h.default.join(t,e);return h.default.normalize(r)}buildDoclingArgs(e,t,r,s){let i=["--pdf",e,"--doc-id",t,"--out-json",this.getAbsoluteVaultPath(r),"--out-md",this.getAbsoluteVaultPath(s),"--chunking",this.settings.chunkingMode,"--ocr",this.settings.ocrMode];return this.settings.enableLlmCleanup&&(i.push("--enable-llm-cleanup"),this.settings.llmCleanupBaseUrl&&i.push("--llm-cleanup-base-url",this.settings.llmCleanupBaseUrl),this.settings.llmCleanupApiKey&&i.push("--llm-cleanup-api-key",this.settings.llmCleanupApiKey),this.settings.llmCleanupModel&&i.push("--llm-cleanup-model",this.settings.llmCleanupModel),i.push("--llm-cleanup-temperature",String(this.settings.llmCleanupTemperature)),i.push("--llm-cleanup-min-quality",String(this.settings.llmCleanupMinQuality)),i.push("--llm-cleanup-max-chars",String(this.settings.llmCleanupMaxChars))),i}getRedisDataDir(){return h.default.join(this.getVaultBasePath(),D,"redis-data")}getDockerComposePath(){let e=this.getPluginDir();return h.default.join(e,"tools","docker-compose.yml")}async startRedisStack(e){var t;try{await this.ensureBundledTools();let r=this.getDockerComposePath(),s=this.getRedisDataDir();await E.promises.mkdir(s,{recursive:!0});let i=((t=this.settings.dockerPath)==null?void 0:t.trim())||"docker";await this.runCommand(i,["compose","-f",r,"up","-d"],{cwd:h.default.dirname(r),env:{...process.env,ZRR_DATA_DIR:s}}),e||new l.Notice("Redis Stack started.")}catch(r){e||new l.Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing."),console.error("Failed to start Redis Stack",r)}}runPython(e,t){return new Promise((r,s)=>{let i=(0,I.spawn)(this.settings.pythonPath,[e,...t],{cwd:h.default.dirname(e)}),n="";i.stderr.on("data",a=>{n+=a.toString()}),i.on("close",a=>{a===0?r():s(new Error(n||`Process exited with code ${a}`))})})}runCommand(e,t,r){return new Promise((s,i)=>{let n=(0,I.spawn)(e,t,{cwd:r==null?void 0:r.cwd,env:r==null?void 0:r.env}),a="";n.stderr.on("data",c=>{a+=c.toString()}),n.on("close",c=>{c===0?s():i(new Error(a||`Process exited with code ${c}`))})})}runPythonStreaming(e,t,r,s){return new Promise((i,n)=>{let a=(0,I.spawn)(this.settings.pythonPath,[e,...t],{cwd:h.default.dirname(e)}),c="",d="",u=null,g=!1,m=_=>{if(_.trim())try{let y=JSON.parse(_);u=y,((y==null?void 0:y.type)==="final"||y!=null&&y.answer)&&(g=!0),r(y)}catch(y){}};a.stdout.on("data",_=>{var b;c+=_.toString();let y=c.split(/\r?\n/);c=(b=y.pop())!=null?b:"";for(let k of y)m(k)}),a.stderr.on("data",_=>{d+=_.toString()}),a.on("close",_=>{c.trim()&&m(c),!g&&u&&s(u),_===0?i():n(new Error(d||`Process exited with code ${_}`))})})}runPythonWithOutput(e,t){return new Promise((r,s)=>{let i=(0,I.spawn)(this.settings.pythonPath,[e,...t],{cwd:h.default.dirname(e)}),n="",a="";i.stdout.on("data",c=>{n+=c.toString()}),i.stderr.on("data",c=>{a+=c.toString()}),i.on("close",c=>{c===0?r(n.trim()):s(new Error(a||`Process exited with code ${c}`))})})}},j=class extends l.SuggestModal{constructor(e,t,r){super(e);this.lastError=null;this.plugin=t,this.resolveSelection=r,this.setPlaceholder("Search Zotero items...")}async getSuggestions(e){try{return await this.plugin.searchZoteroItems(e)}catch(t){let r=t instanceof Error?t.message:String(t);return this.lastError!==r&&(this.lastError=r,new l.Notice(r)),console.error("Zotero search failed",t),[]}}renderSuggestion(e,t){var i,n;let r=(n=(i=e.data)==null?void 0:i.title)!=null?n:"[No title]",s=this.extractYear(e);t.createEl("div",{text:r}),t.createEl("small",{text:s?`${s}`:""}),t.addEventListener("click",()=>{this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()})}onChooseSuggestion(e,t){this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()}onClose(){this.resolveSelection&&(this.resolveSelection(null),this.resolveSelection=null)}extractYear(e){var s,i,n,a;let t=(a=(n=(s=e.meta)==null?void 0:s.parsedDate)!=null?n:(i=e.data)==null?void 0:i.date)!=null?a:"";if(typeof t!="string")return"";let r=t.match(/\b(\d{4})\b/);return r?r[1]:""}};
+${i}`}renderFrontmatter(e,t,n,r,s){var o;let i=(o=this.settings.frontmatterTemplate)!=null?o:"";if(!i.trim())return"";let a=this.buildTemplateVars(e,t,n,r,s);return i.replace(/{{\s*([a-z0-9_]+)\s*}}/gi,(d,u)=>{var _;return(_=a[u])!=null?_:""}).trim()}buildTemplateVars(e,t,n,r,s){let i=typeof e.title=="string"?e.title:"",a=typeof e.shortTitle=="string"?e.shortTitle:"",o=typeof e.date=="string"?e.date:"",d=typeof(t==null?void 0:t.parsedDate)=="string"?t.parsedDate:"",u=this.extractYear(d||o),h=(Array.isArray(e.creators)?e.creators:[]).filter(y=>y.creatorType==="author").map(y=>this.formatCreatorName(y)),m=h.join("; "),x=Array.isArray(e.tags)?e.tags.map(y=>typeof y=="string"?y:y==null?void 0:y.tag).filter(Boolean):[],v=x.join("; "),w=typeof e.itemType=="string"?e.itemType:"",D=typeof(t==null?void 0:t.creatorSummary)=="string"?t.creatorSummary:"",b={doc_id:n,zotero_key:typeof e.key=="string"?e.key:n,title:i,short_title:a,date:o,year:u,authors:m,tags:v,item_type:w,creator_summary:D,pdf_link:this.escapeYamlString(r),item_json:this.escapeYamlString(s)};for(let[y,c]of Object.entries(b))b[`${y}_yaml`]=this.escapeYamlString(c);return b.authors_yaml=this.toYamlList(h),b.tags_yaml=this.toYamlList(x),b}extractYear(e){if(!e)return"";let t=e.match(/\b(\d{4})\b/);return t?t[1]:""}formatCreatorName(e){if(!e||typeof e!="object")return"";if(e.name)return String(e.name);let t=e.firstName?String(e.firstName):"",n=e.lastName?String(e.lastName):"";return[n,t].filter(Boolean).join(", ")||`${t} ${n}`.trim()}escapeYamlString(e){return`"${String(e).replace(/\\/g,"\\\\").replace(/"/g,'\\"')}"`}toYamlList(e){return e.length?e.map(t=>`  - ${this.escapeYamlString(t)}`).join(`
+`):'  - ""'}getVaultBasePath(){var n;let e=this.app.vault.adapter;if(e instanceof l.FileSystemAdapter)return e.getBasePath();let t=(n=e.getBasePath)==null?void 0:n.call(e);if(t)return t;throw new Error("Vault base path is unavailable.")}getPluginDir(){var r;let e=this.getVaultBasePath(),t=(r=this.manifest.dir)!=null?r:this.manifest.id;if(!t)throw new Error("Plugin directory is unavailable.");let n=g.default.isAbsolute(t)?t:g.default.join(e,t);return g.default.normalize(n)}async ensureBundledTools(){let e=this.getPluginDir(),t=g.default.join(e,"tools");await L.promises.mkdir(t,{recursive:!0});for(let[n,r]of Object.entries(G)){let s=g.default.join(t,n),i=!0;try{await L.promises.readFile(s,"utf8")===r&&(i=!1)}catch(a){}i&&await L.promises.writeFile(s,r,"utf8")}}async migrateCachePaths(){let e="zotero/items",t="zotero/chunks",n=S,r=C,s=this.app.vault.adapter,i=(0,l.normalizePath)(e),a=(0,l.normalizePath)(t),o=(0,l.normalizePath)(n),d=(0,l.normalizePath)(r),u=o.split("/").slice(0,-1).join("/"),_=d.split("/").slice(0,-1).join("/");u&&await this.ensureFolder(u),_&&await this.ensureFolder(_);let h=await s.exists(i),m=await s.exists(a),x=await s.exists(o),v=await s.exists(d);h&&!x&&await s.rename(i,o),m&&!v&&await s.rename(a,d)}getAbsoluteVaultPath(e){let t=this.getVaultBasePath(),n=g.default.isAbsolute(e)?e:g.default.join(t,e);return g.default.normalize(n)}buildDoclingArgs(e,t,n,r){let s=this.settings.ocrMode==="force_low_quality"?"auto":this.settings.ocrMode,i=["--pdf",e,"--doc-id",t,"--out-json",this.getAbsoluteVaultPath(n),"--out-md",this.getAbsoluteVaultPath(r),"--chunking",this.settings.chunkingMode,"--ocr",s];return this.settings.ocrMode==="force_low_quality"&&i.push("--force-ocr-low-quality"),i.push("--quality-threshold",String(this.settings.ocrQualityThreshold)),this.settings.enableLlmCleanup&&(i.push("--enable-llm-cleanup"),this.settings.llmCleanupBaseUrl&&i.push("--llm-cleanup-base-url",this.settings.llmCleanupBaseUrl),this.settings.llmCleanupApiKey&&i.push("--llm-cleanup-api-key",this.settings.llmCleanupApiKey),this.settings.llmCleanupModel&&i.push("--llm-cleanup-model",this.settings.llmCleanupModel),i.push("--llm-cleanup-temperature",String(this.settings.llmCleanupTemperature)),i.push("--llm-cleanup-min-quality",String(this.settings.llmCleanupMinQuality)),i.push("--llm-cleanup-max-chars",String(this.settings.llmCleanupMaxChars))),i}getRedisDataDir(){return g.default.join(this.getVaultBasePath(),E,"redis-data")}getDockerComposePath(){let e=this.getPluginDir();return g.default.join(e,"tools","docker-compose.yml")}async startRedisStack(e){var t;try{await this.ensureBundledTools();let n=this.getDockerComposePath(),r=this.getRedisDataDir();await L.promises.mkdir(r,{recursive:!0});let s=((t=this.settings.dockerPath)==null?void 0:t.trim())||"docker";try{await this.runCommand(s,["compose","-f",n,"down"],{cwd:g.default.dirname(n)})}catch(i){console.warn("Redis Stack stop before restart failed",i)}await this.runCommand(s,["compose","-f",n,"up","-d"],{cwd:g.default.dirname(n),env:{...process.env,ZRR_DATA_DIR:r}}),e||new l.Notice("Redis Stack started.")}catch(n){e||new l.Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing."),console.error("Failed to start Redis Stack",n)}}runPython(e,t){return new Promise((n,r)=>{let s=(0,A.spawn)(this.settings.pythonPath,[e,...t],{cwd:g.default.dirname(e)}),i="";s.stderr.on("data",a=>{i+=a.toString()}),s.on("close",a=>{a===0?n():r(new Error(i||`Process exited with code ${a}`))})})}runCommand(e,t,n){return new Promise((r,s)=>{let i=(0,A.spawn)(e,t,{cwd:n==null?void 0:n.cwd,env:n==null?void 0:n.env}),a="";i.stderr.on("data",o=>{a+=o.toString()}),i.on("close",o=>{o===0?r():s(new Error(a||`Process exited with code ${o}`))})})}runPythonStreaming(e,t,n,r){return new Promise((s,i)=>{let a=(0,A.spawn)(this.settings.pythonPath,[e,...t],{cwd:g.default.dirname(e)}),o="",d="",u=null,_=!1,h=m=>{if(m.trim())try{let x=JSON.parse(m);u=x,((x==null?void 0:x.type)==="final"||x!=null&&x.answer)&&(_=!0),n(x)}catch(x){}};a.stdout.on("data",m=>{var v;o+=m.toString();let x=o.split(/\r?\n/);o=(v=x.pop())!=null?v:"";for(let w of x)h(w)}),a.stderr.on("data",m=>{d+=m.toString()}),a.on("close",m=>{o.trim()&&h(o),!_&&u&&r(u),m===0?s():i(new Error(d||`Process exited with code ${m}`))})})}runPythonWithOutput(e,t){return new Promise((n,r)=>{let s=(0,A.spawn)(this.settings.pythonPath,[e,...t],{cwd:g.default.dirname(e)}),i="",a="";s.stdout.on("data",o=>{i+=o.toString()}),s.stderr.on("data",o=>{a+=o.toString()}),s.on("close",o=>{o===0?n(i.trim()):r(new Error(a||`Process exited with code ${o}`))})})}},Z=class extends l.SuggestModal{constructor(e,t,n){super(e);this.lastError=null;this.plugin=t,this.resolveSelection=n,this.setPlaceholder("Search Zotero items...")}async getSuggestions(e){try{return await this.plugin.searchZoteroItems(e)}catch(t){let n=t instanceof Error?t.message:String(t);return this.lastError!==n&&(this.lastError=n,new l.Notice(n)),console.error("Zotero search failed",t),[]}}renderSuggestion(e,t){var s,i;let n=(i=(s=e.data)==null?void 0:s.title)!=null?i:"[No title]",r=this.extractYear(e);t.createEl("div",{text:n}),t.createEl("small",{text:r?`${r}`:""}),t.addEventListener("click",()=>{this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()})}onChooseSuggestion(e,t){this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()}onClose(){this.resolveSelection&&(this.resolveSelection(null),this.resolveSelection=null)}extractYear(e){var r,s,i,a;let t=(a=(i=(r=e.meta)==null?void 0:r.parsedDate)!=null?i:(s=e.data)==null?void 0:s.date)!=null?a:"";if(typeof t!="string")return"";let n=t.match(/\b(\d{4})\b/);return n?n[1]:""}};

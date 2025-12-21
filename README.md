@@ -1,72 +1,64 @@
-# Zotero -> Docling -> Redis Stack -> LLaMA 3.1 RAG
+# Zotero -> Docling -> Redis Stack -> RAG (Obsidian)
 
 > [!CAUTION]
-> This Obsidian plugin is in early development. Use at your own risk.
+> This plugin is early and may change. Keep backups of important notes.
 
-Science-grade Zotero RAG pipeline:
-- Interactive mode via Obsidian local Zotero API search for item selection
-- Batch mode via pyzotero
-- Docling extraction to Markdown + structured chunks with OCR options
-- Redis Stack (RediSearch) vector search with HNSW + COSINE
-- Local embeddings via LM Studio (OpenAI-compatible)
-- Chat generation via OpenAI-compatible endpoint
-- Guardrails: answer only from retrieved context with citations
+This plugin lets you:
+- Pick Zotero items from Obsidian.
+- Convert PDFs to text with Docling (OCR when needed).
+- Store vectors in Redis Stack (RediSearch).
+- Ask questions and get answers with citations.
 
-## Redis Stack setup
+## What you need
 
-**Option A:** Docker (ephemeral)
+- Obsidian (desktop)
+- Zotero 7 (desktop)
+- Docker Desktop (for Redis Stack)
+- LM Studio (for embeddings + chat)
+- Python 3.11+ (for Docling tools)
 
+## Step 1: Enable Zotero local API
+
+In Zotero:
+1) Open Settings -> Advanced.
+2) Enable "Allow other applications on this computer to communicate with Zotero".
+3) No API key is needed for the local API.
+
+## Step 2: Install the plugin
+
+Option A (recommended for nontechnical users):
+1) Download the latest release zip.
+2) Unzip to your vault:
+   `<vault>/.obsidian/plugins/zotero-redisearch-rag/`
+3) The folder must contain `main.js`, `manifest.json`, `versions.json`, and `tools/`.
+
+Option B (build from source):
 ```bash
-docker run --rm -p 6379:6379 redis/redis-stack-server:latest
+npm install
+npm run build
 ```
-> [!WARNING]
->Your index data will be lost when the container stops!
+Then copy the plugin folder to your vault as above.
 
-**Option B:** Docker Compose with persistent data (recommended)
+## Step 3: Start Redis Stack (vector database)
 
-Store Redis data in a folder inside your vault, e.g.
-`<vault>/.zotero-redisearch-rag/redis-data`, by setting `ZRR_DATA_DIR`:
+Recommended: use the plugin command
+- Command palette -> "Start Redis Stack (Docker Compose)"
 
-```bash
-export ZRR_DATA_DIR="/path/to/your/vault/.zotero-redisearch-rag/redis-data"
-docker compose up -d
-```
+Notes:
+- Docker Desktop must be running.
+- Your vault folder must be shared in Docker settings.
+- Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
 
-If you prefer not to keep Redis data inside your vault, point `ZRR_DATA_DIR`
-elsewhere.
+## Step 4: Start LM Studio (embeddings + chat)
 
-The compose config mounts `redis-stack.conf` and enables AOF (`appendonly yes`)
-so the index is persisted immediately under the mounted `/data` directory.
+1) Open LM Studio and start the local server.
+2) Copy the model ID shown in LM Studio (not the repo name).
+   Example model IDs:
+   - `text-embedding-embeddinggemma-300m`
+   - `text-embedding-nomic-embed-text-v1.5`
+3) Keep the server running while you use the plugin.
 
-You can also start Redis Stack from Obsidian using the command
-`Start Redis Stack (Docker Compose)`. Docker Desktop must be installed,
-running, and your vault path must be shared in Docker settings.
-Stopping and removing a stale container can also be done from the settings UI.
-
-Verify RediSearch works:
-
-```bash
-redis-cli FT.CREATE idx:probe ON HASH PREFIX 1 "probe:" SCHEMA text TEXT
-redis-cli FT.INFO idx:probe
-```
-
-## LM Studio setup (embeddings + chat)
-
-1) Start LM Studio local server (OpenAI-compatible).
-2) Confirm embeddings endpoint:
-
-```bash
-curl http://localhost:1234/v1/embeddings \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer lm-studio" \
-  -d '{"model":"google/embedding-gemma-300m","input":"ping"}'
-```
-
-3) Configure embeddings model: `google/embedding-gemma-300m` (DIM=768).
-4) For chat, set `chat_base_url` to your OpenAI-compatible endpoint and model
-   (default: `meta-llama/llama-3.1-405b-instruct`).
-
-## Python setup
+## Step 5: Python setup (Docling)
 
 ```bash
 python3 -m venv .venv
@@ -74,71 +66,61 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Docling OCR tuning
+Optional (for stronger OCR fallback):
+- Install Poppler and Tesseract on your system.
 
-`tools/docling_extract.py` uses a single `DoclingProcessingConfig` with conservative defaults:
-- Auto-detect text layer and skip OCR when possible
-- Prefer PaddleOCR, fall back to Tesseract
-- Default language: German+English when detected, otherwise English
-- Optional post-OCR cleanup and dictionary correction (off by default)
-- Optional low-quality text handling: force OCR and rasterize pages before Docling OCR
-- Quality scoring uses `wordfreq` (German/English frequency lists) to penalize gibberish text layers
-- Rasterized column detection heuristic to keep Docling layout when multi-column pages are detected
+## Step 6: Configure the plugin
 
-OCR modes in Obsidian:
-- auto: skip OCR if text looks good
-- force if quality is bad: OCR only when the text layer scores below the quality threshold
-- force: always OCR (ignores text layer)
+Obsidian -> Settings -> Community plugins -> Zotero Redis RAG
 
-To enable dictionary correction, set `enable_dictionary_correction = True`
-and optionally point `dictionary_path` to a custom wordlist. A small default
-wordlist is provided in `tools/ocr_wordlist.txt`.
+Key settings to check:
+- Python path: `/path/to/your/.venv/bin/python`
+- Redis URL: `redis://127.0.0.1:6379`
+- Embeddings base URL: `http://localhost:1234/v1`
+- Embeddings model: use the LM Studio model ID
+- Chat base URL/model: your LM Studio chat model ID
 
-Optional OCR dependencies for per-page OCR:
-- `pdf2image` (requires a local PDF renderer such as Poppler)
-- `pytesseract` + system `tesseract` binary (fallback engine)
+## Use it
 
-These Python packages are included in `requirements.txt`, but you must still
-install Poppler + Tesseract on your system for per-page OCR to work.
+1) Command palette -> "Import Zotero item and index (Docling -> RedisSearch)"
+2) Command palette -> "Ask my Zotero library (RAG via RedisSearch)"
 
-Optional cleanup enhancements:
-- LLM cleanup for low-quality chunks (OpenAI-compatible endpoint; can be slow/costly).
+Answers are generated from retrieved text only and include citations.
 
-## Obsidian plugin build/install
+## Reindex old items
 
-```bash
-npm install
-npm run build
-```
+If Redis was reset or your embedding model changed:
+- Command palette -> "Reindex Redis from cached chunks"
 
-Copy the plugin folder to your vault:
-`<vault>/.obsidian/plugins/zotero-redisearch-rag/`
+This rebuilds the vector index from cached JSON chunks without re-running Docling.
 
-Ensure the `tools/` folder is included alongside `main.js` and `manifest.json`.
+## Files created in your vault
 
-Settings are in Obsidian: `Settings -> Community plugins -> Zotero Redis RAG`.
-If you enable auto-start, the plugin will run `docker compose` using the
-bundled compose file and your vault path for `ZRR_DATA_DIR`.
+- `zotero/pdfs/<title>.pdf` (optional if PDF copy is enabled)
+- `zotero/notes/<title>.md`
+- `.zotero-redisearch-rag/items/<doc_id>.json`
+- `.zotero-redisearch-rag/chunks/<doc_id>.json`
+- `.zotero-redisearch-rag/doc_index.json`
+- `.zotero-redisearch-rag/chat.json`
 
-## GitHub releases + BRAT
+## OCR options (simple summary)
 
-To install via BRAT from GitHub releases, publish a release that includes the built plugin.
+- Auto: use text layer if it looks good.
+- Force if bad: OCR when text quality is low.
+- Force: always OCR.
 
-1) Build and package:
+You can adjust the quality threshold in settings.
 
-```bash
-npm run package-release
-```
+## Troubleshooting
 
-This creates `dist/zotero-redisearch-rag.zip` containing `main.js`, `manifest.json`, and `tools/`.
+- "No such index idx:zotero":
+  Start Redis Stack and reindex cached chunks.
+- "Invalid model identifier":
+  Use the exact LM Studio model ID in settings.
+- Redis data not persisting:
+  Start Redis Stack from the plugin so it uses the correct data folder.
 
-2) Create a GitHub release and upload the zip asset.
-
-3) In BRAT: `Add beta plugin` -> enter the repo -> enable `Use releases`.
-
-## End-to-end demos
-
-### 1) Batch index an entire Zotero library
+## Advanced: batch indexing
 
 ```bash
 python3 tools/batch_index_pyzotero.py \
@@ -150,33 +132,14 @@ python3 tools/batch_index_pyzotero.py \
   --prefix zotero:chunk: \
   --embed-base-url http://localhost:1234/v1 \
   --embed-api-key lm-studio \
-  --embed-model google/embedding-gemma-300m \
+  --embed-model text-embedding-embeddinggemma-300m \
   --out-dir ./data \
   --ocr auto \
   --chunking page
 ```
 
-### 2) Obsidian: import one item + ask queries
-
-1) Run the command: `Import Zotero item and index (Docling -> RedisSearch)`
-2) Then run: `Ask my Zotero library (RAG via RedisSearch)`
-
-The answer will only use retrieved context and include citations.
-
 ## Guardrails
 
 - Answers must be grounded in retrieved context.
 - If context is insufficient, the response says it does not know.
-- Citations include `doc_id` and page ranges.
-
-## File outputs
-
-Interactive mode writes to your vault:
-- `zotero/pdfs/<title>.pdf` (optional, if copy is enabled)
-- `.zotero-redisearch-rag/items/<doc_id>.json`
-- `zotero/notes/<title>.md`
-- `.zotero-redisearch-rag/chunks/<doc_id>.json`
-- `.zotero-redisearch-rag/chat.json` (chat history)
-
-Batch mode writes to `--out-dir`:
-- `pdfs/`, `items/`, `docs/`, `chunks/`, `checkpoint.json`
+- Citations include doc_id and page ranges.

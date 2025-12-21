@@ -37,9 +37,25 @@ class DoclingProcessingConfig:
     column_detect_enable: bool = True
     column_detect_dpi: int = 150
     column_detect_max_pages: int = 3
-    column_detect_gap_threshold_ratio: float = 0.35
-    column_detect_min_gap_ratio: float = 0.06
+    column_detect_crop_top_ratio: float = 0.08
+    column_detect_crop_bottom_ratio: float = 0.08
+    column_detect_threshold_std_mult: float = 1.0
+    column_detect_threshold_min: int = 120
+    column_detect_threshold_max: int = 210
+    column_detect_text_percentile: float = 0.7
+    column_detect_min_text_density: float = 0.02
+    column_detect_gap_threshold_ratio: float = 0.2
+    column_detect_min_gap_density: float = 0.01
+    column_detect_min_gap_ratio: float = 0.03
     column_detect_min_pages_ratio: float = 0.4
+    column_detect_smooth_window: int = 5
+    page_range_sample_tokens: int = 200
+    page_range_min_overlap: float = 0.02
+    page_range_min_hits: int = 5
+    page_range_top_k: int = 5
+    page_range_peak_ratio: float = 0.5
+    page_range_cluster_gap: int = 1
+    page_range_max_span_ratio: float = 0.7
     per_page_ocr_on_low_quality: bool = True
     force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
@@ -618,7 +634,104 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     return sections
 
 
-def find_page_range(section_text: str, pages: List[Dict[str, Any]]) -> Tuple[int, int]:
+_PAGE_RANGE_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "over",
+    "under", "after", "before", "were", "was", "are", "is", "its", "their",
+    "then", "than", "than", "which", "when", "where", "have", "has", "had",
+    "into", "onto", "upon", "your", "yours", "they", "them", "these", "those",
+    "will", "would", "could", "should", "about", "there", "here", "while",
+    "what", "why", "how", "not", "but", "you", "your", "our", "ours", "his",
+    "her", "she", "him", "she", "him", "its", "also", "such", "been", "being",
+    "out", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "more", "most", "some", "many", "few", "each", "per",
+}
+
+
+def tokenize_for_page_range(text: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z0-9]{3,}", text.lower())
+    return [token for token in tokens if token not in _PAGE_RANGE_STOPWORDS]
+
+
+def sample_tokens(tokens: Sequence[str], max_tokens: int) -> List[str]:
+    if max_tokens <= 0 or len(tokens) <= max_tokens:
+        return list(tokens)
+    step = max(1, len(tokens) // max_tokens)
+    return list(tokens[::step])
+
+
+def compute_page_overlap(
+    section_text: str,
+    pages: List[Dict[str, Any]],
+    config: DoclingProcessingConfig,
+) -> List[Tuple[float, int, int]]:
+    section_tokens = tokenize_for_page_range(section_text)
+    if not section_tokens:
+        return []
+    sample = sample_tokens(section_tokens, config.page_range_sample_tokens)
+    sample_set = set(sample)
+    total = len(sample_set)
+    results: List[Tuple[float, int, int]] = []
+    for page in pages:
+        page_text = str(page.get("text", ""))
+        page_tokens = set(tokenize_for_page_range(page_text))
+        hits = len(sample_set & page_tokens)
+        ratio = hits / max(1, total)
+        results.append((ratio, hits, int(page.get("page_num", 0))))
+    return results
+
+
+def select_overlap_cluster(
+    overlap_scores: Sequence[Tuple[float, int, int]],
+    config: DoclingProcessingConfig,
+) -> List[int]:
+    if not overlap_scores:
+        return []
+    max_ratio = max(score[0] for score in overlap_scores)
+    max_hits = max(score[1] for score in overlap_scores)
+    ratio_cutoff = max(config.page_range_min_overlap, max_ratio * config.page_range_peak_ratio)
+    hits_cutoff = max(config.page_range_min_hits, int(max_hits * config.page_range_peak_ratio))
+    candidates = [
+        (ratio, hits, page_num)
+        for ratio, hits, page_num in overlap_scores
+        if ratio >= ratio_cutoff or hits >= hits_cutoff
+    ]
+    if not candidates:
+        candidates = sorted(overlap_scores, reverse=True)[: config.page_range_top_k]
+
+    candidates.sort(key=lambda item: item[2])
+    clusters: List[List[Tuple[float, int, int]]] = []
+    current: List[Tuple[float, int, int]] = []
+    for entry in candidates:
+        if not current:
+            current.append(entry)
+            continue
+        if entry[2] - current[-1][2] <= config.page_range_cluster_gap:
+            current.append(entry)
+        else:
+            clusters.append(current)
+            current = [entry]
+    if current:
+        clusters.append(current)
+
+    def cluster_score(cluster: Sequence[Tuple[float, int, int]]) -> Tuple[float, float]:
+        ratios = [item[0] for item in cluster]
+        return (sum(ratios), max(ratios))
+
+    best_cluster = max(clusters, key=cluster_score)
+    page_nums = [item[2] for item in best_cluster]
+    if len(page_nums) > 1:
+        span_ratio = (max(page_nums) - min(page_nums) + 1) / max(1, len(overlap_scores))
+        if span_ratio > config.page_range_max_span_ratio:
+            trimmed = sorted(best_cluster, reverse=True)[: config.page_range_top_k]
+            page_nums = [item[2] for item in trimmed]
+    return page_nums
+
+
+def find_page_range(
+    section_text: str,
+    pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+) -> Tuple[int, int]:
     if not pages:
         return 0, 0
 
@@ -643,6 +756,16 @@ def find_page_range(section_text: str, pages: List[Dict[str, Any]]) -> Tuple[int
         if snippet_end and snippet_end in page_clean:
             page_end = page.get("page_num", 0)
             break
+
+    if page_start == 0 or page_end == 0:
+        config = config or DoclingProcessingConfig()
+        overlap_scores = compute_page_overlap(cleaned, pages, config)
+        page_nums = select_overlap_cluster(overlap_scores, config)
+        if page_nums:
+            if page_start == 0:
+                page_start = min(page_nums)
+            if page_end == 0:
+                page_end = max(page_nums)
 
     if page_start == 0:
         page_start = pages[0].get("page_num", 0)
@@ -755,12 +878,21 @@ def render_pdf_pages_sample(pdf_path: str, dpi: int, max_pages: int) -> List[Any
     return convert_from_path(pdf_path, **kwargs)
 
 
-def compute_column_density(image: Any, target_width: int = 300) -> List[float]:
+def compute_column_density(
+    image: Any,
+    config: DoclingProcessingConfig,
+    target_width: int = 300,
+) -> List[float]:
     gray = image.convert("L")
     width, height = gray.size
     if width > target_width:
         scale = target_width / max(1, width)
         gray = gray.resize((target_width, max(1, int(height * scale))))
+    width, height = gray.size
+    crop_top = int(height * config.column_detect_crop_top_ratio)
+    crop_bottom = int(height * config.column_detect_crop_bottom_ratio)
+    if crop_top + crop_bottom < height - 1:
+        gray = gray.crop((0, crop_top, width, height - crop_bottom))
 
     try:
         import numpy as np
@@ -769,25 +901,59 @@ def compute_column_density(image: Any, target_width: int = 300) -> List[float]:
         w, h = gray.size
         if w == 0 or h == 0:
             return []
+        sorted_pixels = sorted(pixels)
+        median = sorted_pixels[len(sorted_pixels) // 2]
+        mean = sum(pixels) / max(1, len(pixels))
+        variance = sum((value - mean) ** 2 for value in pixels) / max(1, len(pixels))
+        std = variance ** 0.5
+        threshold = median - (std * config.column_detect_threshold_std_mult)
+        threshold = min(threshold, config.column_detect_threshold_max)
+        threshold = max(threshold, config.column_detect_threshold_min)
         densities = [0] * w
         for y in range(h):
             row = pixels[y * w:(y + 1) * w]
             for x, value in enumerate(row):
-                if value < 200:
+                if value < threshold:
                     densities[x] += 1
         return [count / h for count in densities]
 
     arr = np.asarray(gray)
     if arr.size == 0:
         return []
-    mask = arr < 200
+    median = float(np.median(arr))
+    std = float(arr.std())
+    threshold = median - (std * config.column_detect_threshold_std_mult)
+    threshold = min(threshold, config.column_detect_threshold_max)
+    threshold = max(threshold, config.column_detect_threshold_min)
+    mask = arr < threshold
     return mask.mean(axis=0).tolist()
+
+
+def smooth_density(density: Sequence[float], window: int) -> List[float]:
+    if window <= 1 or not density:
+        return list(density)
+    size = max(1, int(window))
+    half = size // 2
+    smoothed: List[float] = []
+    for idx in range(len(density)):
+        start = max(0, idx - half)
+        end = min(len(density), idx + half + 1)
+        smoothed.append(sum(density[start:end]) / max(1, end - start))
+    return smoothed
+
+
+def density_percentile(density: Sequence[float], percentile: float) -> float:
+    if not density:
+        return 0.0
+    clamped = max(0.0, min(1.0, percentile))
+    sorted_vals = sorted(density)
+    idx = int(round(clamped * (len(sorted_vals) - 1)))
+    return sorted_vals[idx]
 
 
 def count_column_gaps(
     density: Sequence[float],
-    threshold_ratio: float,
-    min_gap_ratio: float,
+    config: DoclingProcessingConfig,
 ) -> int:
     if not density:
         return 0
@@ -798,9 +964,11 @@ def count_column_gaps(
     core = density[start:end]
     if not core:
         return 0
-    median = statistics.median(core)
-    threshold = max(0.001, median * threshold_ratio)
-    min_gap = max(1, int(len(core) * min_gap_ratio))
+    text_level = density_percentile(core, config.column_detect_text_percentile)
+    if text_level < config.column_detect_min_text_density:
+        return 0
+    threshold = max(config.column_detect_min_gap_density, text_level * config.column_detect_gap_threshold_ratio)
+    min_gap = max(1, int(len(core) * config.column_detect_min_gap_ratio))
 
     gaps = 0
     idx = 0
@@ -828,12 +996,9 @@ def detect_multicolumn_layout(
 
     hits = 0
     for image in sample:
-        density = compute_column_density(image)
-        gaps = count_column_gaps(
-            density,
-            config.column_detect_gap_threshold_ratio,
-            config.column_detect_min_gap_ratio,
-        )
+        density = compute_column_density(image, config)
+        density = smooth_density(density, config.column_detect_smooth_window)
+        gaps = count_column_gaps(density, config)
         if gaps >= 1:
             hits += 1
     ratio = hits / max(1, len(sample))
@@ -1080,6 +1245,7 @@ def build_chunks_section(
     doc_id: str,
     markdown: str,
     pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str], str]] = None,
 ) -> List[Dict[str, Any]]:
     sections = split_markdown_sections(markdown)
@@ -1097,7 +1263,7 @@ def build_chunks_section(
         cleaned = normalize_text(text)
         if not cleaned:
             continue
-        page_start, page_end = find_page_range(cleaned, pages)
+        page_start, page_end = find_page_range(cleaned, pages, config)
         base_id = slugify(title) or f"section-{idx}"
         if base_id in seen_ids:
             seen_ids[base_id] += 1
@@ -1231,7 +1397,13 @@ def main() -> int:
             ]
 
         if args.chunking == "section":
-            chunks = build_chunks_section(args.doc_id, markdown, pages, postprocess=postprocess_fn)
+            chunks = build_chunks_section(
+                args.doc_id,
+                markdown,
+                pages,
+                config=config,
+                postprocess=postprocess_fn,
+            )
         else:
             chunks = build_chunks_page(args.doc_id, pages)
     except Exception as exc:

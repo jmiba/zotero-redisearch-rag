@@ -86,8 +86,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     settings: ZoteroRagSettings;
     saveSettings: () => Promise<void>;
     startRedisStack: (silent?: boolean) => Promise<void>;
-    stopRedisStack: (silent?: boolean) => Promise<void>;
-    removeRedisStackContainer: (silent?: boolean) => Promise<void>;
   };
 
   constructor(
@@ -96,8 +94,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       settings: ZoteroRagSettings;
       saveSettings: () => Promise<void>;
       startRedisStack: (silent?: boolean) => Promise<void>;
-      stopRedisStack: (silent?: boolean) => Promise<void>;
-      removeRedisStackContainer: (silent?: boolean) => Promise<void>;
     }
   ) {
     super(app, plugin as any);
@@ -263,33 +259,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Start Redis Stack now")
-      .setDesc("Runs Docker Compose with the vault data directory.")
+      .setDesc("Restarts Docker Compose with the vault data directory.")
       .addButton((button) =>
         button.setButtonText("Start").onClick(async () => {
           await this.plugin.startRedisStack();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Stop Redis Stack now")
-      .setDesc("Stops the Docker Compose Redis Stack container.")
-      .addButton((button) =>
-        button.setButtonText("Stop").onClick(async () => {
-          await this.plugin.stopRedisStack();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Remove stale redis-stack container")
-      .setDesc("Use only if Docker reports a name conflict when starting.")
-      .addButton((button) =>
-        button.setButtonText("Remove").onClick(async () => {
-          const confirmed = window.confirm(
-            "Remove the existing redis-stack container? This does not delete your data volume."
-          );
-          if (confirmed) {
-            await this.plugin.removeRedisStackContainer();
-          }
         })
       );
 

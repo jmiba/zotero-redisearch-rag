@@ -82,8 +82,11 @@ class DoclingProcessingTests(unittest.TestCase):
         self.assertTrue(use_per_page)
 
     def test_count_column_gaps(self):
+        config = self.docling.DoclingProcessingConfig()
+        config.column_detect_gap_threshold_ratio = 0.5
+        config.column_detect_min_gap_ratio = 0.1
         density = [0.9, 0.8, 0.1, 0.1, 0.85, 0.9]
-        gaps = self.docling.count_column_gaps(density, 0.5, 0.1)
+        gaps = self.docling.count_column_gaps(density, config)
         self.assertEqual(gaps, 1)
 
     def test_postprocess_dehyphenation(self):
@@ -91,6 +94,20 @@ class DoclingProcessingTests(unittest.TestCase):
         text = "hyphen-\nated"
         output = self.docling.postprocess_text(text, config, "eng", [])
         self.assertIn("hyphenated", output)
+
+    def test_find_page_range_overlap(self):
+        config = self.docling.DoclingProcessingConfig()
+        pages = [
+            {"page_num": 1, "text": "alpha beta gamma"},
+            {"page_num": 2, "text": "delta epsilon zeta overlap token"},
+            {"page_num": 3, "text": "overlap token eta theta"},
+            {"page_num": 4, "text": "iota kappa lambda"},
+        ]
+        section = "overlap token eta"
+        start, end = self.docling.find_page_range(section, pages, config)
+        self.assertLessEqual(start, end)
+        self.assertTrue(2 <= start <= 3)
+        self.assertTrue(2 <= end <= 3)
 
     def test_dictionary_correction(self):
         corrected = self.docling.apply_dictionary_correction("m0dern", ["modern"])

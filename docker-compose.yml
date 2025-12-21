@@ -2,7 +2,9 @@ services:
   redis-stack:
     image: redis/redis-stack-server:latest
     container_name: redis-stack
-    command: ["redis-stack-server", "/redis-stack.conf"]
+    command: ["redis-stack-server", "/redis-stack.conf", "--dir", "/data"]
+    environment:
+      - REDIS_ARGS=
     ports:
       - "6379:6379"
     volumes:

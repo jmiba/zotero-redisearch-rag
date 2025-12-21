@@ -5,6 +5,7 @@ import {
   Notice,
   Plugin,
   SuggestModal,
+  TFile,
   WorkspaceLeaf,
   normalizePath,
 } from "obsidian";
@@ -136,6 +137,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE_ZOTERO_CHAT, (leaf) => new ZoteroChatView(leaf, this));
     this.setupStatusBar();
+    this.registerNoteRenameHandler();
 
     try {
       await this.ensureBundledTools();
@@ -180,15 +182,15 @@ export default class ZoteroRagPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "start-redis-stack",
-      name: "Start Redis Stack (Docker Compose)",
-      callback: () => this.startRedisStack(),
+      id: "reindex-redis-from-cache",
+      name: "Reindex Redis from cached chunks",
+      callback: () => this.reindexRedisFromCache(),
     });
 
     this.addCommand({
-      id: "stop-redis-stack",
-      name: "Stop Redis Stack (Docker Compose)",
-      callback: () => this.stopRedisStack(),
+      id: "start-redis-stack",
+      name: "Start Redis Stack (Docker Compose)",
+      callback: () => this.startRedisStack(),
     });
 
     if (this.settings.autoStartRedis) {
@@ -522,7 +524,11 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!entry || !entry.note_title || !entry.zotero_title || !entry.note_path || !entry.pdf_path) {
       entry = await this.hydrateDocIndexFromCache(citation.doc_id);
     }
-    const noteTitle = entry?.zotero_title || entry?.note_title || citation.doc_id || "?";
+    const notePath = citation.doc_id ? await this.resolveNotePathForDocId(citation.doc_id) : entry?.note_path;
+    const noteTitle =
+      entry?.zotero_title ||
+      entry?.note_title ||
+      (notePath ? path.basename(notePath, ".md") : citation.doc_id || "?");
     const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
     const label = `${noteTitle} pages ${pages}`;
     const pageStart = citation.page_start ? String(citation.page_start) : "";
@@ -532,7 +538,7 @@ export default class ZoteroRagPlugin extends Plugin {
       : undefined;
     return {
       label,
-      notePath: entry?.note_path,
+      notePath: notePath || undefined,
       pdfPath: pdfPath || undefined,
       zoteroUrl,
       pageStart: pageStart || undefined,
@@ -713,6 +719,67 @@ export default class ZoteroRagPlugin extends Plugin {
     this.showStatusProgress("Done", 100);
     window.setTimeout(() => this.clearStatusProgress(), 1200);
     new Notice(`Recreated ${rebuilt}/${missing.length} missing notes.`);
+  }
+
+  private async reindexRedisFromCache(): Promise<void> {
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      new Notice("Failed to sync bundled tools. See console for details.");
+      console.error(error);
+      return;
+    }
+
+    const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
+    if (chunkDocIds.length === 0) {
+      new Notice("No cached chunks found.");
+      return;
+    }
+
+    const pluginDir = this.getPluginDir();
+    const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+    let processed = 0;
+    let failures = 0;
+
+    this.showStatusProgress("Reindexing cached chunks...", 0);
+
+    for (const docId of chunkDocIds) {
+      processed += 1;
+      const percent = Math.round((processed / chunkDocIds.length) * 100);
+      this.showStatusProgress(`Reindexing ${processed}/${chunkDocIds.length}`, percent);
+
+      const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+      try {
+        await this.runPython(indexScript, [
+          "--chunks-json",
+          this.getAbsoluteVaultPath(chunkPath),
+          "--redis-url",
+          this.settings.redisUrl,
+          "--index",
+          this.settings.redisIndex,
+          "--prefix",
+          this.settings.redisPrefix,
+          "--embed-base-url",
+          this.settings.embedBaseUrl,
+          "--embed-api-key",
+          this.settings.embedApiKey,
+          "--embed-model",
+          this.settings.embedModel,
+          "--upsert",
+        ]);
+      } catch (error) {
+        failures += 1;
+        console.error(`Failed to reindex ${docId}`, error);
+      }
+    }
+
+    this.showStatusProgress("Done", 100);
+    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    if (failures === 0) {
+      new Notice(`Reindexed ${chunkDocIds.length} cached items.`);
+    } else {
+      new Notice(`Reindexed ${chunkDocIds.length - failures}/${chunkDocIds.length} items (see console).`);
+    }
   }
 
   private async promptZoteroItem(): Promise<ZoteroLocalItem | null> {
@@ -927,8 +994,53 @@ export default class ZoteroRagPlugin extends Plugin {
       return "";
     }
     const normalized = cleaned.replace(/[.]+$/g, "").trim();
-    const dashed = normalized.replace(/ /g, "-");
-    return dashed.slice(0, 120);
+    return normalized.slice(0, 120);
+  }
+
+  private registerNoteRenameHandler(): void {
+    this.registerEvent(
+      this.app.vault.on("rename", async (file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") {
+          return;
+        }
+        try {
+          const content = await this.app.vault.read(file);
+          const docId = this.extractDocIdFromFrontmatter(content);
+          if (!docId) {
+            return;
+          }
+          await this.updateDocIndex({
+            doc_id: docId,
+            note_path: file.path,
+            note_title: path.basename(file.path, ".md"),
+          });
+        } catch (error) {
+          console.warn("Failed to update doc index for renamed note", error);
+        }
+      })
+    );
+  }
+
+  private async resolveNotePathForDocId(docId: string | undefined): Promise<string | null> {
+    if (!docId) {
+      return null;
+    }
+    const adapter = this.app.vault.adapter;
+    const entry = await this.getDocIndexEntry(docId);
+    if (entry?.note_path && (await adapter.exists(entry.note_path))) {
+      return entry.note_path;
+    }
+    const noteEntries = await this.scanNotesForDocIds(this.settings.outputNoteDir);
+    const fromScan = noteEntries[docId];
+    if (fromScan?.note_path) {
+      await this.updateDocIndex({
+        doc_id: docId,
+        note_path: fromScan.note_path,
+        note_title: fromScan.note_title,
+      });
+      return fromScan.note_path;
+    }
+    return null;
   }
 
   private async resolveUniqueBaseName(baseName: string, docId: string): Promise<string> {
@@ -1869,6 +1981,13 @@ export default class ZoteroRagPlugin extends Plugin {
       const dataDir = this.getRedisDataDir();
       await fs.mkdir(dataDir, { recursive: true });
       const dockerPath = this.settings.dockerPath?.trim() || "docker";
+      try {
+        await this.runCommand(dockerPath, ["compose", "-f", composePath, "down"], {
+          cwd: path.dirname(composePath),
+        });
+      } catch (error) {
+        console.warn("Redis Stack stop before restart failed", error);
+      }
       await this.runCommand(
         dockerPath,
         ["compose", "-f", composePath, "up", "-d"],
@@ -1885,47 +2004,6 @@ export default class ZoteroRagPlugin extends Plugin {
         new Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing.");
       }
       console.error("Failed to start Redis Stack", error);
-    }
-  }
-
-  async stopRedisStack(silent?: boolean): Promise<void> {
-    try {
-      await this.ensureBundledTools();
-      const composePath = this.getDockerComposePath();
-      const dockerPath = this.settings.dockerPath?.trim() || "docker";
-      await this.runCommand(dockerPath, ["compose", "-f", composePath, "down"], {
-        cwd: path.dirname(composePath),
-      });
-      if (!silent) {
-        new Notice("Redis Stack stopped.");
-      }
-    } catch (error) {
-      if (!silent) {
-        new Notice("Failed to stop Redis Stack. See console for details.");
-      }
-      console.error("Failed to stop Redis Stack", error);
-    }
-  }
-
-  async removeRedisStackContainer(silent?: boolean): Promise<void> {
-    try {
-      const dockerPath = this.settings.dockerPath?.trim() || "docker";
-      await this.runCommand(dockerPath, ["rm", "-f", "redis-stack"]);
-      if (!silent) {
-        new Notice("Removed redis-stack container.");
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("No such container")) {
-        if (!silent) {
-          new Notice("redis-stack container not found.");
-        }
-        return;
-      }
-      if (!silent) {
-        new Notice("Failed to remove redis-stack container. See console for details.");
-      }
-      console.error("Failed to remove redis-stack container", error);
     }
   }
 
