@@ -3,6 +3,9 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 export type OcrMode = "auto" | "force" | "off";
 export type ChunkingMode = "page" | "section";
 
+export const ITEM_CACHE_DIR = ".zotero-redisearch-rag/items";
+export const CHUNK_CACHE_DIR = ".zotero-redisearch-rag/chunks";
+
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
   zoteroUserId: string;
@@ -10,9 +13,7 @@ export interface ZoteroRagSettings {
   copyPdfToVault: boolean;
   frontmatterTemplate: string;
   outputPdfDir: string;
-  outputItemDir: string;
   outputNoteDir: string;
-  outputChunkDir: string;
   redisUrl: string;
   redisIndex: string;
   redisPrefix: string;
@@ -42,18 +43,16 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "pdf_link: {{pdf_link}}\n" +
     "item_json: {{item_json}}",
   outputPdfDir: "zotero/pdfs",
-  outputItemDir: "zotero/items",
   outputNoteDir: "zotero/notes",
-  outputChunkDir: "zotero/chunks",
   redisUrl: "redis://127.0.0.1:6379",
   redisIndex: "idx:zotero",
   redisPrefix: "zotero:chunk:",
   embedBaseUrl: "http://localhost:1234/v1",
   embedApiKey: "lm-studio",
   embedModel: "google/embedding-gemma-300m",
-  chatBaseUrl: "",
+  chatBaseUrl: "http://127.0.0.1:1234/v1",
   chatApiKey: "",
-  chatModel: "meta-llama/llama-3.1-405b-instruct",
+  chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
   ocrMode: "auto",
   chunkingMode: "page",
@@ -152,18 +151,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Item JSON folder")
-      .addText((text) =>
-        text
-          .setPlaceholder("zotero/items")
-          .setValue(this.plugin.settings.outputItemDir)
-          .onChange(async (value) => {
-            this.plugin.settings.outputItemDir = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Notes folder")
       .addText((text) =>
         text
@@ -171,18 +158,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.outputNoteDir)
           .onChange(async (value) => {
             this.plugin.settings.outputNoteDir = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Chunks JSON folder")
-      .addText((text) =>
-        text
-          .setPlaceholder("zotero/chunks")
-          .setValue(this.plugin.settings.outputChunkDir)
-          .onChange(async (value) => {
-            this.plugin.settings.outputChunkDir = value.trim();
             await this.plugin.saveSettings();
           })
       );

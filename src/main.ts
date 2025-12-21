@@ -5,7 +5,13 @@ import http from "http";
 import https from "https";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { DEFAULT_SETTINGS, ZoteroRagSettingTab, ZoteroRagSettings } from "./settings";
+import {
+  CHUNK_CACHE_DIR,
+  DEFAULT_SETTINGS,
+  ITEM_CACHE_DIR,
+  ZoteroRagSettingTab,
+  ZoteroRagSettings,
+} from "./settings";
 import { TOOL_ASSETS } from "./toolAssets";
 
 type ZoteroItemValues = Record<string, any>;
@@ -25,12 +31,20 @@ class TextPromptModal extends Modal {
   private titleText: string;
   private placeholder: string;
   private onSubmit: (value: string) => void;
+  private emptyMessage: string;
 
-  constructor(app: App, titleText: string, placeholder: string, onSubmit: (value: string) => void) {
+  constructor(
+    app: App,
+    titleText: string,
+    placeholder: string,
+    onSubmit: (value: string) => void,
+    emptyMessage = "Value cannot be empty."
+  ) {
     super(app);
     this.titleText = titleText;
     this.placeholder = placeholder;
     this.onSubmit = onSubmit;
+    this.emptyMessage = emptyMessage;
   }
 
   onOpen(): void {
@@ -51,7 +65,7 @@ class TextPromptModal extends Modal {
     const submitValue = (): void => {
       const value = input.value.trim();
       if (!value) {
-        new Notice("Query cannot be empty.");
+        new Notice(this.emptyMessage);
         return;
       }
       this.close();
@@ -91,6 +105,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.migrateCachePaths();
     this.addSettingTab(new ZoteroRagSettingTab(this.app, this));
 
     try {
@@ -109,6 +124,12 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "ask-zotero-library",
       name: "Ask my Zotero library (RAG via RedisSearch)",
       callback: () => this.askZoteroLibrary(),
+    });
+
+    this.addCommand({
+      id: "rebuild-zotero-note-cache",
+      name: "Rebuild Zotero note from cache (Docling + RedisSearch)",
+      callback: () => this.rebuildNoteFromCache(),
     });
   }
 
@@ -165,13 +186,13 @@ export default class ZoteroRagPlugin extends Plugin {
     const finalBaseName = await this.resolveUniqueBaseName(baseName, docId);
 
     const pdfPath = normalizePath(`${this.settings.outputPdfDir}/${finalBaseName}.pdf`);
-    const itemPath = normalizePath(`${this.settings.outputItemDir}/${docId}.json`);
-    const chunkPath = normalizePath(`${this.settings.outputChunkDir}/${docId}.json`);
+    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
     const notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
 
     try {
-      await this.ensureFolder(this.settings.outputItemDir);
-      await this.ensureFolder(this.settings.outputChunkDir);
+      await this.ensureFolder(ITEM_CACHE_DIR);
+      await this.ensureFolder(CHUNK_CACHE_DIR);
       await this.ensureFolder(this.settings.outputNoteDir);
       if (this.settings.copyPdfToVault) {
         await this.ensureFolder(this.settings.outputPdfDir);
@@ -349,12 +370,167 @@ export default class ZoteroRagPlugin extends Plugin {
 
       const body = `${answer}\n\nCitations:\n${citationText || "(none)"}`;
       new OutputModal(this.app, "Zotero RAG Answer", body).open();
-    }).open();
+    }, "Query cannot be empty.").open();
+  }
+
+  private async rebuildNoteFromCache(): Promise<void> {
+    const docId = await this.promptDocId();
+    if (!docId) {
+      new Notice("No doc_id provided.");
+      return;
+    }
+
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      new Notice("Failed to sync bundled tools. See console for details.");
+      console.error(error);
+      return;
+    }
+
+    const adapter = this.app.vault.adapter;
+    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+
+    if (!(await adapter.exists(itemPath))) {
+      new Notice("Cached item JSON not found.");
+      return;
+    }
+    if (!(await adapter.exists(chunkPath))) {
+      new Notice("Cached chunks JSON not found.");
+      return;
+    }
+
+    let item: ZoteroLocalItem;
+    try {
+      const itemRaw = await adapter.read(itemPath);
+      item = JSON.parse(itemRaw);
+    } catch (error) {
+      new Notice("Failed to read cached item JSON.");
+      console.error(error);
+      return;
+    }
+
+    let chunkPayload: Record<string, any>;
+    try {
+      const chunkRaw = await adapter.read(chunkPath);
+      chunkPayload = JSON.parse(chunkRaw);
+    } catch (error) {
+      new Notice("Failed to read cached chunks JSON.");
+      console.error(error);
+      return;
+    }
+
+    const sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
+    if (!sourcePdf) {
+      new Notice("Cached chunk JSON is missing source_pdf.");
+      return;
+    }
+
+    try {
+      await fs.access(sourcePdf);
+    } catch (error) {
+      new Notice("Cached source PDF path is not accessible.");
+      console.error(error);
+      return;
+    }
+
+    const values: ZoteroItemValues = item.data ?? item;
+    const title = typeof values.title === "string" ? values.title : "";
+    const baseName = this.sanitizeFileName(title) || docId;
+    const baseNotePath = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+    const finalBaseName = (await adapter.exists(baseNotePath))
+      ? baseName
+      : await this.resolveUniqueBaseName(baseName, docId);
+    const notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
+
+    try {
+      await this.ensureFolder(this.settings.outputNoteDir);
+    } catch (error) {
+      new Notice("Failed to create notes folder.");
+      console.error(error);
+      return;
+    }
+
+    const pluginDir = this.getPluginDir();
+    const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
+    const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+
+    try {
+      await this.runPython(doclingScript, [
+        "--pdf",
+        sourcePdf,
+        "--doc-id",
+        docId,
+        "--out-json",
+        this.getAbsoluteVaultPath(chunkPath),
+        "--out-md",
+        this.getAbsoluteVaultPath(notePath),
+        "--chunking",
+        this.settings.chunkingMode,
+        "--ocr",
+        this.settings.ocrMode,
+      ]);
+    } catch (error) {
+      new Notice("Docling extraction failed. See console for details.");
+      console.error(error);
+      return;
+    }
+
+    try {
+      await this.runPython(indexScript, [
+        "--chunks-json",
+        this.getAbsoluteVaultPath(chunkPath),
+        "--redis-url",
+        this.settings.redisUrl,
+        "--index",
+        this.settings.redisIndex,
+        "--prefix",
+        this.settings.redisPrefix,
+        "--embed-base-url",
+        this.settings.embedBaseUrl,
+        "--embed-api-key",
+        this.settings.embedApiKey,
+        "--embed-model",
+        this.settings.embedModel,
+        "--upsert",
+      ]);
+    } catch (error) {
+      new Notice("RedisSearch indexing failed. See console for details.");
+      console.error(error);
+      return;
+    }
+
+    const pdfLink = this.buildPdfLinkFromSourcePath(sourcePdf);
+
+    try {
+      const doclingMd = await this.app.vault.adapter.read(notePath);
+      const noteContent = this.buildNoteMarkdown(values, item.meta ?? {}, docId, pdfLink, itemPath, doclingMd);
+      await this.app.vault.adapter.write(notePath, noteContent);
+    } catch (error) {
+      new Notice("Failed to finalize note markdown.");
+      console.error(error);
+      return;
+    }
+
+    new Notice(`Rebuilt Zotero note for ${docId}.`);
   }
 
   private async promptZoteroItem(): Promise<ZoteroLocalItem | null> {
     return new Promise((resolve) => {
       new ZoteroItemSuggestModal(this.app, this, resolve).open();
+    });
+  }
+
+  private async promptDocId(): Promise<string | null> {
+    return new Promise((resolve) => {
+      new TextPromptModal(
+        this.app,
+        "Rebuild Zotero note from cache",
+        "Enter Zotero doc_id (e.g., ABC123)",
+        (value) => resolve(value),
+        "Doc ID cannot be empty."
+      ).open();
     });
   }
 
@@ -574,6 +750,20 @@ export default class ZoteroRagPlugin extends Plugin {
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
   }
 
+  private buildPdfLinkFromSourcePath(sourcePdf: string): string {
+    if (!sourcePdf) {
+      return "";
+    }
+    const vaultBase = path.normalize(this.getVaultBasePath());
+    const normalizedSource = path.normalize(sourcePdf);
+    const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
+    if (normalizedSource.startsWith(vaultPrefix)) {
+      const relative = normalizePath(path.relative(vaultBase, normalizedSource));
+      return `[[${relative}]]`;
+    }
+    return `[PDF](${pathToFileURL(sourcePdf).toString()})`;
+  }
+
   private getZoteroLibraryPath(): string {
     const raw = (this.settings.zoteroUserId || "0").trim();
     if (!raw || raw === "0") {
@@ -748,6 +938,41 @@ export default class ZoteroRagPlugin extends Plugin {
       if (shouldWrite) {
         await fs.writeFile(target, content, "utf8");
       }
+    }
+  }
+
+  private async migrateCachePaths(): Promise<void> {
+    const oldItemDir = "zotero/items";
+    const oldChunkDir = "zotero/chunks";
+    const newItemDir = ITEM_CACHE_DIR;
+    const newChunkDir = CHUNK_CACHE_DIR;
+
+    const adapter = this.app.vault.adapter;
+    const oldItemPath = normalizePath(oldItemDir);
+    const oldChunkPath = normalizePath(oldChunkDir);
+    const newItemPath = normalizePath(newItemDir);
+    const newChunkPath = normalizePath(newChunkDir);
+
+    const newItemParent = newItemPath.split("/").slice(0, -1).join("/");
+    const newChunkParent = newChunkPath.split("/").slice(0, -1).join("/");
+
+    if (newItemParent) {
+      await this.ensureFolder(newItemParent);
+    }
+    if (newChunkParent) {
+      await this.ensureFolder(newChunkParent);
+    }
+
+    const oldItemExists = await adapter.exists(oldItemPath);
+    const oldChunkExists = await adapter.exists(oldChunkPath);
+    const newItemExists = await adapter.exists(newItemPath);
+    const newChunkExists = await adapter.exists(newChunkPath);
+
+    if (oldItemExists && !newItemExists) {
+      await adapter.rename(oldItemPath, newItemPath);
+    }
+    if (oldChunkExists && !newChunkExists) {
+      await adapter.rename(oldChunkPath, newChunkPath);
     }
   }
 

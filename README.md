@@ -117,10 +117,10 @@ The answer will only use retrieved context and include citations.
 ## File outputs
 
 Interactive mode writes to your vault:
-- `zotero/pdfs/<doc_id>.pdf`
-- `zotero/items/<doc_id>.json`
-- `zotero/notes/<doc_id>.md`
-- `zotero/chunks/<doc_id>.json`
+- `zotero/pdfs/<title>.pdf` (optional, if copy is enabled)
+- `.zotero-redisearch-rag/items/<doc_id>.json`
+- `zotero/notes/<title>.md`
+- `.zotero-redisearch-rag/chunks/<doc_id>.json`
 
 Batch mode writes to `--out-dir`:
 - `pdfs/`, `items/`, `docs/`, `chunks/`, `checkpoint.json`
