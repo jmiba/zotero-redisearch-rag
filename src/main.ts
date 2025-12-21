@@ -6,6 +6,7 @@ import https from "https";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { DEFAULT_SETTINGS, ZoteroRagSettingTab, ZoteroRagSettings } from "./settings";
+import { TOOL_ASSETS } from "./toolAssets";
 
 type ZoteroItemValues = Record<string, any>;
 
@@ -92,6 +93,12 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.loadSettings();
     this.addSettingTab(new ZoteroRagSettingTab(this.app, this));
 
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      console.error("Failed to sync bundled tools", error);
+    }
+
     this.addCommand({
       id: "import-zotero-item-index",
       name: "Import Zotero item and index (Docling -> RedisSearch)",
@@ -114,6 +121,14 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async importZoteroItem(): Promise<void> {
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      new Notice("Failed to sync bundled tools. See console for details.");
+      console.error(error);
+      return;
+    }
+
     let item: ZoteroLocalItem | null;
     try {
       item = await this.promptZoteroItem();
@@ -264,6 +279,14 @@ export default class ZoteroRagPlugin extends Plugin {
   private async askZoteroLibrary(): Promise<void> {
     if (!this.settings.chatBaseUrl) {
       new Notice("Chat base URL must be set in settings.");
+      return;
+    }
+
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      new Notice("Failed to sync bundled tools. See console for details.");
+      console.error(error);
       return;
     }
 
@@ -704,6 +727,28 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const pluginPath = path.isAbsolute(dir) ? dir : path.join(basePath, dir);
     return path.normalize(pluginPath);
+  }
+
+  private async ensureBundledTools(): Promise<void> {
+    const pluginDir = this.getPluginDir();
+    const toolsDir = path.join(pluginDir, "tools");
+    await fs.mkdir(toolsDir, { recursive: true });
+
+    for (const [filename, content] of Object.entries(TOOL_ASSETS)) {
+      const target = path.join(toolsDir, filename);
+      let shouldWrite = true;
+      try {
+        const existing = await fs.readFile(target, "utf8");
+        if (existing === content) {
+          shouldWrite = false;
+        }
+      } catch {
+        // File missing or unreadable; overwrite below.
+      }
+      if (shouldWrite) {
+        await fs.writeFile(target, content, "utf8");
+      }
+    }
   }
 
   private getAbsoluteVaultPath(vaultRelativePath: string): string {

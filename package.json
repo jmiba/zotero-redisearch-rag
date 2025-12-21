@@ -1,11 +1,11 @@
 {
   "name": "zotero-redisearch-rag",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Obsidian plugin for Zotero -> Docling -> Redis Stack RAG",
   "main": "main.js",
   "scripts": {
-    "build": "node esbuild.config.mjs production",
-    "dev": "node esbuild.config.mjs",
+    "build": "node scripts/build-tool-assets.mjs && node esbuild.config.mjs production",
+    "dev": "node scripts/build-tool-assets.mjs && node esbuild.config.mjs",
     "package-release": "npm run build && bash scripts/package-release.sh"
   },
   "devDependencies": {

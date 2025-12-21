@@ -50,7 +50,8 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         client.execute_command("FT.INFO", index_name)
         return
     except redis.exceptions.ResponseError as exc:
-        if "Unknown Index name" not in str(exc):
+        message = str(exc).lower()
+        if "unknown index name" not in message:
             raise
 
     client.execute_command(

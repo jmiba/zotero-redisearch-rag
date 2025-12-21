@@ -44,6 +44,13 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
     return [float(x) for x in embedding]
 
 
+def is_temperature_unsupported(message: str) -> bool:
+    lowered = message.lower()
+    return "temperature" in lowered and (
+        "not supported" in lowered or "unsupported" in lowered or "unknown parameter" in lowered
+    )
+
+
 def request_chat(
     base_url: str,
     api_key: str,
@@ -57,18 +64,26 @@ def request_chat(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    payload = {
+    base_payload = {
         "model": model,
-        "temperature": temperature,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     }
+    payload = dict(base_payload)
+    payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120)
     if response.status_code >= 400:
-        raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
+        error_text = response.text
+        if is_temperature_unsupported(error_text):
+            response = requests.post(url, json=base_payload, headers=headers, timeout=120)
+            if response.status_code >= 400:
+                raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
+        else:
+            raise RuntimeError(f"Chat request failed: {response.status_code} {error_text}")
+
     data = response.json()
     choices = data.get("choices")
     if not choices:

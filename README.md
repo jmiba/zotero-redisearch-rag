@@ -1,5 +1,8 @@
 # Zotero -> Docling -> Redis Stack -> LLaMA 3.1 RAG
 
+> [!CAUTION]
+> This Obsidian plugin is in early development. Use at your own risk.
+
 Science-grade Zotero RAG pipeline:
 - Interactive mode via Obsidian local Zotero API search for item selection
 - Batch mode via pyzotero
