@@ -32,6 +32,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
         headers["Authorization"] = f"Bearer {api_key}"
 
     response = requests.post(url, json={"input": text, "model": model}, headers=headers, timeout=120)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         raise RuntimeError(f"Embedding request failed: {response.status_code} {response.text}")
     payload = response.json()
@@ -80,10 +81,12 @@ def request_chat(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
             response = requests.post(url, json=base_payload, headers=headers, timeout=120)
+            response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
         else:
@@ -126,10 +129,12 @@ def request_chat_stream(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120, stream=True)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
             response = requests.post(url, json=base_payload, headers=headers, timeout=120, stream=True)
+            response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
         else:

@@ -39,6 +39,16 @@ type PdfAttachment = {
   filePath?: string;
 };
 
+type DocIndexEntry = {
+  doc_id: string;
+  note_path: string;
+  note_title: string;
+  zotero_title?: string;
+  pdf_path?: string;
+  attachment_key?: string;
+  updated_at: string;
+};
+
 class TextPromptModal extends Modal {
   private titleText: string;
   private placeholder: string;
@@ -114,6 +124,7 @@ class OutputModal extends Modal {
 
 export default class ZoteroRagPlugin extends Plugin {
   settings!: ZoteroRagSettings;
+  private docIndex: Record<string, DocIndexEntry> | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -314,6 +325,19 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
+    try {
+      await this.updateDocIndex({
+        doc_id: docId,
+        note_path: notePath,
+        note_title: finalBaseName,
+        zotero_title: title,
+        pdf_path: pdfSourcePath,
+        attachment_key: attachment.key,
+      });
+    } catch (error) {
+      console.error("Failed to update doc index", error);
+    }
+
     new Notice(`Indexed Zotero item ${docId}.`);
   }
 
@@ -434,6 +458,56 @@ export default class ZoteroRagPlugin extends Plugin {
     );
   }
 
+  public async resolveCitationDisplay(citation: ChatCitation): Promise<{
+    label: string;
+    notePath?: string;
+    pdfPath?: string;
+    zoteroUrl?: string;
+    pageStart?: string;
+  }> {
+    let entry = await this.getDocIndexEntry(citation.doc_id);
+    if (!entry || !entry.note_title || !entry.zotero_title || !entry.note_path || !entry.pdf_path) {
+      entry = await this.hydrateDocIndexFromCache(citation.doc_id);
+    }
+    const noteTitle = entry?.zotero_title || entry?.note_title || citation.doc_id || "?";
+    const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
+    const label = `${noteTitle} pages ${pages}`;
+    const pageStart = citation.page_start ? String(citation.page_start) : "";
+    const pdfPath = entry?.pdf_path || citation.source_pdf || "";
+    const zoteroUrl = citation.doc_id
+      ? this.buildZoteroDeepLink(citation.doc_id, entry?.attachment_key, pageStart)
+      : undefined;
+    return {
+      label,
+      notePath: entry?.note_path,
+      pdfPath: pdfPath || undefined,
+      zoteroUrl,
+      pageStart: pageStart || undefined,
+    };
+  }
+
+  public async openCitationTarget(
+    citation: ChatCitation,
+    display?: { notePath?: string; pdfPath?: string; zoteroUrl?: string; pageStart?: string }
+  ): Promise<void> {
+    const resolved = display ?? (await this.resolveCitationDisplay(citation));
+    if (resolved.notePath) {
+      await this.openNoteInMain(resolved.notePath);
+      return;
+    }
+    if (resolved.pdfPath) {
+      const opened = await this.openPdfInMain(resolved.pdfPath, resolved.pageStart);
+      if (opened) {
+        return;
+      }
+    }
+    if (resolved.zoteroUrl) {
+      this.openExternalUrl(resolved.zoteroUrl);
+      return;
+    }
+    new Notice("Unable to open citation target.");
+  }
+
   private async rebuildNoteFromCache(): Promise<void> {
     const docId = await this.promptDocId();
     if (!docId) {
@@ -498,12 +572,21 @@ export default class ZoteroRagPlugin extends Plugin {
 
     const values: ZoteroItemValues = item.data ?? item;
     const title = typeof values.title === "string" ? values.title : "";
-    const baseName = this.sanitizeFileName(title) || docId;
-    const baseNotePath = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
-    const finalBaseName = (await adapter.exists(baseNotePath))
-      ? baseName
-      : await this.resolveUniqueBaseName(baseName, docId);
-    const notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
+    let notePath = "";
+
+    const existingEntry = await this.getDocIndexEntry(docId);
+    if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
+      notePath = normalizePath(existingEntry.note_path);
+    }
+
+    if (!notePath) {
+      const baseName = this.sanitizeFileName(title) || docId;
+      const baseNotePath = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+      const finalBaseName = (await adapter.exists(baseNotePath))
+        ? baseName
+        : await this.resolveUniqueBaseName(baseName, docId);
+      notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
+    }
 
     try {
       await this.ensureFolder(this.settings.outputNoteDir);
@@ -572,6 +655,18 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Failed to finalize note markdown.");
       console.error(error);
       return;
+    }
+
+    try {
+      await this.updateDocIndex({
+        doc_id: docId,
+        note_path: notePath,
+        note_title: path.basename(notePath, ".md"),
+        zotero_title: title,
+        pdf_path: sourcePdf,
+      });
+    } catch (error) {
+      console.error("Failed to update doc index", error);
     }
 
     new Notice(`Rebuilt Zotero note for ${docId}.`);
@@ -825,6 +920,47 @@ export default class ZoteroRagPlugin extends Plugin {
     return `[PDF](${pathToFileURL(sourcePdf).toString()})`;
   }
 
+  public async openNoteInMain(notePath: string): Promise<void> {
+    const normalized = normalizePath(notePath);
+    await this.app.workspace.openLinkText(normalized, "", "tab");
+  }
+
+  private async openPdfInMain(sourcePdf: string, pageStart?: string): Promise<boolean> {
+    if (!sourcePdf) {
+      return false;
+    }
+    const vaultBase = path.normalize(this.getVaultBasePath());
+    const normalizedSource = path.normalize(sourcePdf);
+    const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
+    if (normalizedSource.startsWith(vaultPrefix)) {
+      const relative = normalizePath(path.relative(vaultBase, normalizedSource));
+      const pageSuffix = pageStart ? `#page=${pageStart}` : "";
+      await this.app.workspace.openLinkText(`${relative}${pageSuffix}`, "", "tab");
+      return true;
+    }
+    try {
+      window.open(pathToFileURL(sourcePdf).toString());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public openExternalUrl(url: string): void {
+    if (!url) {
+      return;
+    }
+    window.open(url);
+  }
+
+  private buildZoteroDeepLink(docId: string, attachmentKey?: string, pageStart?: string): string {
+    if (attachmentKey) {
+      const page = pageStart ? `?page=${encodeURIComponent(pageStart)}` : "";
+      return `zotero://open-pdf/library/items/${attachmentKey}${page}`;
+    }
+    return `zotero://select/library/items/${docId}`;
+  }
+
   public formatCitationsMarkdown(citations: ChatCitation[]): string {
     if (!citations.length) {
       return "";
@@ -857,6 +993,157 @@ export default class ZoteroRagPlugin extends Plugin {
       return crypto.randomUUID();
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  private getDocIndexPath(): string {
+    return normalizePath(`${CACHE_ROOT}/doc_index.json`);
+  }
+
+  private async getDocIndex(): Promise<Record<string, DocIndexEntry>> {
+    if (this.docIndex) {
+      return this.docIndex;
+    }
+    this.docIndex = await this.loadDocIndexFromDisk();
+    return this.docIndex;
+  }
+
+  private async loadDocIndexFromDisk(): Promise<Record<string, DocIndexEntry>> {
+    const adapter = this.app.vault.adapter;
+    const indexPath = this.getDocIndexPath();
+    if (!(await adapter.exists(indexPath))) {
+      return {};
+    }
+    try {
+      const raw = await adapter.read(indexPath);
+      const payload = JSON.parse(raw);
+      if (payload && typeof payload === "object") {
+        const entries = payload.entries ?? payload;
+        if (Array.isArray(entries)) {
+          const map: Record<string, DocIndexEntry> = {};
+          for (const entry of entries) {
+            if (entry?.doc_id) {
+              map[String(entry.doc_id)] = entry;
+            }
+          }
+          return map;
+        }
+        if (entries && typeof entries === "object") {
+          return entries as Record<string, DocIndexEntry>;
+        }
+      }
+    } catch (error) {
+      console.error("Failed to read doc index", error);
+    }
+    return {};
+  }
+
+  private async saveDocIndex(index: Record<string, DocIndexEntry>): Promise<void> {
+    await this.ensureFolder(CACHE_ROOT);
+    const adapter = this.app.vault.adapter;
+    const indexPath = this.getDocIndexPath();
+    const payload = { version: 1, entries: index };
+    await adapter.write(indexPath, JSON.stringify(payload, null, 2));
+    this.docIndex = index;
+  }
+
+  private async updateDocIndex(entry: Partial<DocIndexEntry> & { doc_id: string }): Promise<void> {
+    const index = await this.getDocIndex();
+    const existing = index[entry.doc_id] ?? { doc_id: entry.doc_id } as DocIndexEntry;
+    const next: DocIndexEntry = {
+      ...existing,
+      ...entry,
+      doc_id: entry.doc_id,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (entry.note_path === undefined && existing.note_path) {
+      next.note_path = existing.note_path;
+    }
+    if (entry.note_title === undefined && existing.note_title) {
+      next.note_title = existing.note_title;
+    }
+    if (entry.zotero_title === undefined && existing.zotero_title) {
+      next.zotero_title = existing.zotero_title;
+    }
+    if (entry.pdf_path === undefined && existing.pdf_path) {
+      next.pdf_path = existing.pdf_path;
+    }
+    if (entry.attachment_key === undefined && existing.attachment_key) {
+      next.attachment_key = existing.attachment_key;
+    }
+
+    index[entry.doc_id] = next;
+    await this.saveDocIndex(index);
+  }
+
+  private async hydrateDocIndexFromCache(docId: string): Promise<DocIndexEntry | null> {
+    if (!docId) {
+      return null;
+    }
+    const adapter = this.app.vault.adapter;
+    const existingEntry = await this.getDocIndexEntry(docId);
+    const updates: Partial<DocIndexEntry> = {};
+
+    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+    if (await adapter.exists(itemPath)) {
+      try {
+        const raw = await adapter.read(itemPath);
+        const item = JSON.parse(raw);
+        const values: ZoteroItemValues = item?.data ?? item ?? {};
+        const title = typeof values.title === "string" ? values.title : "";
+        if (title) {
+          updates.zotero_title = title;
+        }
+        if (!updates.note_title || !updates.note_path) {
+          const baseName = this.sanitizeFileName(title) || docId;
+          const primaryNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+          const fallbackNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}-${docId}.md`);
+          let notePath = "";
+          if (await adapter.exists(primaryNote)) {
+            notePath = primaryNote;
+          } else if (await adapter.exists(fallbackNote)) {
+            notePath = fallbackNote;
+          }
+          if (notePath) {
+            updates.note_path = notePath;
+            updates.note_title = path.basename(notePath, ".md");
+          }
+        }
+      } catch (error) {
+        console.error("Failed to read cached item JSON", error);
+      }
+    }
+
+    if (!updates.note_title && existingEntry?.note_path) {
+      updates.note_title = path.basename(existingEntry.note_path, ".md");
+    }
+
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    if (await adapter.exists(chunkPath)) {
+      try {
+        const raw = await adapter.read(chunkPath);
+        const payload = JSON.parse(raw);
+        if (typeof payload?.source_pdf === "string") {
+          updates.pdf_path = payload.source_pdf;
+        }
+      } catch (error) {
+        console.error("Failed to read cached chunks JSON", error);
+      }
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await this.updateDocIndex({ doc_id: docId, ...updates });
+    }
+
+    return this.getDocIndexEntry(docId);
+  }
+
+  private async getDocIndexEntry(docId: string): Promise<DocIndexEntry | null> {
+    if (!docId) {
+      return null;
+    }
+    const index = await this.getDocIndex();
+    return index[docId] ?? null;
   }
 
   private getZoteroLibraryPath(): string {

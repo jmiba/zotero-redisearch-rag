@@ -39,21 +39,27 @@ def export_text(doc: Any) -> str:
 
 def extract_pages(doc: Any) -> List[Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
-    if hasattr(doc, "pages") and isinstance(doc.pages, list):
-        for idx, page in enumerate(doc.pages, start=1):
-            page_num = getattr(page, "page_number", None) or getattr(page, "number", None) or idx
-            text = None
-            for attr in ("text", "content", "markdown", "md"):
-                if hasattr(page, attr):
-                    value = getattr(page, attr)
-                    text = value() if callable(value) else value
-                    break
-            if text is None and hasattr(page, "export_to_text"):
-                text = page.export_to_text()
-            if text is None:
-                text = str(page)
-            pages.append({"page_num": int(page_num), "text": str(text)})
-        return pages
+    pages_attr = getattr(doc, "pages", None)
+    if pages_attr is not None and not isinstance(pages_attr, (str, bytes, dict)):
+        try:
+            pages_list = list(pages_attr)
+        except TypeError:
+            pages_list = []
+        if pages_list:
+            for idx, page in enumerate(pages_list, start=1):
+                page_num = getattr(page, "page_number", None) or getattr(page, "number", None) or idx
+                text = None
+                for attr in ("text", "content", "markdown", "md"):
+                    if hasattr(page, attr):
+                        value = getattr(page, attr)
+                        text = value() if callable(value) else value
+                        break
+                if text is None and hasattr(page, "export_to_text"):
+                    text = page.export_to_text()
+                if text is None:
+                    text = str(page)
+                pages.append({"page_num": int(page_num), "text": str(text)})
+            return pages
 
     full_text = export_text(doc)
     if full_text:
@@ -502,6 +508,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
         headers["Authorization"] = f"Bearer {api_key}"
 
     response = requests.post(url, json={"input": text, "model": model}, headers=headers, timeout=120)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         raise RuntimeError(f"Embedding request failed: {response.status_code} {response.text}")
     payload = response.json()
@@ -550,10 +557,12 @@ def request_chat(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
             response = requests.post(url, json=base_payload, headers=headers, timeout=120)
+            response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
         else:
@@ -596,10 +605,12 @@ def request_chat_stream(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120, stream=True)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
             response = requests.post(url, json=base_payload, headers=headers, timeout=120, stream=True)
+            response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
         else:

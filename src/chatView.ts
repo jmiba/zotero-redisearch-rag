@@ -143,12 +143,32 @@ export class ZoteroChatView extends ItemView {
 
     await MarkdownRenderer.renderMarkdown(message.content || "", els.content, "", this.plugin);
 
-    if (message.citations && message.citations.length > 0) {
-      const citationsMarkdown = this.plugin.formatCitationsMarkdown(message.citations);
-      if (citationsMarkdown) {
-        const label = els.citations.createEl("div", { cls: "zrr-chat-citations-label", text: "Citations" });
-        label.addClass("zrr-chat-citations-label");
-        await MarkdownRenderer.renderMarkdown(citationsMarkdown, els.citations, "", this.plugin);
+    await this.renderCitations(els.citations, message.citations ?? []);
+  }
+
+  private async renderCitations(container: HTMLElement, citations: ChatCitation[]): Promise<void> {
+    container.empty();
+    if (!citations.length) {
+      return;
+    }
+    container.createEl("div", { cls: "zrr-chat-citations-label", text: "Citations" });
+    const list = container.createEl("ul", { cls: "zrr-chat-citation-list" });
+
+    for (const citation of citations) {
+      const display = await this.plugin.resolveCitationDisplay(citation);
+      const item = list.createEl("li");
+      const link = item.createEl("a", { text: display.label, href: "#" });
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        this.plugin.openCitationTarget(citation, display);
+      });
+      if (display.zoteroUrl) {
+        item.createEl("span", { text: " · " });
+        const zoteroLink = item.createEl("a", { text: "Zotero", href: "#" });
+        zoteroLink.addEventListener("click", (event) => {
+          event.preventDefault();
+          this.plugin.openExternalUrl(display.zoteroUrl);
+        });
       }
     }
   }
