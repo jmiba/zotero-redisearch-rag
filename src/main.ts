@@ -1,4 +1,4 @@
-import { App, FileSystemAdapter, Modal, Notice, Plugin, normalizePath } from "obsidian";
+import { App, FileSystemAdapter, Modal, Notice, Plugin, SuggestModal, normalizePath } from "obsidian";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import http from "http";
@@ -9,8 +9,10 @@ import { DEFAULT_SETTINGS, ZoteroRagSettingTab, ZoteroRagSettings } from "./sett
 
 type ZoteroItemValues = Record<string, any>;
 
-type ZoteroBridgeApi = {
-  search: () => Promise<any>;
+type ZoteroLocalItem = {
+  key: string;
+  data: Record<string, any>;
+  meta?: Record<string, any>;
 };
 
 type PdfAttachment = {
@@ -112,16 +114,9 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async importZoteroItem(): Promise<void> {
-    const zoteroApi = this.getZoteroBridgeApi();
-    if (!zoteroApi) {
-      new Notice("Zotero Bridge API not found. Ensure the Zotero Bridge plugin is installed.");
-      return;
-    }
-
-    let item: any;
+    let item: ZoteroLocalItem | null;
     try {
-      const searchResult = await zoteroApi.search();
-      item = this.pickZoteroItem(searchResult);
+      item = await this.promptZoteroItem();
     } catch (error) {
       new Notice("Zotero search failed. See console for details.");
       console.error(error);
@@ -133,13 +128,9 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    let values: ZoteroItemValues;
-    try {
-      values = (await item.getValues?.()) ?? item;
-    } catch (error) {
-      new Notice("Failed to read Zotero item values.");
-      console.error(error);
-      return;
+    const values: ZoteroItemValues = item.data ?? item;
+    if (!values.key && item.key) {
+      values.key = item.key;
     }
 
     const docId = this.getDocId(values);
@@ -198,7 +189,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      await this.app.vault.adapter.write(itemPath, JSON.stringify(values, null, 2));
+      await this.app.vault.adapter.write(itemPath, JSON.stringify(item, null, 2));
     } catch (error) {
       new Notice("Failed to write Zotero item JSON.");
       console.error(error);
@@ -334,25 +325,10 @@ export default class ZoteroRagPlugin extends Plugin {
     }).open();
   }
 
-  private getZoteroBridgeApi(): ZoteroBridgeApi | null {
-    const api = (window as any)?.PluginApi?.ZoteroBridge?.v1?.();
-    if (!api || typeof api.search !== "function") {
-      return null;
-    }
-    return api;
-  }
-
-  private pickZoteroItem(searchResult: any): any {
-    if (!searchResult) {
-      return null;
-    }
-    if (Array.isArray(searchResult)) {
-      return searchResult[0] ?? null;
-    }
-    if (searchResult.item) {
-      return searchResult.item;
-    }
-    return searchResult;
+  private async promptZoteroItem(): Promise<ZoteroLocalItem | null> {
+    return new Promise((resolve) => {
+      new ZoteroItemSuggestModal(this.app, this, resolve).open();
+    });
   }
 
   private getDocId(values: ZoteroItemValues): string | null {
@@ -363,6 +339,29 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
     return null;
+  }
+
+  async searchZoteroItems(query: string): Promise<ZoteroLocalItem[]> {
+    const params = new URLSearchParams();
+    params.set("itemType", "-attachment");
+    params.set("limit", "25");
+    params.set("include", "data,meta");
+    if (query.trim()) {
+      params.set("q", query.trim());
+    }
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${params.toString()}`);
+    const payload = await this.requestLocalApi(url);
+    const items = JSON.parse(payload.toString("utf8"));
+    if (!Array.isArray(items)) {
+      return [];
+    }
+    return items
+      .map((item) => ({
+        key: item.key ?? item.data?.key,
+        data: item.data ?? {},
+        meta: item.meta ?? {},
+      }))
+      .filter((item) => typeof item.key === "string" && item.key.trim().length > 0);
   }
 
   private async resolvePdfAttachment(values: ZoteroItemValues, itemKey: string): Promise<PdfAttachment | null> {
@@ -636,5 +635,54 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       });
     });
+  }
+}
+
+class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
+  private plugin: ZoteroRagPlugin;
+  private onSelect: (item: ZoteroLocalItem | null) => void;
+  private didSelect = false;
+
+  constructor(app: App, plugin: ZoteroRagPlugin, onSelect: (item: ZoteroLocalItem | null) => void) {
+    super(app);
+    this.plugin = plugin;
+    this.onSelect = onSelect;
+    this.setPlaceholder("Search Zotero items...");
+  }
+
+  async getSuggestions(query: string): Promise<ZoteroLocalItem[]> {
+    try {
+      return await this.plugin.searchZoteroItems(query);
+    } catch (error) {
+      console.error("Zotero search failed", error);
+      return [];
+    }
+  }
+
+  renderSuggestion(item: ZoteroLocalItem, el: HTMLElement): void {
+    const title = item.data?.title ?? "[No title]";
+    const year = this.extractYear(item);
+    el.createEl("div", { text: title });
+    el.createEl("small", { text: year ? `${year}` : "" });
+  }
+
+  onChooseSuggestion(item: ZoteroLocalItem, evt: MouseEvent | KeyboardEvent): void {
+    this.didSelect = true;
+    this.onSelect(item);
+  }
+
+  onClose(): void {
+    if (!this.didSelect) {
+      this.onSelect(null);
+    }
+  }
+
+  private extractYear(item: ZoteroLocalItem): string {
+    const parsed = item.meta?.parsedDate ?? item.data?.date ?? "";
+    if (typeof parsed !== "string") {
+      return "";
+    }
+    const match = parsed.match(/\b(\d{4})\b/);
+    return match ? match[1] : "";
   }
 }
