@@ -14,13 +14,15 @@ Science-grade Zotero RAG pipeline:
 
 ## Redis Stack setup
 
-Option A: Docker (ephemeral)
+**Option A:** Docker (ephemeral)
 
 ```bash
 docker run --rm -p 6379:6379 redis/redis-stack-server:latest
 ```
+> [!WARNING]
+>Your index data will be lost when the container stops!
 
-Option B: Docker Compose with persistent data (recommended)
+**Option B:** Docker Compose with persistent data (recommended)
 
 Store Redis data in a folder inside your vault, e.g.
 `<vault>/.zotero-redisearch-rag/redis-data`, by setting `ZRR_DATA_DIR`:
@@ -63,6 +65,25 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## Docling OCR tuning
+
+`tools/docling_extract.py` uses a single `DoclingProcessingConfig` with conservative defaults:
+- Auto-detect text layer and skip OCR when possible
+- Prefer PaddleOCR, fall back to Tesseract
+- Default language: German+English when detected, otherwise English
+- Optional post-OCR cleanup and dictionary correction (off by default)
+
+To enable dictionary correction, set `enable_dictionary_correction = True`
+and optionally point `dictionary_path` to a custom wordlist. A small default
+wordlist is provided in `tools/ocr_wordlist.txt`.
+
+Optional OCR dependencies for per-page OCR:
+- `pdf2image` (requires a local PDF renderer such as Poppler)
+- `pytesseract` + system `tesseract` binary (fallback engine)
+
+These Python packages are included in `requirements.txt`, but you must still
+install Poppler + Tesseract on your system for per-page OCR to work.
 
 ## Obsidian plugin build/install
 

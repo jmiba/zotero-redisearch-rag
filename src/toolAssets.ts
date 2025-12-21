@@ -1,21 +1,371 @@
 export const TOOL_ASSETS: Record<string, string> = {
   "docling_extract.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.3
+# zotero-redisearch-rag tool version: 0.1.4
 import argparse
 import json
+import logging
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+LOGGER = logging.getLogger("docling_extract")
 
 
 def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
 
 
+@dataclass
+class DoclingProcessingConfig:
+    ocr_mode: str = "auto"
+    prefer_ocr_engine: str = "paddle"
+    fallback_ocr_engine: str = "tesseract"
+    language_hint: Optional[str] = None
+    default_lang_german: str = "deu+eng"
+    default_lang_english: str = "eng"
+    min_text_chars_per_page: int = 40
+    min_text_pages_ratio: float = 0.3
+    quality_alpha_ratio_threshold: float = 0.6
+    quality_suspicious_token_threshold: float = 0.25
+    quality_min_avg_chars_per_page: int = 80
+    per_page_ocr_on_low_quality: bool = True
+    enable_post_correction: bool = True
+    enable_dictionary_correction: bool = False
+    dictionary_path: Optional[str] = None
+    dictionary_words: Optional[Sequence[str]] = None
+    default_dictionary_name: str = "ocr_wordlist.txt"
+    enable_llm_correction: bool = False
+    llm_correct: Optional[Callable[[str], str]] = None
+    postprocess_markdown: bool = False
+    analysis_max_pages: int = 5
+    ocr_dpi: int = 300
+
+
+@dataclass
+class OcrRouteDecision:
+    ocr_used: bool
+    ocr_engine: str
+    languages: str
+    route_reason: str
+    use_external_ocr: bool
+    per_page_ocr: bool
+    per_page_reason: str
+
+
+@dataclass
+class TextQuality:
+    avg_chars_per_page: float
+    alpha_ratio: float
+    suspicious_token_ratio: float
+    confidence_proxy: float
+
+@dataclass
+class DoclingConversionResult:
+    markdown: str
+    pages: List[Dict[str, Any]]
+    metadata: Dict[str, Any]
+
+
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
+
+def normalize_whitespace(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def dehyphenate_text(text: str) -> str:
+    return re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
+
+
+def replace_ligatures(text: str) -> str:
+    return (
+        text.replace("\ufb01", "fi")
+        .replace("\ufb02", "fl")
+        .replace("\ufb03", "ffi")
+        .replace("\ufb04", "ffl")
+    )
+
+
+def estimate_text_quality(pages: Sequence[Dict[str, Any]]) -> TextQuality:
+    if not pages:
+        return TextQuality(0.0, 0.0, 1.0, 0.0)
+
+    texts = [str(page.get("text", "")) for page in pages]
+    total_chars = sum(len(text) for text in texts)
+    alpha_chars = sum(sum(char.isalpha() for char in text) for text in texts)
+    alpha_ratio = alpha_chars / max(1, total_chars)
+
+    tokens = re.findall(r"[A-Za-z0-9]+", " ".join(texts))
+    suspicious_tokens = [
+        token for token in tokens
+        if (sum(char.isdigit() for char in token) / max(1, len(token))) > 0.5
+        or re.search(r"(.)\1\1", token)
+    ]
+    suspicious_ratio = len(suspicious_tokens) / max(1, len(tokens))
+
+    avg_chars = total_chars / max(1, len(pages))
+    confidence = max(0.0, min(1.0, alpha_ratio * (1.0 - suspicious_ratio)))
+    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence)
+
+
+def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: DoclingProcessingConfig) -> bool:
+    if not pages:
+        return False
+    pages_with_text = 0
+    for page in pages:
+        cleaned = normalize_text(str(page.get("text", "")))
+        if len(cleaned) >= config.min_text_chars_per_page:
+            pages_with_text += 1
+    ratio = pages_with_text / max(1, len(pages))
+    return ratio >= config.min_text_pages_ratio
+
+
+def is_low_quality(quality: TextQuality, config: DoclingProcessingConfig) -> bool:
+    return (
+        quality.avg_chars_per_page < config.quality_min_avg_chars_per_page
+        or quality.alpha_ratio < config.quality_alpha_ratio_threshold
+        or quality.suspicious_token_ratio > config.quality_suspicious_token_threshold
+    )
+
+
+def decide_per_page_ocr(
+    has_text_layer: bool,
+    quality: TextQuality,
+    config: DoclingProcessingConfig,
+) -> Tuple[bool, str]:
+    if not config.per_page_ocr_on_low_quality:
+        return False, "Per-page OCR disabled by config"
+    if not has_text_layer and is_low_quality(quality, config):
+        return True, "Low-quality scan detected"
+    if quality.suspicious_token_ratio > config.quality_suspicious_token_threshold:
+        return True, "High suspicious token ratio"
+    if quality.avg_chars_per_page < config.quality_min_avg_chars_per_page:
+        return True, "Low text density"
+    return False, "Quality metrics acceptable"
+
+
+def select_language_set(
+    language_hint: Optional[str],
+    filename: str,
+    config: DoclingProcessingConfig,
+) -> str:
+    hint = (language_hint or "").lower().strip()
+    name = os.path.basename(filename).lower()
+
+    if hint:
+        if any(token in hint for token in ("de", "deu", "ger", "german", "deutsch")):
+            return config.default_lang_german
+        if any(token in hint for token in ("en", "eng", "english")):
+            return config.default_lang_english
+        return hint
+
+    if re.search(r"(\bde\b|_de\b|-de\b|deu|german|deutsch)", name):
+        return config.default_lang_german
+    return config.default_lang_english
+
+
+def normalize_languages_for_engine(languages: str, engine: str) -> str:
+    lang = languages.lower()
+    if engine == "paddle":
+        if any(token in lang for token in ("deu", "ger", "de", "german", "deutsch")):
+            return "german"
+        return "en"
+    return languages
+
+
+def decide_ocr_route(
+    has_text_layer: bool,
+    quality: TextQuality,
+    available_engines: Sequence[str],
+    config: DoclingProcessingConfig,
+    languages: str,
+) -> OcrRouteDecision:
+    if config.ocr_mode == "off":
+        return OcrRouteDecision(
+            False,
+            "none",
+            languages,
+            "OCR disabled by config",
+            False,
+            False,
+            "Per-page OCR disabled by config",
+        )
+
+    if config.ocr_mode == "force":
+        ocr_used = True
+        route_reason = "OCR forced by config"
+    elif has_text_layer:
+        return OcrRouteDecision(
+            False,
+            "none",
+            languages,
+            "Text layer detected",
+            False,
+            False,
+            "Per-page OCR not applicable (text layer)",
+        )
+    else:
+        ocr_used = True
+        route_reason = "No usable text layer detected"
+
+    engine = "docling"
+    use_external = False
+    if ocr_used:
+        if config.prefer_ocr_engine in available_engines:
+            engine = config.prefer_ocr_engine
+            use_external = True
+        elif config.fallback_ocr_engine in available_engines:
+            engine = config.fallback_ocr_engine
+            use_external = True
+
+    low_quality = is_low_quality(quality, config)
+    per_page = False
+    per_page_reason = "Per-page OCR not applicable"
+    if use_external:
+        per_page, per_page_reason = decide_per_page_ocr(has_text_layer, quality, config)
+    if low_quality and not has_text_layer:
+        route_reason = f"{route_reason}; low-quality scan suspected"
+
+    return OcrRouteDecision(ocr_used, engine, languages, route_reason, use_external, per_page, per_page_reason)
+
+
+def detect_available_ocr_engines() -> List[str]:
+    available: List[str] = []
+    try:
+        import paddleocr  # noqa: F401
+        from pdf2image import convert_from_path  # noqa: F401
+        available.append("paddle")
+    except Exception:
+        pass
+    try:
+        import pytesseract  # noqa: F401
+        from pdf2image import convert_from_path  # noqa: F401
+        available.append("tesseract")
+    except Exception:
+        pass
+    return available
+
+
+def load_default_wordlist(config: DoclingProcessingConfig) -> Sequence[str]:
+    path = config.dictionary_path
+    if not path:
+        path = os.path.join(os.path.dirname(__file__), config.default_dictionary_name)
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return [line.strip() for line in handle if line.strip() and not line.startswith("#")]
+    except Exception as exc:
+        LOGGER.warning("Failed to load dictionary word list: %s", exc)
+        return []
+
+
+def prepare_dictionary_words(config: DoclingProcessingConfig) -> Sequence[str]:
+    if not config.enable_dictionary_correction:
+        return []
+    if config.dictionary_words:
+        return [word.strip() for word in config.dictionary_words if word and word.strip()]
+    words = load_default_wordlist(config)
+    if not words:
+        LOGGER.warning("Dictionary correction enabled but no wordlist was loaded.")
+    return words
+
+
+def apply_dictionary_correction(text: str, wordlist: Sequence[str]) -> str:
+    if not wordlist:
+        return text
+    dictionary = {word.lower() for word in wordlist}
+    token_re = re.compile(r"[A-Za-z0-9]+")
+
+    def match_case(candidate: str, original: str) -> str:
+        if original.isupper():
+            return candidate.upper()
+        if original[:1].isupper():
+            return candidate.capitalize()
+        return candidate
+
+    def generate_candidates(token: str) -> Iterable[str]:
+        candidates: List[str] = []
+        if any(char.isdigit() for char in token) and any(char.isalpha() for char in token):
+            candidates.append(token.replace("0", "o"))
+            candidates.append(token.replace("1", "l"))
+            candidates.append(token.replace("5", "s"))
+        if "rn" in token:
+            candidates.append(token.replace("rn", "m"))
+        return candidates
+
+    def replace_token(match: re.Match) -> str:
+        token = match.group(0)
+        lower = token.lower()
+        if lower in dictionary:
+            return token
+        for candidate in generate_candidates(token):
+            if candidate.lower() in dictionary:
+                return match_case(candidate, token)
+        return token
+
+    return token_re.sub(replace_token, text)
+
+
+def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str]) -> str:
+    lang = languages.lower()
+    if not any(token in lang for token in ("de", "deu", "german", "deutsch")):
+        return text
+
+    dictionary = {word.lower() for word in wordlist}
+    replacements = {
+        "ueber": "\u00fcber",
+        "fuer": "f\u00fcr",
+        "koennen": "k\u00f6nnen",
+        "muessen": "m\u00fcssen",
+        "haeufig": "h\u00e4ufig",
+    }
+
+    def replace_match(match: re.Match) -> str:
+        token = match.group(0)
+        lower = token.lower()
+        if lower in replacements:
+            replacement = replacements[lower]
+            if token.isupper():
+                return replacement.upper()
+            if token[:1].isupper():
+                return replacement.capitalize()
+            return replacement
+        if dictionary:
+            for ascii_seq, umlaut in (("ae", "\u00e4"), ("oe", "\u00f6"), ("ue", "\u00fc")):
+                if ascii_seq in lower:
+                    candidate = lower.replace(ascii_seq, umlaut)
+                    if candidate in dictionary:
+                        return candidate
+        return token
+
+    return re.sub(r"[A-Za-z]{4,}", replace_match, text)
+
+
+def postprocess_text(
+    text: str,
+    config: DoclingProcessingConfig,
+    languages: str,
+    wordlist: Sequence[str],
+) -> str:
+    if not text:
+        return text
+    cleaned = dehyphenate_text(text)
+    cleaned = replace_ligatures(cleaned)
+    cleaned = normalize_whitespace(cleaned)
+    if config.enable_dictionary_correction:
+        cleaned = apply_dictionary_correction(cleaned, wordlist)
+    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist)
+    if config.enable_llm_correction and config.llm_correct:
+        cleaned = config.llm_correct(cleaned)
+    return cleaned
 
 def export_markdown(doc: Any) -> str:
     for method_name in ("export_to_markdown", "to_markdown", "export_to_md"):
@@ -67,7 +417,7 @@ def extract_pages(doc: Any) -> List[Dict[str, Any]]:
     return pages
 
 
-def extract_pages_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+def extract_pages_from_pdf(pdf_path: str, max_pages: Optional[int] = None) -> List[Dict[str, Any]]:
     try:
         from pypdf import PdfReader
     except Exception as exc:
@@ -78,6 +428,8 @@ def extract_pages_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
     try:
         reader = PdfReader(pdf_path)
         for idx, page in enumerate(reader.pages, start=1):
+            if max_pages is not None and idx > max_pages:
+                break
             try:
                 text = page.extract_text() or ""
             except Exception:
@@ -155,7 +507,28 @@ def slugify(text: str) -> str:
     return slug
 
 
-def build_converter(ocr_mode: str):
+def configure_layout_options(pipeline_options: Any) -> None:
+    if hasattr(pipeline_options, "layout_mode"):
+        pipeline_options.layout_mode = "accurate"
+    if hasattr(pipeline_options, "detect_layout"):
+        pipeline_options.detect_layout = True
+    if hasattr(pipeline_options, "extract_tables"):
+        pipeline_options.extract_tables = True
+    if hasattr(pipeline_options, "table_structure"):
+        pipeline_options.table_structure = True
+    layout_options = getattr(pipeline_options, "layout_options", None)
+    if layout_options is not None:
+        for name, value in (
+            ("detect_columns", True),
+            ("detect_tables", True),
+            ("enable_table_structure", True),
+            ("max_columns", 3),
+        ):
+            if hasattr(layout_options, name):
+                setattr(layout_options, name, value)
+
+
+def build_converter(config: DoclingProcessingConfig, decision: OcrRouteDecision):
     from docling.document_converter import DocumentConverter
 
     try:
@@ -166,28 +539,175 @@ def build_converter(ocr_mode: str):
         return DocumentConverter()
 
     pipeline_options = PdfPipelineOptions()
-    if ocr_mode == "force":
-        if hasattr(pipeline_options, "do_ocr"):
-            pipeline_options.do_ocr = True
-        if hasattr(pipeline_options, "ocr_mode"):
-            pipeline_options.ocr_mode = OCRMode.FORCE
-    elif ocr_mode == "off":
+    if not decision.ocr_used:
         if hasattr(pipeline_options, "do_ocr"):
             pipeline_options.do_ocr = False
         if hasattr(pipeline_options, "ocr_mode"):
             pipeline_options.ocr_mode = OCRMode.DISABLED
+    elif config.ocr_mode == "force":
+        if hasattr(pipeline_options, "do_ocr"):
+            pipeline_options.do_ocr = True
+        if hasattr(pipeline_options, "ocr_mode"):
+            pipeline_options.ocr_mode = OCRMode.FORCE
     else:
         if hasattr(pipeline_options, "ocr_mode"):
             pipeline_options.ocr_mode = OCRMode.AUTO
+
+    if decision.ocr_used:
+        if hasattr(pipeline_options, "ocr_engine"):
+            pipeline_options.ocr_engine = decision.ocr_engine
+        if hasattr(pipeline_options, "ocr_languages"):
+            pipeline_options.ocr_languages = decision.languages
+        if hasattr(pipeline_options, "ocr_lang"):
+            pipeline_options.ocr_lang = decision.languages
+
+    configure_layout_options(pipeline_options)
 
     format_options = {InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     return DocumentConverter(format_options=format_options)
 
 
-def build_chunks_page(doc_id: str, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
+    from pdf2image import convert_from_path
+
+    return convert_from_path(pdf_path, dpi=dpi)
+
+
+def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    from paddleocr import PaddleOCR
+
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
+
+    ocr = PaddleOCR(use_angle_cls=True, lang=languages)
+    pages: List[Dict[str, Any]] = []
+    confidences: List[float] = []
+
+    for idx, image in enumerate(images, start=1):
+        result = ocr.ocr(np.array(image), cls=True)
+        lines: List[str] = []
+        if result:
+            for entry in result[0] if isinstance(result, list) else result:
+                if not entry:
+                    continue
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    text_part = entry[1]
+                    if isinstance(text_part, (list, tuple)) and text_part:
+                        lines.append(str(text_part[0]))
+                        if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
+                            confidences.append(float(text_part[1]))
+                    else:
+                        lines.append(str(text_part))
+        pages.append({"page_num": idx, "text": "\n".join(lines)})
+
+    avg_conf = sum(confidences) / len(confidences) if confidences else None
+    return pages, {"ocr_confidence_avg": avg_conf}
+
+
+def ocr_pages_with_tesseract(images: Sequence[Any], languages: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    import pytesseract
+
+    pages: List[Dict[str, Any]] = []
+    for idx, image in enumerate(images, start=1):
+        text = pytesseract.image_to_string(image, lang=languages)
+        pages.append({"page_num": idx, "text": text})
+    return pages, {}
+
+
+def run_external_ocr_pages(
+    pdf_path: str,
+    engine: str,
+    languages: str,
+    config: DoclingProcessingConfig,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    images = render_pdf_pages(pdf_path, config.ocr_dpi)
+    if engine == "paddle":
+        return ocr_pages_with_paddle(images, normalize_languages_for_engine(languages, engine))
+    if engine == "tesseract":
+        return ocr_pages_with_tesseract(images, normalize_languages_for_engine(languages, engine))
+    return [], {}
+
+
+def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> DoclingConversionResult:
+    analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
+    has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
+    quality = estimate_text_quality(analysis_pages)
+    languages = select_language_set(config.language_hint, pdf_path, config)
+    available_engines = detect_available_ocr_engines()
+    decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
+
+    LOGGER.info(
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f)",
+        has_text_layer,
+        quality.avg_chars_per_page,
+        quality.alpha_ratio,
+        quality.suspicious_token_ratio,
+    )
+    if available_engines:
+        LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
+    else:
+        LOGGER.info("Available OCR engines: none (external OCR disabled)")
+
+    LOGGER.info(
+        "Docling OCR route: %s (engine=%s, languages=%s)",
+        decision.route_reason,
+        decision.ocr_engine,
+        decision.languages,
+    )
+    LOGGER.info("Per-page OCR: %s (%s)", decision.per_page_ocr, decision.per_page_reason)
+    if decision.ocr_used and not decision.use_external_ocr:
+        LOGGER.info("External OCR unavailable; relying on Docling OCR.")
+
+    converter = build_converter(config, decision)
+    result = converter.convert(pdf_path)
+    doc = result.document if hasattr(result, "document") else result
+    markdown = export_markdown(doc)
+    pages = extract_pages(doc)
+    if len(pages) <= 1:
+        fallback_pages = extract_pages_from_pdf(pdf_path)
+        if len(fallback_pages) > len(pages):
+            pages = fallback_pages
+
+    ocr_stats: Dict[str, Any] = {}
+    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr:
+        try:
+            ocr_pages, ocr_stats = run_external_ocr_pages(pdf_path, decision.ocr_engine, languages, config)
+            if ocr_pages:
+                pages = ocr_pages
+                if config.postprocess_markdown and not markdown.strip():
+                    markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
+        except Exception as exc:
+            LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
+
+    metadata = {
+        "ocr_used": decision.ocr_used,
+        "ocr_engine": decision.ocr_engine,
+        "languages": decision.languages,
+        "route_reason": decision.route_reason,
+        "per_page_reason": decision.per_page_reason,
+        "text_layer_detected": has_text_layer,
+        "avg_chars_per_page": quality.avg_chars_per_page,
+        "alpha_ratio": quality.alpha_ratio,
+        "suspicious_token_ratio": quality.suspicious_token_ratio,
+        "confidence_proxy": quality.confidence_proxy,
+        "per_page_ocr": decision.per_page_ocr,
+    }
+    metadata.update(ocr_stats)
+    return DoclingConversionResult(markdown=markdown, pages=pages, metadata=metadata)
+
+
+def build_chunks_page(
+    doc_id: str,
+    pages: List[Dict[str, Any]],
+    postprocess: Optional[Callable[[str], str]] = None,
+) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     for page in pages:
         raw_text = str(page.get("text", ""))
+        if postprocess:
+            raw_text = postprocess(raw_text)
         cleaned = normalize_text(raw_text)
         if not cleaned:
             continue
@@ -204,7 +724,12 @@ def build_chunks_page(doc_id: str, pages: List[Dict[str, Any]]) -> List[Dict[str
     return chunks
 
 
-def build_chunks_section(doc_id: str, markdown: str, pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_chunks_section(
+    doc_id: str,
+    markdown: str,
+    pages: List[Dict[str, Any]],
+    postprocess: Optional[Callable[[str], str]] = None,
+) -> List[Dict[str, Any]]:
     sections = split_markdown_sections(markdown)
     chunks: List[Dict[str, Any]] = []
     seen_ids: Dict[str, int] = {}
@@ -215,6 +740,8 @@ def build_chunks_section(doc_id: str, markdown: str, pages: List[Dict[str, Any]]
     for idx, section in enumerate(sections, start=1):
         title = section.get("title", "")
         text = section.get("text", "")
+        if postprocess:
+            text = postprocess(text)
         cleaned = normalize_text(text)
         if not cleaned:
             continue
@@ -247,6 +774,8 @@ def main() -> int:
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO)
+
     if not os.path.isfile(args.pdf):
         eprint(f"PDF not found: {args.pdf}")
         return 2
@@ -262,24 +791,19 @@ def main() -> int:
         eprint(f"Failed to create output directories: {exc}")
         return 2
 
-    try:
-        converter = build_converter(args.ocr)
-    except Exception as exc:
-        eprint(f"Failed to initialize Docling converter: {exc}")
-        return 2
+    config = DoclingProcessingConfig(ocr_mode=args.ocr)
 
     try:
-        result = converter.convert(args.pdf)
-        doc = result.document if hasattr(result, "document") else result
+        conversion = convert_pdf_with_docling(args.pdf, config)
     except Exception as exc:
         eprint(f"Docling conversion failed: {exc}")
         return 2
 
-    try:
-        markdown = export_markdown(doc)
-    except Exception as exc:
-        eprint(f"Failed to export markdown: {exc}")
-        return 2
+    markdown = conversion.markdown
+    if config.enable_post_correction and config.postprocess_markdown and conversion.metadata.get("ocr_used"):
+        wordlist = prepare_dictionary_words(config)
+        languages = conversion.metadata.get("languages", config.default_lang_english)
+        markdown = postprocess_text(markdown, config, languages, wordlist)
 
     try:
         with open(args.out_md, "w", encoding="utf-8") as handle:
@@ -289,13 +813,21 @@ def main() -> int:
         return 2
 
     try:
-        pages = extract_pages(doc)
-        if len(pages) <= 1:
-            fallback_pages = extract_pages_from_pdf(args.pdf)
-            if len(fallback_pages) > len(pages):
-                pages = fallback_pages
+        pages = conversion.pages
+        languages = conversion.metadata.get("languages", config.default_lang_english)
+        postprocess_fn: Optional[Callable[[str], str]] = None
+        if config.enable_post_correction and conversion.metadata.get("ocr_used"):
+            wordlist = prepare_dictionary_words(config)
+            postprocess_fn = lambda text: postprocess_text(text, config, languages, wordlist)
+
+        if postprocess_fn:
+            pages = [
+                {"page_num": page.get("page_num", idx + 1), "text": postprocess_fn(str(page.get("text", "")))}
+                for idx, page in enumerate(pages)
+            ]
+
         if args.chunking == "section":
-            chunks = build_chunks_section(args.doc_id, markdown, pages)
+            chunks = build_chunks_section(args.doc_id, markdown, pages, postprocess=postprocess_fn)
         else:
             chunks = build_chunks_page(args.doc_id, pages)
     except Exception as exc:
@@ -308,6 +840,7 @@ def main() -> int:
         "doc_id": args.doc_id,
         "source_pdf": args.pdf,
         "chunks": chunks,
+        "metadata": conversion.metadata,
     }
 
     try:
@@ -324,7 +857,7 @@ if __name__ == "__main__":
     sys.exit(main())
 `,
   "index_redisearch.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.3
+# zotero-redisearch-rag tool version: 0.1.4
 import argparse
 import json
 import math
@@ -514,7 +1047,7 @@ if __name__ == "__main__":
     sys.exit(main())
 `,
   "rag_query_redisearch.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.3
+# zotero-redisearch-rag tool version: 0.1.4
 import argparse
 import json
 import math
@@ -874,7 +1407,7 @@ if __name__ == "__main__":
     sys.exit(main())
 `,
   "batch_index_pyzotero.py": String.raw`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.1.3
+# zotero-redisearch-rag tool version: 0.1.4
 import argparse
 import json
 import os
@@ -1077,5 +1610,73 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+`,
+  "ocr_wordlist.txt": String.raw`# zotero-redisearch-rag tool version: 0.1.4
+# Minimal English/German wordlist for optional OCR correction
+abstract
+analysis
+appendix
+bibliography
+chapter
+conclusion
+data
+document
+discussion
+example
+figure
+history
+introduction
+library
+method
+methods
+model
+number
+page
+pages
+reference
+research
+results
+science
+section
+study
+system
+table
+text
+and
+are
+for
+from
+in
+of
+the
+to
+with
+aber
+aus
+bei
+der
+die
+das
+ein
+eine
+fuer
+geschichte
+ist
+kann
+koennen
+mit
+muessen
+nicht
+ueber
+und
+wurde
+werden
+zum
+zur
+zusammenfassung
+abbildung
+tabelle
+methode
+analyse
 `,
 };

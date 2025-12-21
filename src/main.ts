@@ -803,6 +803,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private setupStatusBar(): void {
     const statusBar = this.addStatusBarItem();
     statusBar.addClass("zrr-status-progress");
+    statusBar.addClass("status-bar-item-segment");
     statusBar.style.display = "none";
 
     const label = statusBar.createEl("span", { text: "Idle" });

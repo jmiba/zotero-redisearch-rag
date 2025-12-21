@@ -1,5 +1,8 @@
 docling
+paddleocr
+pdf2image
 pypdf
+pytesseract
 redis
 requests
 pyzotero

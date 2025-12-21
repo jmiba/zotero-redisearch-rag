@@ -6,6 +6,7 @@ const tools = [
   "index_redisearch.py",
   "rag_query_redisearch.py",
   "batch_index_pyzotero.py",
+  "ocr_wordlist.txt",
 ];
 
 const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
