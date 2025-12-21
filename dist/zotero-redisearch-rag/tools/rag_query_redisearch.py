@@ -32,6 +32,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
         headers["Authorization"] = f"Bearer {api_key}"
 
     response = requests.post(url, json={"input": text, "model": model}, headers=headers, timeout=120)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         raise RuntimeError(f"Embedding request failed: {response.status_code} {response.text}")
     payload = response.json()
@@ -49,6 +50,11 @@ def is_temperature_unsupported(message: str) -> bool:
     return "temperature" in lowered and (
         "not supported" in lowered or "unsupported" in lowered or "unknown parameter" in lowered
     )
+
+
+def is_stream_unsupported(message: str) -> bool:
+    lowered = message.lower()
+    return "stream" in lowered and ("not supported" in lowered or "unsupported" in lowered or "unknown parameter" in lowered)
 
 
 def request_chat(
@@ -75,10 +81,12 @@ def request_chat(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120)
+    response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
             response = requests.post(url, json=base_payload, headers=headers, timeout=120)
+            response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
         else:
@@ -93,6 +101,70 @@ def request_chat(
     if not content:
         raise RuntimeError("Chat response missing content")
     return content
+
+
+def request_chat_stream(
+    base_url: str,
+    api_key: str,
+    model: str,
+    temperature: float,
+    system_prompt: str,
+    user_prompt: str,
+    on_delta,
+) -> str:
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    base_payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": True,
+    }
+    payload = dict(base_payload)
+    payload["temperature"] = temperature
+
+    response = requests.post(url, json=payload, headers=headers, timeout=120, stream=True)
+    response.encoding = "utf-8"
+    if response.status_code >= 400:
+        error_text = response.text
+        if is_temperature_unsupported(error_text):
+            response = requests.post(url, json=base_payload, headers=headers, timeout=120, stream=True)
+            response.encoding = "utf-8"
+            if response.status_code >= 400:
+                raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
+        else:
+            raise RuntimeError(f"Chat request failed: {response.status_code} {error_text}")
+
+    content_parts: List[str] = []
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            payload = json.loads(data)
+        except Exception:
+            continue
+        choices = payload.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        piece = delta.get("content")
+        if not piece:
+            continue
+        content_parts.append(piece)
+        on_delta(piece)
+
+    return "".join(content_parts)
 
 
 def decode_value(value: Any) -> Any:
@@ -147,7 +219,8 @@ def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         doc_id = chunk.get("doc_id", "")
         page_start = chunk.get("page_start", "")
         page_end = chunk.get("page_end", "")
-        key = (doc_id, page_start, page_end)
+        source_pdf = chunk.get("source_pdf", "")
+        key = (doc_id, page_start, page_end, source_pdf)
         if key in seen:
             continue
         seen.add(key)
@@ -156,6 +229,7 @@ def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "page_start": page_start,
             "page_end": page_end,
             "pages": f"{page_start}-{page_end}",
+            "source_pdf": source_pdf,
         })
     return citations
 
@@ -174,6 +248,7 @@ def main() -> int:
     parser.add_argument("--chat-api-key", default="")
     parser.add_argument("--chat-model", required=True)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--stream", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -225,27 +300,57 @@ def main() -> int:
     )
     user_prompt = f"Question: {args.query}\n\nContext:\n{context}"
 
-    try:
-        answer = request_chat(
-            args.chat_base_url,
-            args.chat_api_key,
-            args.chat_model,
-            args.temperature,
-            system_prompt,
-            user_prompt,
-        )
-    except Exception as exc:
-        eprint(f"Chat request failed: {exc}")
-        return 2
+    citations = build_citations(retrieved)
+
+    answer = ""
+    streamed = False
+    if args.stream:
+        def emit(obj: Dict[str, Any]) -> None:
+            print(json.dumps(obj, ensure_ascii=False), flush=True)
+
+        try:
+            answer = request_chat_stream(
+                args.chat_base_url,
+                args.chat_api_key,
+                args.chat_model,
+                args.temperature,
+                system_prompt,
+                user_prompt,
+                lambda chunk: emit({"type": "delta", "content": chunk}),
+            )
+            streamed = True
+        except Exception as exc:
+            if is_stream_unsupported(str(exc)):
+                streamed = False
+            else:
+                eprint(f"Chat request failed: {exc}")
+                return 2
+
+    if not streamed:
+        try:
+            answer = request_chat(
+                args.chat_base_url,
+                args.chat_api_key,
+                args.chat_model,
+                args.temperature,
+                system_prompt,
+                user_prompt,
+            )
+        except Exception as exc:
+            eprint(f"Chat request failed: {exc}")
+            return 2
 
     output = {
         "query": args.query,
         "answer": answer,
-        "citations": build_citations(retrieved),
+        "citations": citations,
         "retrieved": retrieved,
     }
 
-    print(json.dumps(output, ensure_ascii=False))
+    if args.stream and streamed:
+        print(json.dumps({"type": "final", **output}, ensure_ascii=False), flush=True)
+    else:
+        print(json.dumps(output, ensure_ascii=False))
     return 0
 
 

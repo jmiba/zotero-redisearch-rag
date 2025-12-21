@@ -37,25 +37,54 @@ def export_text(doc: Any) -> str:
 
 def extract_pages(doc: Any) -> List[Dict[str, Any]]:
     pages: List[Dict[str, Any]] = []
-    if hasattr(doc, "pages") and isinstance(doc.pages, list):
-        for idx, page in enumerate(doc.pages, start=1):
-            page_num = getattr(page, "page_number", None) or getattr(page, "number", None) or idx
-            text = None
-            for attr in ("text", "content", "markdown", "md"):
-                if hasattr(page, attr):
-                    value = getattr(page, attr)
-                    text = value() if callable(value) else value
-                    break
-            if text is None and hasattr(page, "export_to_text"):
-                text = page.export_to_text()
-            if text is None:
-                text = str(page)
-            pages.append({"page_num": int(page_num), "text": str(text)})
-        return pages
+    pages_attr = getattr(doc, "pages", None)
+    if pages_attr is not None and not isinstance(pages_attr, (str, bytes, dict)):
+        try:
+            pages_list = list(pages_attr)
+        except TypeError:
+            pages_list = []
+        if pages_list:
+            for idx, page in enumerate(pages_list, start=1):
+                page_num = getattr(page, "page_number", None) or getattr(page, "number", None) or idx
+                text = None
+                for attr in ("text", "content", "markdown", "md"):
+                    if hasattr(page, attr):
+                        value = getattr(page, attr)
+                        text = value() if callable(value) else value
+                        break
+                if text is None and hasattr(page, "export_to_text"):
+                    text = page.export_to_text()
+                if text is None:
+                    text = str(page)
+                pages.append({"page_num": int(page_num), "text": str(text)})
+            return pages
 
     full_text = export_text(doc)
     if full_text:
         pages.append({"page_num": 1, "text": full_text})
+    return pages
+
+
+def extract_pages_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        eprint(f"pypdf is not available for fallback page extraction: {exc}")
+        return []
+
+    pages: List[Dict[str, Any]] = []
+    try:
+        reader = PdfReader(pdf_path)
+        for idx, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            pages.append({"page_num": idx, "text": text})
+    except Exception as exc:
+        eprint(f"Failed to extract pages with pypdf: {exc}")
+        return []
+
     return pages
 
 
@@ -259,6 +288,10 @@ def main() -> int:
 
     try:
         pages = extract_pages(doc)
+        if len(pages) <= 1:
+            fallback_pages = extract_pages_from_pdf(args.pdf)
+            if len(fallback_pages) > len(pages):
+                pages = fallback_pages
         if args.chunking == "section":
             chunks = build_chunks_section(args.doc_id, markdown, pages)
         else:

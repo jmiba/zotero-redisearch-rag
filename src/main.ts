@@ -166,6 +166,18 @@ export default class ZoteroRagPlugin extends Plugin {
       name: "Rebuild Zotero note from cache (Docling + RedisSearch)",
       callback: () => this.rebuildNoteFromCache(),
     });
+
+    this.addCommand({
+      id: "rebuild-doc-index-cache",
+      name: "Rebuild doc index from cache",
+      callback: () => this.rebuildDocIndexFromCache(),
+    });
+
+    this.addCommand({
+      id: "recreate-missing-notes-cache",
+      name: "Recreate missing notes from cache (Docling + RedisSearch)",
+      callback: () => this.recreateMissingNotesFromCache(),
+    });
   }
 
   async loadSettings(): Promise<void> {
@@ -543,192 +555,249 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    try {
-      await this.ensureBundledTools();
-    } catch (error) {
-      new Notice("Failed to sync bundled tools. See console for details.");
-      console.error(error);
-      return;
+    const rebuilt = await this.rebuildNoteFromCacheForDocId(docId, true);
+    if (rebuilt) {
+      new Notice(`Rebuilt Zotero note for ${docId}.`);
     }
+  }
 
+  private async rebuildDocIndexFromCache(): Promise<void> {
     const adapter = this.app.vault.adapter;
-    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
-    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const itemDocIds = await this.listDocIds(ITEM_CACHE_DIR);
+    const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
+    const noteEntries = await this.scanNotesForDocIds(this.settings.outputNoteDir);
+    const noteDocIds = Object.keys(noteEntries);
+    const docIds = Array.from(new Set([...itemDocIds, ...chunkDocIds, ...noteDocIds]));
 
-    if (!(await adapter.exists(itemPath))) {
-      new Notice("Cached item JSON not found.");
-      return;
-    }
-    if (!(await adapter.exists(chunkPath))) {
-      new Notice("Cached chunks JSON not found.");
-      return;
-    }
-
-    this.showStatusProgress("Preparing...", 5);
-
-    let item: ZoteroLocalItem;
-    try {
-      const itemRaw = await adapter.read(itemPath);
-      item = JSON.parse(itemRaw);
-    } catch (error) {
-      new Notice("Failed to read cached item JSON.");
-      console.error(error);
-      this.clearStatusProgress();
+    if (docIds.length === 0) {
+      new Notice("No cached items found.");
       return;
     }
 
-    let chunkPayload: Record<string, any>;
-    try {
-      const chunkRaw = await adapter.read(chunkPath);
-      chunkPayload = JSON.parse(chunkRaw);
-    } catch (error) {
-      new Notice("Failed to read cached chunks JSON.");
-      console.error(error);
-      this.clearStatusProgress();
-      return;
-    }
+    this.showStatusProgress("Rebuilding doc index...", 0);
+    const index = await this.getDocIndex();
 
-    const sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
-    if (!sourcePdf) {
-      new Notice("Cached chunk JSON is missing source_pdf.");
-      this.clearStatusProgress();
-      return;
-    }
+    let processed = 0;
+    for (const docId of docIds) {
+      processed += 1;
+      const updates: Partial<DocIndexEntry> = {};
 
-    try {
-      await fs.access(sourcePdf);
-    } catch (error) {
-      new Notice("Cached source PDF path is not accessible.");
-      console.error(error);
-      this.clearStatusProgress();
-      return;
-    }
+      const noteEntry = noteEntries[docId];
+      if (noteEntry) {
+        updates.note_path = noteEntry.note_path;
+        updates.note_title = noteEntry.note_title;
+      }
 
-    const values: ZoteroItemValues = item.data ?? item;
-    const title = typeof values.title === "string" ? values.title : "";
-    let notePath = "";
-
-    const existingEntry = await this.getDocIndexEntry(docId);
-    if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
-      notePath = normalizePath(existingEntry.note_path);
-    }
-
-    if (!notePath) {
-      const baseName = this.sanitizeFileName(title) || docId;
-      const baseNotePath = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
-      const finalBaseName = (await adapter.exists(baseNotePath))
-        ? baseName
-        : await this.resolveUniqueBaseName(baseName, docId);
-      notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
-    }
-
-    try {
-      await this.ensureFolder(this.settings.outputNoteDir);
-    } catch (error) {
-      new Notice("Failed to create notes folder.");
-      console.error(error);
-      this.clearStatusProgress();
-      return;
-    }
-
-    const pluginDir = this.getPluginDir();
-    const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
-    const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
-
-    try {
-      this.showStatusProgress("Docling extraction...", null);
-      await this.runPython(doclingScript, [
-        "--pdf",
-        sourcePdf,
-        "--doc-id",
-        docId,
-        "--out-json",
-        this.getAbsoluteVaultPath(chunkPath),
-        "--out-md",
-        this.getAbsoluteVaultPath(notePath),
-        "--chunking",
-        this.settings.chunkingMode,
-        "--ocr",
-        this.settings.ocrMode,
-      ]);
-    } catch (error) {
-      new Notice("Docling extraction failed. See console for details.");
-      console.error(error);
-      this.clearStatusProgress();
-      return;
-    }
-
-    try {
-      this.showStatusProgress("Indexing chunks...", 0);
-      await this.runPythonStreaming(
-        indexScript,
-        [
-          "--chunks-json",
-          this.getAbsoluteVaultPath(chunkPath),
-          "--redis-url",
-          this.settings.redisUrl,
-          "--index",
-          this.settings.redisIndex,
-          "--prefix",
-          this.settings.redisPrefix,
-          "--embed-base-url",
-          this.settings.embedBaseUrl,
-          "--embed-api-key",
-          this.settings.embedApiKey,
-          "--embed-model",
-          this.settings.embedModel,
-          "--upsert",
-          "--progress",
-        ],
-        (payload) => {
-          if (payload?.type === "progress" && payload.total) {
-            const percent = Math.round((payload.current / payload.total) * 100);
-            this.showStatusProgress(`Indexing chunks ${payload.current}/${payload.total}`, percent);
+      const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+      if (await adapter.exists(itemPath)) {
+        try {
+          const raw = await adapter.read(itemPath);
+          const item = JSON.parse(raw);
+          const values: ZoteroItemValues = item?.data ?? item ?? {};
+          const title = typeof values.title === "string" ? values.title : "";
+          if (title) {
+            updates.zotero_title = title;
           }
-        },
-        () => undefined
-      );
-    } catch (error) {
-      new Notice("RedisSearch indexing failed. See console for details.");
-      console.error(error);
-      this.clearStatusProgress();
+          const baseName = this.sanitizeFileName(title) || docId;
+          const primaryNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+          const fallbackNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}-${docId}.md`);
+          if (await adapter.exists(primaryNote)) {
+            updates.note_path = primaryNote;
+            updates.note_title = path.basename(primaryNote, ".md");
+          } else if (await adapter.exists(fallbackNote)) {
+            updates.note_path = fallbackNote;
+            updates.note_title = path.basename(fallbackNote, ".md");
+          }
+        } catch (error) {
+          console.error("Failed to read cached item JSON", error);
+        }
+      }
+
+      const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+      if (await adapter.exists(chunkPath)) {
+        try {
+          const raw = await adapter.read(chunkPath);
+          const payload = JSON.parse(raw);
+          if (typeof payload?.source_pdf === "string") {
+            updates.pdf_path = payload.source_pdf;
+          }
+        } catch (error) {
+          console.error("Failed to read cached chunks JSON", error);
+        }
+      }
+
+      if (Object.keys(updates).length > 0) {
+        const existing = index[docId] ?? ({ doc_id: docId } as DocIndexEntry);
+        const next: DocIndexEntry = {
+          ...existing,
+          ...updates,
+          doc_id: docId,
+          updated_at: new Date().toISOString(),
+        };
+        if (!next.note_title && next.note_path) {
+          next.note_title = path.basename(next.note_path, ".md");
+        }
+        index[docId] = next;
+      }
+
+      const percent = Math.round((processed / docIds.length) * 100);
+      this.showStatusProgress(`Rebuilding doc index ${processed}/${docIds.length}`, percent);
+    }
+
+    await this.saveDocIndex(index);
+    this.showStatusProgress("Done", 100);
+    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    new Notice(`Rebuilt doc index for ${docIds.length} items.`);
+  }
+
+  private async recreateMissingNotesFromCache(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const itemDocIds = await this.listDocIds(ITEM_CACHE_DIR);
+    const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
+    const noteEntries = await this.scanNotesForDocIds(this.settings.outputNoteDir);
+    const noteDocIds = Object.keys(noteEntries);
+    const docIds = Array.from(new Set([...itemDocIds, ...chunkDocIds, ...noteDocIds]));
+
+    if (docIds.length === 0) {
+      new Notice("No cached items found.");
       return;
     }
 
-    const pdfLink = this.buildPdfLinkFromSourcePath(sourcePdf);
+    const missing: string[] = [];
+    for (const docId of docIds) {
+      if (noteEntries[docId]) {
+        continue;
+      }
+      const existing = await this.getDocIndexEntry(docId);
+      if (existing?.note_path && (await adapter.exists(existing.note_path))) {
+        continue;
+      }
+      const inferred = await this.inferNotePathFromCache(docId);
+      if (inferred && (await adapter.exists(inferred))) {
+        continue;
+      }
+      missing.push(docId);
+    }
 
-    try {
-      const doclingMd = await this.app.vault.adapter.read(notePath);
-      const noteContent = this.buildNoteMarkdown(values, item.meta ?? {}, docId, pdfLink, itemPath, doclingMd);
-      await this.app.vault.adapter.write(notePath, noteContent);
-    } catch (error) {
-      new Notice("Failed to finalize note markdown.");
-      console.error(error);
-      this.clearStatusProgress();
+    if (missing.length === 0) {
+      new Notice("No missing notes detected.");
       return;
     }
 
-    try {
-      await this.updateDocIndex({
-        doc_id: docId,
-        note_path: notePath,
-        note_title: path.basename(notePath, ".md"),
-        zotero_title: title,
-        pdf_path: sourcePdf,
-      });
-    } catch (error) {
-      console.error("Failed to update doc index", error);
+    this.showStatusProgress("Recreating missing notes...", 0);
+    let rebuilt = 0;
+
+    for (let i = 0; i < missing.length; i += 1) {
+      const docId = missing[i];
+      const percent = Math.round(((i + 1) / missing.length) * 100);
+      this.showStatusProgress(`Recreating ${i + 1}/${missing.length}`, percent);
+      const ok = await this.rebuildNoteFromCacheForDocId(docId, false);
+      if (ok) {
+        rebuilt += 1;
+      }
     }
 
     this.showStatusProgress("Done", 100);
     window.setTimeout(() => this.clearStatusProgress(), 1200);
-    new Notice(`Rebuilt Zotero note for ${docId}.`);
+    new Notice(`Recreated ${rebuilt}/${missing.length} missing notes.`);
   }
 
   private async promptZoteroItem(): Promise<ZoteroLocalItem | null> {
     return new Promise((resolve) => {
       new ZoteroItemSuggestModal(this.app, this, resolve).open();
     });
+  }
+
+  private async listDocIds(folderPath: string): Promise<string[]> {
+    const adapter = this.app.vault.adapter;
+    const normalized = normalizePath(folderPath);
+    if (!(await adapter.exists(normalized))) {
+      return [];
+    }
+    const listing = await adapter.list(normalized);
+    return listing.files
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => path.basename(file, ".json"));
+  }
+
+  private async listMarkdownFiles(folderPath: string): Promise<string[]> {
+    const adapter = this.app.vault.adapter;
+    const normalized = normalizePath(folderPath);
+    if (!(await adapter.exists(normalized))) {
+      return [];
+    }
+    const queue = [normalized];
+    const results: string[] = [];
+    while (queue.length > 0) {
+      const current = queue.pop();
+      if (!current) {
+        continue;
+      }
+      const listing = await adapter.list(current);
+      for (const file of listing.files) {
+        if (file.endsWith(".md")) {
+          results.push(file);
+        }
+      }
+      for (const folder of listing.folders) {
+        queue.push(folder);
+      }
+    }
+    return results;
+  }
+
+  private extractDocIdFromFrontmatter(content: string): string | null {
+    const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (!match) {
+      return null;
+    }
+    const body = match[1];
+    const lines = body.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+      const parts = trimmed.split(":");
+      if (parts.length < 2) {
+        continue;
+      }
+      const key = parts[0].trim().toLowerCase();
+      if (key !== "doc_id" && key !== "zotero_key") {
+        continue;
+      }
+      const value = trimmed.slice(trimmed.indexOf(":") + 1).trim();
+      const cleaned = value.replace(/^["']|["']$/g, "").trim();
+      if (cleaned) {
+        return cleaned;
+      }
+    }
+    return null;
+  }
+
+  private async scanNotesForDocIds(folderPath: string): Promise<Record<string, DocIndexEntry>> {
+    const adapter = this.app.vault.adapter;
+    const files = await this.listMarkdownFiles(folderPath);
+    const result: Record<string, DocIndexEntry> = {};
+
+    for (const file of files) {
+      try {
+        const content = await adapter.read(file);
+        const docId = this.extractDocIdFromFrontmatter(content);
+        if (!docId) {
+          continue;
+        }
+        result[docId] = {
+          doc_id: docId,
+          note_path: file,
+          note_title: path.basename(file, ".md"),
+          updated_at: new Date().toISOString(),
+        };
+      } catch (error) {
+        console.error("Failed to read note for doc_id scan", error);
+      }
+    }
+    return result;
   }
 
   private setupStatusBar(): void {
@@ -1238,6 +1307,229 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const index = await this.getDocIndex();
     return index[docId] ?? null;
+  }
+
+  private async inferNotePathFromCache(docId: string): Promise<string> {
+    const adapter = this.app.vault.adapter;
+    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+    if (!(await adapter.exists(itemPath))) {
+      return "";
+    }
+    try {
+      const raw = await adapter.read(itemPath);
+      const item = JSON.parse(raw);
+      const values: ZoteroItemValues = item?.data ?? item ?? {};
+      const title = typeof values.title === "string" ? values.title : "";
+      const baseName = this.sanitizeFileName(title) || docId;
+      const primaryNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+      const fallbackNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}-${docId}.md`);
+      if (await adapter.exists(primaryNote)) {
+        return primaryNote;
+      }
+      if (await adapter.exists(fallbackNote)) {
+        return fallbackNote;
+      }
+    } catch (error) {
+      console.error("Failed to infer note path from cache", error);
+    }
+    return "";
+  }
+
+  private async rebuildNoteFromCacheForDocId(docId: string, showNotices: boolean): Promise<boolean> {
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to sync bundled tools. See console for details.");
+      }
+      console.error(error);
+      return false;
+    }
+
+    const adapter = this.app.vault.adapter;
+    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+
+    if (!(await adapter.exists(itemPath)) || !(await adapter.exists(chunkPath))) {
+      if (showNotices) {
+        new Notice("Cached item or chunks JSON not found.");
+      }
+      return false;
+    }
+
+    this.showStatusProgress("Preparing...", 5);
+
+    let item: ZoteroLocalItem;
+    try {
+      const itemRaw = await adapter.read(itemPath);
+      item = JSON.parse(itemRaw);
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to read cached item JSON.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    let chunkPayload: Record<string, any>;
+    try {
+      const chunkRaw = await adapter.read(chunkPath);
+      chunkPayload = JSON.parse(chunkRaw);
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to read cached chunks JSON.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    const sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
+    if (!sourcePdf) {
+      if (showNotices) {
+        new Notice("Cached chunk JSON is missing source_pdf.");
+      }
+      this.clearStatusProgress();
+      return false;
+    }
+
+    try {
+      await fs.access(sourcePdf);
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Cached source PDF path is not accessible.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    const values: ZoteroItemValues = item.data ?? item;
+    const title = typeof values.title === "string" ? values.title : "";
+    let notePath = "";
+
+    const existingEntry = await this.getDocIndexEntry(docId);
+    if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
+      notePath = normalizePath(existingEntry.note_path);
+    }
+
+    if (!notePath) {
+      const baseName = this.sanitizeFileName(title) || docId;
+      const baseNotePath = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
+      const finalBaseName = (await adapter.exists(baseNotePath))
+        ? baseName
+        : await this.resolveUniqueBaseName(baseName, docId);
+      notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
+    }
+
+    try {
+      await this.ensureFolder(this.settings.outputNoteDir);
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to create notes folder.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    const pluginDir = this.getPluginDir();
+    const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
+    const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+
+    try {
+      this.showStatusProgress("Docling extraction...", null);
+      await this.runPython(doclingScript, [
+        "--pdf",
+        sourcePdf,
+        "--doc-id",
+        docId,
+        "--out-json",
+        this.getAbsoluteVaultPath(chunkPath),
+        "--out-md",
+        this.getAbsoluteVaultPath(notePath),
+        "--chunking",
+        this.settings.chunkingMode,
+        "--ocr",
+        this.settings.ocrMode,
+      ]);
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Docling extraction failed. See console for details.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    try {
+      this.showStatusProgress("Indexing chunks...", 0);
+      await this.runPythonStreaming(
+        indexScript,
+        [
+          "--chunks-json",
+          this.getAbsoluteVaultPath(chunkPath),
+          "--redis-url",
+          this.settings.redisUrl,
+          "--index",
+          this.settings.redisIndex,
+          "--prefix",
+          this.settings.redisPrefix,
+          "--embed-base-url",
+          this.settings.embedBaseUrl,
+          "--embed-api-key",
+          this.settings.embedApiKey,
+          "--embed-model",
+          this.settings.embedModel,
+          "--upsert",
+          "--progress",
+        ],
+        (payload) => {
+          if (payload?.type === "progress" && payload.total) {
+            const percent = Math.round((payload.current / payload.total) * 100);
+            this.showStatusProgress(`Indexing chunks ${payload.current}/${payload.total}`, percent);
+          }
+        },
+        () => undefined
+      );
+    } catch (error) {
+      if (showNotices) {
+        new Notice("RedisSearch indexing failed. See console for details.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    const pdfLink = this.buildPdfLinkFromSourcePath(sourcePdf);
+
+    try {
+      const doclingMd = await this.app.vault.adapter.read(notePath);
+      const noteContent = this.buildNoteMarkdown(values, item.meta ?? {}, docId, pdfLink, itemPath, doclingMd);
+      await this.app.vault.adapter.write(notePath, noteContent);
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to finalize note markdown.");
+      }
+      console.error(error);
+      this.clearStatusProgress();
+      return false;
+    }
+
+    try {
+      await this.updateDocIndex({
+        doc_id: docId,
+        note_path: notePath,
+        note_title: path.basename(notePath, ".md"),
+        zotero_title: title,
+        pdf_path: sourcePdf,
+      });
+    } catch (error) {
+      console.error("Failed to update doc index", error);
+    }
+
+    return true;
   }
 
   private getZoteroLibraryPath(): string {
