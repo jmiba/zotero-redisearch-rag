@@ -1,7 +1,5 @@
 # Ask Your Zotero Library in Obsidian
 
-![Zotero Redis RAG icon](icon.svg)
-
 Obsidian plugin for Zotero RAG and chat using Redis Stack and LM Studio/OpenAI-compatible endpoints.
 
 > [!CAUTION]
