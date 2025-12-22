@@ -74,6 +74,7 @@ class DoclingProcessingConfig:
     llm_correction_max_chars: int = 2000
     postprocess_markdown: bool = False
     analysis_max_pages: int = 5
+    analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
 
 
@@ -583,7 +584,29 @@ def extract_pages(doc: Any) -> List[Dict[str, Any]]:
     return pages
 
 
-def extract_pages_from_pdf(pdf_path: str, max_pages: Optional[int] = None) -> List[Dict[str, Any]]:
+def select_analysis_page_indices(
+    total_pages: int,
+    max_pages: Optional[int],
+    sample_strategy: str,
+) -> List[int]:
+    if total_pages <= 0:
+        return []
+    if not max_pages or max_pages <= 0 or total_pages <= max_pages:
+        return list(range(1, total_pages + 1))
+
+    strategy = (sample_strategy or "first").lower()
+    if strategy == "middle":
+        start = max(1, (total_pages - max_pages) // 2 + 1)
+        end = min(total_pages, start + max_pages - 1)
+        return list(range(start, end + 1))
+    return list(range(1, max_pages + 1))
+
+
+def extract_pages_from_pdf(
+    pdf_path: str,
+    max_pages: Optional[int] = None,
+    sample_strategy: str = "first",
+) -> List[Dict[str, Any]]:
     try:
         from pypdf import PdfReader
     except Exception as exc:
@@ -593,9 +616,9 @@ def extract_pages_from_pdf(pdf_path: str, max_pages: Optional[int] = None) -> Li
     pages: List[Dict[str, Any]] = []
     try:
         reader = PdfReader(pdf_path)
-        for idx, page in enumerate(reader.pages, start=1):
-            if max_pages is not None and idx > max_pages:
-                break
+        page_indices = select_analysis_page_indices(len(reader.pages), max_pages, sample_strategy)
+        for idx in page_indices:
+            page = reader.pages[idx - 1]
             try:
                 text = page.extract_text() or ""
             except Exception:
@@ -1080,7 +1103,11 @@ def run_external_ocr_pages(
 
 
 def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict[str, Any]:
-    analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
+    analysis_pages = extract_pages_from_pdf(
+        pdf_path,
+        max_pages=config.analysis_max_pages,
+        sample_strategy=config.analysis_sample_strategy,
+    )
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
     languages = select_language_set(config.language_hint, pdf_path, config)
     quality = estimate_text_quality(analysis_pages, config, languages)
@@ -1097,7 +1124,11 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
 
 
 def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> DoclingConversionResult:
-    analysis_pages = extract_pages_from_pdf(pdf_path, max_pages=config.analysis_max_pages)
+    analysis_pages = extract_pages_from_pdf(
+        pdf_path,
+        max_pages=config.analysis_max_pages,
+        sample_strategy=config.analysis_sample_strategy,
+    )
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
     languages = select_language_set(config.language_hint, pdf_path, config)
     quality = estimate_text_quality(analysis_pages, config, languages)
@@ -1290,6 +1321,7 @@ def main() -> int:
     parser.add_argument("--out-md", help="Output markdown path")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
+    parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
     parser.add_argument(
         "--force-ocr-low-quality",
         action="store_true",
@@ -1346,6 +1378,8 @@ def main() -> int:
         config.force_ocr_on_low_quality_text = True
     if args.quality_threshold is not None:
         config.quality_confidence_threshold = args.quality_threshold
+    if args.language_hint:
+        config.language_hint = args.language_hint
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
     if args.llm_cleanup_base_url:

@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import re
 import struct
 import sys
 from typing import Any, Dict, List
@@ -193,6 +194,80 @@ def parse_results(raw: List[Any]) -> List[Dict[str, Any]]:
     return results
 
 
+_QUERY_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "into", "over",
+    "under", "after", "before", "were", "was", "are", "is", "its", "their",
+    "then", "than", "which", "when", "where", "have", "has", "had", "onto",
+    "upon", "your", "yours", "they", "them", "these", "those", "will", "would",
+    "could", "should", "about", "there", "here", "while", "what", "why", "how",
+    "not", "but", "you", "your", "our", "ours", "his", "her", "she", "him",
+    "also", "such", "been", "being", "out", "one", "two", "three", "four",
+    "five", "six", "seven", "eight", "nine", "ten", "more", "most", "some",
+    "many", "few", "each", "per", "was", "were", "did", "does", "do",
+}
+
+
+def extract_keywords(query: str) -> List[str]:
+    raw_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\\-]{2,}", query)
+    keywords: List[str] = []
+    for token in raw_tokens:
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", token)
+        if not cleaned:
+            continue
+        lower = cleaned.lower()
+        if lower in _QUERY_STOPWORDS:
+            continue
+        if token[:1].isupper() or len(cleaned) >= 5:
+            keywords.append(lower)
+    seen = set()
+    ordered: List[str] = []
+    for token in keywords:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def run_lexical_search(
+    client: redis.Redis,
+    index: str,
+    keywords: List[str],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if not keywords or limit <= 0:
+        return []
+    tokens = [re.sub(r"[^A-Za-z0-9]", "", token) for token in keywords]
+    tokens = [token for token in tokens if token]
+    if not tokens:
+        return []
+    query = "@text:(" + "|".join(tokens) + ")"
+    try:
+        raw = client.execute_command(
+            "FT.SEARCH",
+            index,
+            query,
+            "LIMIT",
+            "0",
+            str(limit),
+            "RETURN",
+            "8",
+            "doc_id",
+            "chunk_id",
+            "source_pdf",
+            "page_start",
+            "page_end",
+            "section",
+            "text",
+            "score",
+            "DIALECT",
+            "2",
+        )
+    except Exception:
+        return []
+    return parse_results(raw)
+
+
 def build_context(retrieved: List[Dict[str, Any]]) -> str:
     blocks = []
     for chunk in retrieved:
@@ -292,6 +367,20 @@ def main() -> int:
         return 2
 
     retrieved = parse_results(raw)
+    keywords = extract_keywords(args.query)
+    lexical_limit = max(args.k, 3)
+    lexical_results = run_lexical_search(client, args.index, keywords, lexical_limit)
+    if lexical_results:
+        seen = {item.get("chunk_id") for item in retrieved if item.get("chunk_id")}
+        for item in lexical_results:
+            chunk_id = item.get("chunk_id")
+            if not chunk_id or chunk_id in seen:
+                continue
+            retrieved.append(item)
+            seen.add(chunk_id)
+        max_total = args.k + lexical_limit
+        if len(retrieved) > max_total:
+            retrieved = retrieved[:max_total]
     context = build_context(retrieved)
 
     system_prompt = (

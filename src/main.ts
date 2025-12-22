@@ -27,7 +27,7 @@ import { TOOL_ASSETS } from "./toolAssets";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage } from "./chatView";
 
-type ZoteroItemValues = Record<string, any>;
+type ZoteroItemValues = Record<string, any> & { version?: number };
 
 type ZoteroLocalItem = {
   key: string;
@@ -48,6 +48,38 @@ type DocIndexEntry = {
   pdf_path?: string;
   attachment_key?: string;
   updated_at: string;
+};
+
+type LanguageOption = {
+  label: string;
+  value: string;
+};
+
+const LANGUAGE_OPTIONS: LanguageOption[] = [
+  { label: "Auto (no hint)", value: "" },
+  { label: "English (en)", value: "en" },
+  { label: "German (de)", value: "de" },
+  { label: "German + English (de,en)", value: "de,en" },
+  { label: "French (fr)", value: "fr" },
+  { label: "Spanish (es)", value: "es" },
+  { label: "Italian (it)", value: "it" },
+  { label: "Dutch (nl)", value: "nl" },
+  { label: "Portuguese (pt)", value: "pt" },
+  { label: "Polish (pl)", value: "pl" },
+  { label: "Swedish (sv)", value: "sv" },
+  { label: "Other (custom ISO code)", value: "__custom__" },
+];
+
+const ISO_639_1_TO_3: Record<string, string> = {
+  en: "eng",
+  de: "deu",
+  fr: "fra",
+  es: "spa",
+  it: "ita",
+  nl: "nld",
+  pt: "por",
+  pl: "pol",
+  sv: "swe",
 };
 
 class TextPromptModal extends Modal {
@@ -120,6 +152,107 @@ class OutputModal extends Modal {
     contentEl.createEl("h3", { text: this.titleText });
     const pre = contentEl.createEl("pre");
     pre.setText(this.bodyText);
+  }
+}
+
+class ConfirmOverwriteModal extends Modal {
+  private filePath: string;
+  private onResolve: (confirmed: boolean) => void;
+  private resolved = false;
+
+  constructor(app: App, filePath: string, onResolve: (confirmed: boolean) => void) {
+    super(app);
+    this.filePath = filePath;
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Overwrite existing note?" });
+    contentEl.createEl("p", {
+      text: `This will overwrite: ${this.filePath}`,
+    });
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const confirm = actions.createEl("button", { text: "Overwrite" });
+    cancel.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(false);
+    });
+    confirm.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(true);
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.onResolve(false);
+    }
+  }
+}
+
+class LanguageSuggestModal extends SuggestModal<LanguageOption> {
+  private resolveSelection: (value: string | null) => void;
+  private resolved = false;
+
+  constructor(app: App, onSelect: (value: string | null) => void) {
+    super(app);
+    this.resolveSelection = onSelect;
+    this.setPlaceholder("Select a language for OCR/quality...");
+  }
+
+  getSuggestions(query: string): LanguageOption[] {
+    const trimmed = query.trim().toLowerCase();
+    if (!trimmed) {
+      return LANGUAGE_OPTIONS;
+    }
+    return LANGUAGE_OPTIONS.filter(
+      (option) =>
+        option.label.toLowerCase().includes(trimmed) ||
+        option.value.toLowerCase().includes(trimmed)
+    );
+  }
+
+  renderSuggestion(option: LanguageOption, el: HTMLElement): void {
+    el.setText(option.label);
+    el.addEventListener("click", () => this.handleSelection(option));
+  }
+
+  onChooseSuggestion(option: LanguageOption): void {
+    this.handleSelection(option);
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.resolveSelection(null);
+    }
+  }
+
+  private handleSelection(option: LanguageOption): void {
+    if (this.resolved) {
+      return;
+    }
+    this.resolved = true;
+    if (option.value === "__custom__") {
+      this.close();
+      new TextPromptModal(
+        this.app,
+        "Custom language hint",
+        "e.g., en, de, fr, de,en",
+        (value) => this.resolveSelection(value.trim()),
+        "Language hint cannot be empty."
+      ).open();
+      return;
+    }
+    this.resolveSelection(option.value);
+    this.close();
   }
 }
 
@@ -240,6 +373,9 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
+    const languageHint = await this.resolveLanguageHint(values, item.key ?? values.key);
+    const doclingLanguageHint = this.buildDoclingLanguageHint(languageHint ?? undefined);
+
     const attachment = await this.resolvePdfAttachment(values, docId);
     if (!attachment) {
       new Notice("No PDF attachment found for item.");
@@ -249,13 +385,39 @@ export default class ZoteroRagPlugin extends Plugin {
     this.showStatusProgress("Preparing...", 5);
 
     const title = typeof values.title === "string" ? values.title : "";
-    const baseName = this.sanitizeFileName(title) || docId;
-    const finalBaseName = await this.resolveUniqueBaseName(baseName, docId);
+    const existingEntry = await this.getDocIndexEntry(docId);
+    if (existingEntry) {
+      new Notice("Item already indexed. Updating cached files and index.");
+    }
+
+    let baseName = this.sanitizeFileName(title) || docId;
+    if (existingEntry?.note_path) {
+      baseName = path.basename(existingEntry.note_path, ".md") || baseName;
+    } else if (existingEntry?.pdf_path) {
+      const relativePdf = this.toVaultRelativePath(existingEntry.pdf_path);
+      if (relativePdf && relativePdf.startsWith(normalizePath(this.settings.outputPdfDir))) {
+        baseName = path.basename(relativePdf, ".pdf") || baseName;
+      }
+    }
+
+    const finalBaseName = existingEntry ? baseName : await this.resolveUniqueBaseName(baseName, docId);
 
     const pdfPath = normalizePath(`${this.settings.outputPdfDir}/${finalBaseName}.pdf`);
     const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
     const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
-    const notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
+    const adapter = this.app.vault.adapter;
+    let notePath = normalizePath(`${this.settings.outputNoteDir}/${finalBaseName}.md`);
+    if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
+      notePath = normalizePath(existingEntry.note_path);
+    }
+
+    if (await adapter.exists(notePath)) {
+      const confirmed = await this.confirmOverwrite(notePath);
+      if (!confirmed) {
+        new Notice("Import canceled.");
+        return;
+      }
+    }
 
     try {
       await this.ensureFolder(ITEM_CACHE_DIR);
@@ -281,16 +443,16 @@ export default class ZoteroRagPlugin extends Plugin {
           : await this.downloadZoteroPdf(attachment.key);
         await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
         pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
-        pdfLink = `[[${pdfPath}]]`;
-      } else {
-        if (!attachment.filePath) {
-          new Notice("PDF file path missing. Enable PDF copying or check Zotero storage.");
-          this.clearStatusProgress();
-          return;
-        }
+      } else if (attachment.filePath) {
         pdfSourcePath = attachment.filePath;
-        pdfLink = `[PDF](${pathToFileURL(attachment.filePath).toString()})`;
+      } else {
+        await this.ensureFolder(this.settings.outputPdfDir);
+        const buffer = await this.downloadZoteroPdf(attachment.key);
+        await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
+        pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
+        new Notice("Local PDF path unavailable; copied PDF into vault for processing.");
       }
+      pdfLink = this.buildPdfLinkForNote(pdfSourcePath, attachment.key, docId);
     } catch (error) {
       new Notice("Failed to download PDF attachment.");
       console.error(error);
@@ -313,11 +475,11 @@ export default class ZoteroRagPlugin extends Plugin {
     let qualityLabel: string | null = null;
 
     try {
-      qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath);
+      qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath, doclingLanguageHint);
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), null);
       await this.runPython(
         doclingScript,
-        this.buildDoclingArgs(pdfSourcePath, docId, chunkPath, notePath)
+        this.buildDoclingArgs(pdfSourcePath, docId, chunkPath, notePath, doclingLanguageHint)
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
     } catch (error) {
@@ -943,7 +1105,10 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
-  private async readDoclingQualityLabelFromPdf(pdfPath: string): Promise<string | null> {
+  private async readDoclingQualityLabelFromPdf(
+    pdfPath: string,
+    languageHint?: string | null
+  ): Promise<string | null> {
     try {
       const pluginDir = this.getPluginDir();
       const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
@@ -954,6 +1119,9 @@ export default class ZoteroRagPlugin extends Plugin {
         args.push("--force-ocr-low-quality");
       }
       args.push("--quality-threshold", String(this.settings.ocrQualityThreshold));
+      if (languageHint) {
+        args.push("--language-hint", languageHint);
+      }
       const output = await this.runPythonWithOutput(doclingScript, args);
       const payload = JSON.parse(output);
       const quality = payload?.confidence_proxy;
@@ -976,6 +1144,271 @@ export default class ZoteroRagPlugin extends Plugin {
         "Doc ID cannot be empty."
       ).open();
     });
+  }
+
+  private async promptLanguageHint(): Promise<string | null> {
+    return new Promise((resolve) => {
+      new LanguageSuggestModal(this.app, resolve).open();
+    });
+  }
+
+  private async confirmOverwrite(notePath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      new ConfirmOverwriteModal(this.app, notePath, resolve).open();
+    });
+  }
+
+  private async resolveLanguageHint(
+    values: ZoteroItemValues,
+    itemKey?: string
+  ): Promise<string | null> {
+    const existingRaw = typeof values.language === "string" ? values.language : "";
+    const existing = this.normalizeZoteroLanguage(existingRaw);
+    if (existing) {
+      return existing;
+    }
+    const selected = await this.promptLanguageHint();
+    if (selected === null) {
+      console.info("Language selection canceled.");
+      return null;
+    }
+    const trimmed = this.normalizeZoteroLanguage(selected);
+    if (!trimmed) {
+      console.info("Language selection empty; skipping Zotero update.");
+      return "";
+    }
+    values.language = trimmed;
+    console.info("Language selected", { language: trimmed, itemKey });
+    if (itemKey) {
+      try {
+        await this.updateZoteroItemLanguage(itemKey, values, trimmed);
+        new Notice("Saved language to Zotero.");
+      } catch (error) {
+        new Notice("Failed to write language back to Zotero.");
+        console.error(error);
+      }
+    } else {
+      console.warn("Language selected but itemKey is missing; skipping Zotero update.");
+    }
+    return trimmed;
+  }
+
+  private normalizeZoteroLanguage(value: string): string {
+    return (value || "").trim().toLowerCase();
+  }
+
+  private buildDoclingLanguageHint(languageHint?: string | null): string | null {
+    const normalized = this.normalizeZoteroLanguage(languageHint ?? "");
+    if (!normalized) {
+      return null;
+    }
+    const tokens = normalized.split(/[^a-z]+/).filter(Boolean);
+    const hasGerman = tokens.some((token) => ["de", "deu", "ger", "german"].includes(token));
+    const hasEnglish = tokens.some((token) => ["en", "eng", "english"].includes(token));
+    if (hasGerman && hasEnglish) {
+      return "deu+eng";
+    }
+    if (hasGerman) {
+      return "deu";
+    }
+    if (hasEnglish) {
+      return "eng";
+    }
+    if (tokens.length === 1 && ISO_639_1_TO_3[tokens[0]]) {
+      return ISO_639_1_TO_3[tokens[0]];
+    }
+    return normalized;
+  }
+
+  private async fetchZoteroItem(itemKey: string): Promise<any | null> {
+    try {
+      const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}`);
+      const payload = await this.requestLocalApi(url, `Zotero item fetch failed for ${url}`);
+      return JSON.parse(payload.toString("utf8"));
+    } catch (error) {
+      console.warn("Failed to fetch Zotero item from local API", error);
+      if (this.canUseWebApi()) {
+        return this.fetchZoteroItemWeb(itemKey);
+      }
+      return null;
+    }
+  }
+
+  private async fetchZoteroItemWeb(itemKey: string): Promise<any | null> {
+    try {
+      const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}`);
+      const payload = await this.requestWebApi(url, `Zotero Web API fetch failed for ${url}`);
+      return JSON.parse(payload.toString("utf8"));
+    } catch (error) {
+      console.warn("Failed to fetch Zotero item from Web API", error);
+      return null;
+    }
+  }
+
+  private async searchZoteroItemsWeb(query: string): Promise<ZoteroLocalItem[]> {
+    const params = new URLSearchParams();
+    params.set("itemType", "-attachment");
+    params.set("limit", "25");
+    params.set("include", "data,meta");
+    if (query.trim()) {
+      params.set("q", query.trim());
+    }
+    const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items?${params.toString()}`);
+    const payload = await this.requestWebApi(url, `Zotero Web API search failed for ${url}`);
+    const parsed = JSON.parse(payload.toString("utf8"));
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry: any) => ({
+        key: entry.key ?? entry.data?.key,
+        data: entry.data ?? {},
+        meta: entry.meta ?? {},
+      }))
+      .filter((entry: ZoteroLocalItem) => typeof entry.key === "string" && entry.key.trim().length > 0);
+  }
+
+  private async updateZoteroItemLanguage(
+    itemKey: string,
+    values: ZoteroItemValues,
+    language: string
+  ): Promise<void> {
+    try {
+      await this.updateZoteroItemLanguageLocal(itemKey, values, language);
+      return;
+    } catch (error) {
+      if (!this.canUseWebApi()) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      console.info("Local Zotero write failed; trying Web API", { itemKey, reason: message });
+      await this.updateZoteroItemLanguageWeb(itemKey, values, language);
+    }
+  }
+
+  private async updateZoteroItemLanguageLocal(
+    itemKey: string,
+    values: ZoteroItemValues,
+    language: string
+  ): Promise<void> {
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}`);
+    const payload = { ...values, language };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Zotero-API-Version": "3",
+    };
+    const version = typeof payload.version === "number" ? payload.version : Number(payload.version);
+    if (!Number.isNaN(version)) {
+      headers["If-Unmodified-Since-Version"] = String(version);
+    }
+
+    console.info("Zotero language PUT", { url, itemKey, language });
+    try {
+      const response = await this.requestLocalApiWithBody(
+        url,
+        "PUT",
+        payload,
+        headers,
+        `Zotero update failed for ${url}`
+      );
+      console.info("Zotero language PUT response", { status: response.statusCode });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("status 501")) {
+        throw error;
+      }
+      const postUrl = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items`);
+      console.info("Zotero language PUT unsupported; trying POST", { postUrl });
+      const response = await this.requestLocalApiWithBody(
+        postUrl,
+        "POST",
+        [payload],
+        headers,
+        `Zotero update failed for ${postUrl}`
+      );
+      console.info("Zotero language POST response", { status: response.statusCode });
+    }
+
+    const refreshed = await this.fetchZoteroItem(itemKey);
+    const persisted = this.normalizeZoteroLanguage(
+      typeof refreshed?.data?.language === "string" ? refreshed.data.language : ""
+    );
+    if (persisted === this.normalizeZoteroLanguage(language)) {
+      return;
+    }
+
+    const updatedValues = { ...(refreshed?.data ?? values), language };
+    const wrapper = {
+      key: itemKey,
+      version: refreshed?.data?.version ?? refreshed?.version ?? version,
+      data: updatedValues,
+    };
+    const retryHeaders = { ...headers };
+    const retryVersion = typeof wrapper.version === "number" ? wrapper.version : Number(wrapper.version);
+    if (!Number.isNaN(retryVersion)) {
+      retryHeaders["If-Unmodified-Since-Version"] = String(retryVersion);
+    } else {
+      delete retryHeaders["If-Unmodified-Since-Version"];
+    }
+
+    const retryResponse = await this.requestLocalApiWithBody(
+      url,
+      "PUT",
+      wrapper,
+      retryHeaders,
+      `Zotero update failed for ${url}`
+    );
+    console.info("Zotero language PUT retry response", { status: retryResponse.statusCode });
+
+    const finalItem = await this.fetchZoteroItem(itemKey);
+    const finalLanguage = this.normalizeZoteroLanguage(
+      typeof finalItem?.data?.language === "string" ? finalItem.data.language : ""
+    );
+    if (finalLanguage !== this.normalizeZoteroLanguage(language)) {
+      throw new Error("Language update did not persist in Zotero.");
+    }
+  }
+
+  private async updateZoteroItemLanguageWeb(
+    itemKey: string,
+    values: ZoteroItemValues,
+    language: string
+  ): Promise<void> {
+    const libraryPath = this.getWebApiLibraryPath();
+    if (!libraryPath) {
+      throw new Error("Web API library path is not configured.");
+    }
+    const url = this.buildWebApiUrl(`/${libraryPath}/items/${itemKey}`);
+    const current = await this.fetchZoteroItemWeb(itemKey);
+    const payload = { ...(current?.data ?? values), language };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Zotero-API-Version": "3",
+      "Zotero-API-Key": this.settings.webApiKey,
+    };
+    const version = current?.data?.version ?? current?.version ?? values?.version;
+    const numericVersion = typeof version === "number" ? version : Number(version);
+    if (!Number.isNaN(numericVersion)) {
+      headers["If-Unmodified-Since-Version"] = String(numericVersion);
+    }
+
+    console.info("Zotero Web API language PUT", { url, itemKey, language });
+    const response = await this.requestWebApiWithBody(
+      url,
+      "PUT",
+      payload,
+      headers,
+      `Zotero Web API update failed for ${url}`
+    );
+    console.info("Zotero Web API language PUT response", { status: response.statusCode });
+
+    const refreshed = await this.fetchZoteroItemWeb(itemKey);
+    const persisted = this.normalizeZoteroLanguage(
+      typeof refreshed?.data?.language === "string" ? refreshed.data.language : ""
+    );
+    if (persisted !== this.normalizeZoteroLanguage(language)) {
+      throw new Error("Language update did not persist in Zotero Web API.");
+    }
   }
 
   private getDocId(values: ZoteroItemValues): string | null {
@@ -1064,18 +1497,26 @@ export default class ZoteroRagPlugin extends Plugin {
       params.set("q", query.trim());
     }
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${params.toString()}`);
-    const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
-    const items = JSON.parse(payload.toString("utf8"));
-    if (!Array.isArray(items)) {
-      return [];
+    try {
+      const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
+      const items = JSON.parse(payload.toString("utf8"));
+      if (!Array.isArray(items)) {
+        return [];
+      }
+      return items
+        .map((item) => ({
+          key: item.key ?? item.data?.key,
+          data: item.data ?? {},
+          meta: item.meta ?? {},
+        }))
+        .filter((item) => typeof item.key === "string" && item.key.trim().length > 0);
+    } catch (error) {
+      console.warn("Failed to search Zotero via local API", error);
+      if (!this.canUseWebApi()) {
+        throw error;
+      }
+      return this.searchZoteroItemsWeb(query);
     }
-    return items
-      .map((item) => ({
-        key: item.key ?? item.data?.key,
-        data: item.data ?? {},
-        meta: item.meta ?? {},
-      }))
-      .filter((item) => typeof item.key === "string" && item.key.trim().length > 0);
   }
 
   private async resolvePdfAttachment(values: ZoteroItemValues, itemKey: string): Promise<PdfAttachment | null> {
@@ -1143,21 +1584,48 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async fetchZoteroChildren(itemKey: string): Promise<any[]> {
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children`);
-    const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
-    return JSON.parse(payload.toString("utf8"));
+    try {
+      const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
+      return JSON.parse(payload.toString("utf8"));
+    } catch (error) {
+      console.warn("Failed to fetch Zotero children from local API", error);
+      if (!this.canUseWebApi()) {
+        throw error;
+      }
+      const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children`);
+      const payload = await this.requestWebApi(webUrl, `Zotero Web API children request failed for ${webUrl}`);
+      return JSON.parse(payload.toString("utf8"));
+    }
   }
 
   private async downloadZoteroPdf(attachmentKey: string): Promise<Buffer> {
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${attachmentKey}/file`);
-    const response = await this.requestLocalApiRaw(url);
-    const redirected = await this.followFileRedirect(response);
-    if (redirected) {
-      return redirected;
+    try {
+      const response = await this.requestLocalApiRaw(url);
+      const redirected = await this.followFileRedirect(response);
+      if (redirected) {
+        return redirected;
+      }
+      if (response.statusCode >= 300) {
+        throw new Error(`Request failed, status ${response.statusCode}`);
+      }
+      return response.body;
+    } catch (error) {
+      console.warn("Failed to download PDF from local API", error);
+      if (!this.canUseWebApi()) {
+        throw error;
+      }
+      const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${attachmentKey}/file`);
+      const response = await this.requestWebApiRaw(webUrl);
+      const redirected = await this.followFileRedirect(response);
+      if (redirected) {
+        return redirected;
+      }
+      if (response.statusCode >= 300) {
+        throw new Error(`Web API request failed, status ${response.statusCode}`);
+      }
+      return response.body;
     }
-    if (response.statusCode >= 300) {
-      throw new Error(`Request failed, status ${response.statusCode}`);
-    }
-    return response.body;
   }
 
   private buildZoteroUrl(pathname: string): string {
@@ -1165,21 +1633,49 @@ export default class ZoteroRagPlugin extends Plugin {
     return `${base}${pathname}`;
   }
 
+  private canUseWebApi(): boolean {
+    const base = (this.settings.webApiBaseUrl || "").trim();
+    return Boolean(base && this.settings.webApiKey && this.settings.webApiLibraryId);
+  }
+
+  private getWebApiLibraryPath(): string {
+    const libraryId = (this.settings.webApiLibraryId || "").trim();
+    if (!libraryId) {
+      return "";
+    }
+    const type = this.settings.webApiLibraryType === "group" ? "groups" : "users";
+    return `${type}/${libraryId}`;
+  }
+
+  private buildWebApiUrl(pathname: string): string {
+    const base = this.settings.webApiBaseUrl.replace(/\/$/, "");
+    return `${base}${pathname}`;
+  }
+
   private requestLocalApiRaw(
-    url: string
+    url: string,
+    options: { method?: string; headers?: Record<string, string>; body?: Buffer | string } = {}
   ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
     return new Promise((resolve, reject) => {
       const parsed = new URL(url);
       const lib = parsed.protocol === "https:" ? https : http;
+      const method = options.method ?? "GET";
+      const headers: Record<string, string> = {
+        Accept: "*/*",
+        ...(options.headers ?? {}),
+      };
+      const body = options.body;
+      if (body !== undefined && headers["Content-Length"] === undefined) {
+        const length = Buffer.isBuffer(body) ? body.length : Buffer.byteLength(body);
+        headers["Content-Length"] = String(length);
+      }
       const request = lib.request(
         {
-          method: "GET",
+          method,
           hostname: parsed.hostname,
           port: parsed.port || undefined,
           path: `${parsed.pathname}${parsed.search}`,
-          headers: {
-            Accept: "*/*",
-          },
+          headers,
         },
         (response) => {
           const chunks: Buffer[] = [];
@@ -1196,6 +1692,9 @@ export default class ZoteroRagPlugin extends Plugin {
       );
 
       request.on("error", reject);
+      if (body !== undefined) {
+        request.write(body);
+      }
       request.end();
     });
   }
@@ -1212,6 +1711,78 @@ export default class ZoteroRagPlugin extends Plugin {
       throw new Error(`${context ?? "Request failed"}, status ${response.statusCode}`);
     }
     return response.body;
+  }
+
+  private async requestLocalApiWithBody(
+    url: string,
+    method: string,
+    payload: unknown,
+    headers: Record<string, string>,
+    context?: string
+  ): Promise<{ statusCode: number; body: Buffer }> {
+    const body = JSON.stringify(payload);
+    const response = await this.requestLocalApiRaw(url, { method, headers, body });
+    if (response.statusCode >= 400) {
+      const details = response.body.toString("utf8");
+      throw new Error(
+        `${context ?? "Request failed"}, status ${response.statusCode}: ${details || "no response body"}`
+      );
+    }
+    if (response.statusCode >= 300) {
+      throw new Error(`${context ?? "Request failed"}, status ${response.statusCode}`);
+    }
+    return { statusCode: response.statusCode, body: response.body };
+  }
+
+  private async requestWebApi(url: string, context?: string): Promise<Buffer> {
+    const headers: Record<string, string> = {
+      "Zotero-API-Version": "3",
+      "Zotero-API-Key": this.settings.webApiKey,
+    };
+    const response = await this.requestLocalApiRaw(url, { headers });
+    if (response.statusCode >= 400) {
+      const details = response.body.toString("utf8");
+      throw new Error(
+        `${context ?? "Request failed"}, status ${response.statusCode}: ${details || "no response body"}`
+      );
+    }
+    if (response.statusCode >= 300) {
+      throw new Error(`${context ?? "Request failed"}, status ${response.statusCode}`);
+    }
+    return response.body;
+  }
+
+  private requestWebApiRaw(
+    url: string,
+    options: { method?: string; headers?: Record<string, string>; body?: Buffer | string } = {}
+  ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+    const headers: Record<string, string> = {
+      "Zotero-API-Version": "3",
+      "Zotero-API-Key": this.settings.webApiKey,
+      ...(options.headers ?? {}),
+    };
+    return this.requestLocalApiRaw(url, { ...options, headers });
+  }
+
+  private async requestWebApiWithBody(
+    url: string,
+    method: string,
+    payload: unknown,
+    headers: Record<string, string>,
+    context?: string
+  ): Promise<{ statusCode: number; body: Buffer }> {
+    const body = JSON.stringify(payload);
+    const response = await this.requestLocalApiRaw(url, { method, headers, body });
+    if (response.statusCode >= 400) {
+      const details = response.body.toString("utf8");
+      throw new Error(
+        `${context ?? "Request failed"}, status ${response.statusCode}: ${details || "no response body"}`
+      );
+    }
+    if (response.statusCode >= 300) {
+      throw new Error(`${context ?? "Request failed"}, status ${response.statusCode}`);
+    }
+    return { statusCode: response.statusCode, body: response.body };
   }
 
   private async followFileRedirect(
@@ -1251,6 +1822,30 @@ export default class ZoteroRagPlugin extends Plugin {
       return `[[${relative}]]`;
     }
     return `[PDF](${pathToFileURL(sourcePdf).toString()})`;
+  }
+
+  private toVaultRelativePath(sourcePath: string): string {
+    if (!sourcePath) {
+      return "";
+    }
+    const vaultBase = path.normalize(this.getVaultBasePath());
+    const normalizedSource = path.normalize(sourcePath);
+    const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
+    if (!normalizedSource.startsWith(vaultPrefix)) {
+      return "";
+    }
+    return normalizePath(path.relative(vaultBase, normalizedSource));
+  }
+
+  private buildPdfLinkForNote(sourcePdf: string, attachmentKey?: string, docId?: string): string {
+    if (!sourcePdf && !attachmentKey) {
+      return "";
+    }
+    if (!this.settings.copyPdfToVault && attachmentKey) {
+      const zoteroLink = this.buildZoteroDeepLink(docId ?? "", attachmentKey);
+      return `[PDF](${zoteroLink})`;
+    }
+    return this.buildPdfLinkFromSourcePath(sourcePdf);
   }
 
   public async openNoteInMain(notePath: string): Promise<void> {
@@ -1332,7 +1927,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return normalizePath(`${CACHE_ROOT}/doc_index.json`);
   }
 
-  private async getDocIndex(): Promise<Record<string, DocIndexEntry>> {
+  public async getDocIndex(): Promise<Record<string, DocIndexEntry>> {
     if (this.docIndex) {
       return this.docIndex;
     }
@@ -1577,6 +2172,8 @@ export default class ZoteroRagPlugin extends Plugin {
 
     const values: ZoteroItemValues = item.data ?? item;
     const title = typeof values.title === "string" ? values.title : "";
+    const languageHint = await this.resolveLanguageHint(values, item.key ?? values.key);
+    const doclingLanguageHint = this.buildDoclingLanguageHint(languageHint ?? undefined);
     let notePath = "";
 
     const existingEntry = await this.getDocIndexEntry(docId);
@@ -1610,11 +2207,11 @@ export default class ZoteroRagPlugin extends Plugin {
     let qualityLabel: string | null = null;
 
     try {
-      qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf);
+      qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf, doclingLanguageHint);
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), null);
       await this.runPython(
         doclingScript,
-        this.buildDoclingArgs(sourcePdf, docId, chunkPath, notePath)
+        this.buildDoclingArgs(sourcePdf, docId, chunkPath, notePath, doclingLanguageHint)
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
     } catch (error) {
@@ -1669,7 +2266,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
 
-    const pdfLink = this.buildPdfLinkFromSourcePath(sourcePdf);
+    const pdfLink = this.buildPdfLinkForNote(sourcePdf, existingEntry?.attachment_key, docId);
 
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);
@@ -1923,7 +2520,8 @@ export default class ZoteroRagPlugin extends Plugin {
     pdfSourcePath: string,
     docId: string,
     chunkPath: string,
-    notePath: string
+    notePath: string,
+    languageHint?: string | null
   ): string[] {
     const ocrMode =
       this.settings.ocrMode === "force_low_quality" ? "auto" : this.settings.ocrMode;
@@ -1946,6 +2544,9 @@ export default class ZoteroRagPlugin extends Plugin {
       args.push("--force-ocr-low-quality");
     }
     args.push("--quality-threshold", String(this.settings.ocrQualityThreshold));
+    if (languageHint) {
+      args.push("--language-hint", languageHint);
+    }
     if (this.settings.enableLlmCleanup) {
       args.push("--enable-llm-cleanup");
       if (this.settings.llmCleanupBaseUrl) {
@@ -2149,6 +2750,7 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   private plugin: ZoteroRagPlugin;
   private resolveSelection: ((item: ZoteroLocalItem | null) => void) | null;
   private lastError: string | null = null;
+  private indexedDocIds: Set<string> | null = null;
 
   constructor(app: App, plugin: ZoteroRagPlugin, onSelect: (item: ZoteroLocalItem | null) => void) {
     super(app);
@@ -2159,6 +2761,10 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
 
   async getSuggestions(query: string): Promise<ZoteroLocalItem[]> {
     try {
+      if (!this.indexedDocIds) {
+        const index = await this.plugin.getDocIndex();
+        this.indexedDocIds = new Set(Object.keys(index));
+      }
       return await this.plugin.searchZoteroItems(query);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2174,8 +2780,37 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   renderSuggestion(item: ZoteroLocalItem, el: HTMLElement): void {
     const title = item.data?.title ?? "[No title]";
     const year = this.extractYear(item);
+    const docId = this.getDocId(item);
+    const isIndexed = docId ? this.indexedDocIds?.has(docId) : false;
+    const pdfStatus = this.getPdfStatus(item);
+    if (isIndexed) {
+      el.addClass("zrr-indexed-item");
+    }
+    if (pdfStatus === "no") {
+      el.addClass("zrr-no-pdf-item");
+    }
     el.createEl("div", { text: title });
-    el.createEl("small", { text: year ? `${year}` : "" });
+    const metaEl = el.createEl("small");
+    let hasMeta = false;
+    const addSeparator = (): void => {
+      if (hasMeta) {
+        metaEl.createSpan({ text: " • " });
+      }
+    };
+    if (year) {
+      metaEl.createSpan({ text: year });
+      hasMeta = true;
+    }
+    if (isIndexed) {
+      addSeparator();
+      metaEl.createSpan({ text: "Indexed", cls: "zrr-indexed-flag" });
+      hasMeta = true;
+    }
+    if (pdfStatus === "no") {
+      addSeparator();
+      metaEl.createSpan({ text: "No PDF", cls: "zrr-no-pdf-flag" });
+      hasMeta = true;
+    }
     el.addEventListener("click", () => {
       if (this.resolveSelection) {
         this.resolveSelection(item);
@@ -2198,6 +2833,30 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
       this.resolveSelection(null);
       this.resolveSelection = null;
     }
+  }
+
+  private getDocId(item: ZoteroLocalItem): string {
+    const key = item.key ?? item.data?.key ?? "";
+    return typeof key === "string" ? key : "";
+  }
+
+  private getPdfStatus(item: ZoteroLocalItem): "yes" | "no" | "unknown" {
+    const attachments = item.data?.attachments ?? item.data?.children ?? item.data?.items ?? [];
+    if (Array.isArray(attachments) && attachments.length > 0) {
+      const hasPdf = attachments.some((entry) => this.isPdfAttachment(entry));
+      return hasPdf ? "yes" : "no";
+    }
+    const numChildren = item.meta?.numChildren;
+    if (typeof numChildren === "number" && numChildren === 0) {
+      return "no";
+    }
+    return "unknown";
+  }
+
+  private isPdfAttachment(entry: any): boolean {
+    const contentType =
+      entry?.contentType ?? entry?.mimeType ?? entry?.data?.contentType ?? entry?.data?.mimeType ?? "";
+    return contentType === "application/pdf";
   }
 
   private extractYear(item: ZoteroLocalItem): string {

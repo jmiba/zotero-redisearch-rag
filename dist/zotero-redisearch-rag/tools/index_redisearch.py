@@ -5,7 +5,7 @@ import math
 import os
 import struct
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis
 import requests
@@ -48,6 +48,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
 def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
     try:
         client.execute_command("FT.INFO", index_name)
+        ensure_schema_fields(client, index_name)
         return
     except redis.exceptions.ResponseError as exc:
         message = str(exc).lower()
@@ -67,6 +68,22 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         "TAG",
         "chunk_id",
         "TAG",
+        "title",
+        "TEXT",
+        "authors",
+        "TAG",
+        "SEPARATOR",
+        "|",
+        "tags",
+        "TAG",
+        "SEPARATOR",
+        "|",
+        "year",
+        "NUMERIC",
+        "item_type",
+        "TAG",
+        "SEPARATOR",
+        "|",
         "source_pdf",
         "TEXT",
         "page_start",
@@ -90,12 +107,97 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
     )
 
 
+def ensure_schema_fields(client: redis.Redis, index_name: str) -> None:
+    fields: List[Tuple[str, List[str]]] = [
+        ("title", ["TEXT"]),
+        ("authors", ["TAG", "SEPARATOR", "|"]),
+        ("tags", ["TAG", "SEPARATOR", "|"]),
+        ("year", ["NUMERIC"]),
+        ("item_type", ["TAG", "SEPARATOR", "|"]),
+    ]
+    for name, spec in fields:
+        try:
+            client.execute_command("FT.ALTER", index_name, "SCHEMA", "ADD", name, *spec)
+        except redis.exceptions.ResponseError as exc:
+            message = str(exc).lower()
+            if "duplicate" in message or "already exists" in message:
+                continue
+            raise
+
+
+def infer_item_json_path(chunks_json: str, doc_id: str) -> Optional[str]:
+    base_name = f"{doc_id}.json"
+    chunks_dir = os.path.dirname(chunks_json)
+    candidates: List[str] = []
+    if os.path.basename(chunks_dir) == "chunks":
+        candidates.append(os.path.join(os.path.dirname(chunks_dir), "items", base_name))
+    marker = f"{os.sep}chunks{os.sep}"
+    if marker in chunks_json:
+        candidates.append(chunks_json.replace(marker, f"{os.sep}items{os.sep}"))
+    candidates.append(os.path.join(chunks_dir, base_name))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def parse_item_metadata(item_payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = item_payload.get("data") if isinstance(item_payload.get("data"), dict) else item_payload
+    title = str(data.get("title", "")).strip()
+    item_type = str(data.get("itemType", "")).strip()
+    tags: List[str] = []
+    for tag in data.get("tags", []) or []:
+        if isinstance(tag, dict):
+            value = str(tag.get("tag", "")).strip()
+        else:
+            value = str(tag).strip()
+        if value:
+            tags.append(value)
+
+    creators = data.get("creators", []) or []
+    authors: List[str] = []
+    for creator in creators:
+        if not isinstance(creator, dict):
+            continue
+        name = ""
+        if creator.get("name"):
+            name = str(creator.get("name", "")).strip()
+        else:
+            first = str(creator.get("firstName", "")).strip()
+            last = str(creator.get("lastName", "")).strip()
+            name = " ".join(part for part in (first, last) if part)
+        if name:
+            authors.append(name)
+
+    year = 0
+    date_field = str(data.get("date", "")).strip()
+    match = None
+    if date_field:
+        match = next(iter(__import__("re").findall(r"(1[5-9]\\d{2}|20\\d{2})", date_field)), None)
+    if match:
+        try:
+            year = int(match)
+        except ValueError:
+            year = 0
+    elif isinstance(data.get("year"), (int, float)):
+        year = int(data.get("year"))
+
+    return {
+        "title": title,
+        "authors": "|".join(authors),
+        "tags": "|".join(tags),
+        "year": year,
+        "item_type": item_type,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Index Docling chunks into RedisSearch.")
     parser.add_argument("--chunks-json", required=True)
     parser.add_argument("--redis-url", required=True)
     parser.add_argument("--index", required=True)
     parser.add_argument("--prefix", required=True)
+    parser.add_argument("--item-json")
     parser.add_argument("--embed-base-url", required=True)
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)
@@ -127,6 +229,16 @@ def main() -> int:
     except Exception as exc:
         eprint(f"Failed to ensure index: {exc}")
         return 2
+
+    item_metadata: Dict[str, Any] = {}
+    item_json_path = args.item_json or infer_item_json_path(args.chunks_json, str(doc_id))
+    if item_json_path and os.path.isfile(item_json_path):
+        try:
+            with open(item_json_path, "r", encoding="utf-8") as handle:
+                item_payload = json.load(handle)
+            item_metadata = parse_item_metadata(item_payload)
+        except Exception as exc:
+            eprint(f"Failed to read item JSON metadata: {exc}")
 
     valid_chunks = []
     for chunk in chunks:
@@ -164,6 +276,11 @@ def main() -> int:
         fields: Dict[str, Any] = {
             "doc_id": str(doc_id),
             "chunk_id": stable_chunk_id,
+            "title": str(item_metadata.get("title", "")),
+            "authors": str(item_metadata.get("authors", "")),
+            "tags": str(item_metadata.get("tags", "")),
+            "year": int(item_metadata.get("year", 0)),
+            "item_type": str(item_metadata.get("item_type", "")),
             "source_pdf": str(payload.get("source_pdf", "")),
             "page_start": int(chunk.get("page_start", 0)),
             "page_end": int(chunk.get("page_end", 0)),

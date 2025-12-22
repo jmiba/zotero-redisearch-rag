@@ -93,6 +93,32 @@
   white-space: nowrap;
 }
 
+.zrr-indexed-item .zrr-indexed-flag {
+  margin-left: 0.35rem;
+}
+
+.zrr-indexed-flag {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  font-size: var(--font-ui-smaller);
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.zrr-no-pdf-item .zrr-no-pdf-flag {
+  margin-left: 0.35rem;
+}
+
+.zrr-no-pdf-flag {
+  display: inline-block;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  font-size: var(--font-ui-smaller);
+  background: var(--background-modifier-error);
+  color: var(--color-base-00);
+}
+
 .zrr-status-progress {
   display: flex;
   align-items: center;

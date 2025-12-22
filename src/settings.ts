@@ -10,6 +10,10 @@ export const CHUNK_CACHE_DIR = `${CACHE_ROOT}/chunks`;
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
   zoteroUserId: string;
+  webApiBaseUrl: string;
+  webApiLibraryType: "user" | "group";
+  webApiLibraryId: string;
+  webApiKey: string;
   pythonPath: string;
   dockerPath: string;
   autoStartRedis: boolean;
@@ -43,6 +47,10 @@ export interface ZoteroRagSettings {
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   zoteroBaseUrl: "http://127.0.0.1:23119/api",
   zoteroUserId: "0",
+  webApiBaseUrl: "https://api.zotero.org",
+  webApiLibraryType: "user",
+  webApiLibraryId: "",
+  webApiKey: "",
   pythonPath: "python3",
   dockerPath: "docker",
   autoStartRedis: false,
@@ -132,6 +140,61 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
       );
 
+    containerEl.createEl("h3", { text: "Zotero Web API (optional fallback)" });
+
+    new Setting(containerEl)
+      .setName("Web API base URL")
+      .setDesc("Zotero Web API base URL for write fallback, e.g. https://api.zotero.org")
+      .addText((text) =>
+        text
+          .setPlaceholder("https://api.zotero.org")
+          .setValue(this.plugin.settings.webApiBaseUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiBaseUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Web API library type")
+      .setDesc("Library type for Web API writes.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("user", "user")
+          .addOption("group", "group")
+          .setValue(this.plugin.settings.webApiLibraryType)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiLibraryType = value as "user" | "group";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Web API library ID")
+      .setDesc("Numeric Zotero user/group ID for Web API writes.")
+      .addText((text) =>
+        text
+          .setPlaceholder("15218")
+          .setValue(this.plugin.settings.webApiLibraryId)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiLibraryId = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Web API key")
+      .setDesc("Zotero API key for write fallback (from zotero.org).")
+      .addText((text) =>
+        text
+          .setPlaceholder("your-api-key")
+          .setValue(this.plugin.settings.webApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
     new Setting(containerEl)
       .setName("Python path")
       .setDesc("Path to python3")
@@ -147,7 +210,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Copy PDFs into vault")
-      .setDesc("Disable to use Zotero storage paths directly.")
+      .setDesc(
+        "Disable to use Zotero storage paths directly. If a local file path is unavailable, the plugin temporarily copies the PDF into the vault for processing."
+      )
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.copyPdfToVault).onChange(async (value) => {
           this.plugin.settings.copyPdfToVault = value;
