@@ -21,6 +21,8 @@ if [ -f "${ROOT_DIR}/styles.css" ]; then
   cp "${ROOT_DIR}/styles.css" "${DIST_DIR}/${PLUGIN_ID}/"
 fi
 cp -R "${ROOT_DIR}/tools" "${DIST_DIR}/${PLUGIN_ID}/"
+find "${DIST_DIR}/${PLUGIN_ID}/tools" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
+find "${DIST_DIR}/${PLUGIN_ID}/tools" -type f -name "*.pyc" -delete 2>/dev/null || true
 
 (
   cd "${DIST_DIR}"

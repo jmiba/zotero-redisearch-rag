@@ -66,6 +66,7 @@ Notes:
 - Docker Desktop must be running.
 - Your vault folder must be shared in Docker settings.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
+- Multiple vaults: each vault uses its own Docker Compose project + data folder. If you want to run multiple Redis Stacks at the same time, set a different Redis port per vault by changing `Redis URL` (e.g. `redis://127.0.0.1:6380`).
 
 ### 4) Start LM Studio
 1) Open LM Studio and start the local server.

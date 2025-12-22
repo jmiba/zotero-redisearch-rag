@@ -49,6 +49,10 @@ export class ZoteroChatView extends ItemView {
     return "Zotero RAG Chat";
   }
 
+  getIcon(): string {
+    return "zrr-chat";
+  }
+
   async onOpen(): Promise<void> {
     const { containerEl } = this;
     containerEl.empty();

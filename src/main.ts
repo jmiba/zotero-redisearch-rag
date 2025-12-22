@@ -7,6 +7,7 @@ import {
   SuggestModal,
   TFile,
   WorkspaceLeaf,
+  addIcon,
   normalizePath,
 } from "obsidian";
 import { spawn } from "child_process";
@@ -15,6 +16,7 @@ import http from "http";
 import https from "https";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
+import { createHash } from "crypto";
 import {
   CHUNK_CACHE_DIR,
   CACHE_ROOT,
@@ -23,6 +25,7 @@ import {
   ZoteroRagSettingTab,
   ZoteroRagSettings,
 } from "./settings";
+import { ICON_ASSETS } from "./iconAssets";
 import { TOOL_ASSETS } from "./toolAssets";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage } from "./chatView";
@@ -81,6 +84,9 @@ const ISO_639_1_TO_3: Record<string, string> = {
   pl: "pol",
   sv: "swe",
 };
+
+const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
+const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 
 class TextPromptModal extends Modal {
   private titleText: string;
@@ -268,6 +274,7 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.migrateCachePaths();
     this.addSettingTab(new ZoteroRagSettingTab(this.app, this));
 
+    this.registerRibbonIcons();
     this.registerView(VIEW_TYPE_ZOTERO_CHAT, (leaf) => new ZoteroChatView(leaf, this));
     this.setupStatusBar();
     this.registerNoteRenameHandler();
@@ -563,6 +570,10 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private getChatLeaf(): WorkspaceLeaf {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_ZOTERO_CHAT);
+    if (existing.length > 0) {
+      return existing[0];
+    }
     if (this.settings.chatPaneLocation === "right") {
       return this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf("split");
     }
@@ -1150,6 +1161,25 @@ export default class ZoteroRagPlugin extends Plugin {
     return new Promise((resolve) => {
       new LanguageSuggestModal(this.app, resolve).open();
     });
+  }
+
+  private registerRibbonIcons(): void {
+    addIcon("zrr-picker", ZRR_PICKER_ICON);
+    addIcon("zrr-chat", ZRR_CHAT_ICON);
+
+    const pickerButton = this.addRibbonIcon(
+      "zrr-picker",
+      "Import Zotero item and index",
+      () => this.importZoteroItem()
+    );
+    pickerButton.addClass("zrr-ribbon-picker");
+
+    const chatButton = this.addRibbonIcon(
+      "zrr-chat",
+      "Open Zotero RAG chat",
+      () => this.openChatView(true)
+    );
+    chatButton.addClass("zrr-ribbon-chat");
   }
 
   private async confirmOverwrite(notePath: string): Promise<boolean> {
@@ -2575,6 +2605,28 @@ export default class ZoteroRagPlugin extends Plugin {
     return path.join(pluginDir, "tools", "docker-compose.yml");
   }
 
+  private getDockerProjectName(): string {
+    const vaultPath = this.getVaultBasePath();
+    const vaultName = path
+      .basename(vaultPath)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 18);
+    const hash = createHash("sha1").update(vaultPath).digest("hex").slice(0, 8);
+    return `zrr-${vaultName || "vault"}-${hash}`;
+  }
+
+  private getRedisPortFromUrl(): number {
+    try {
+      const parsed = new URL(this.settings.redisUrl);
+      const port = parsed.port ? Number(parsed.port) : 6379;
+      return Number.isFinite(port) && port > 0 ? port : 6379;
+    } catch {
+      return 6379;
+    }
+  }
+
   async startRedisStack(silent?: boolean): Promise<void> {
     try {
       await this.ensureBundledTools();
@@ -2582,19 +2634,23 @@ export default class ZoteroRagPlugin extends Plugin {
       const dataDir = this.getRedisDataDir();
       await fs.mkdir(dataDir, { recursive: true });
       const dockerPath = this.settings.dockerPath?.trim() || "docker";
+      const project = this.getDockerProjectName();
+      const redisPort = String(this.getRedisPortFromUrl());
       try {
-        await this.runCommand(dockerPath, ["compose", "-f", composePath, "down"], {
-          cwd: path.dirname(composePath),
-        });
+        await this.runCommand(
+          dockerPath,
+          ["compose", "-p", project, "-f", composePath, "down"],
+          { cwd: path.dirname(composePath) }
+        );
       } catch (error) {
         console.warn("Redis Stack stop before restart failed", error);
       }
       await this.runCommand(
         dockerPath,
-        ["compose", "-f", composePath, "up", "-d"],
+        ["compose", "-p", project, "-f", composePath, "up", "-d"],
         {
           cwd: path.dirname(composePath),
-          env: { ...process.env, ZRR_DATA_DIR: dataDir },
+          env: { ...process.env, ZRR_DATA_DIR: dataDir, ZRR_PORT: redisPort },
         }
       );
       if (!silent) {

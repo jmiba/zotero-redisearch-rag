@@ -11,6 +11,11 @@ const tools = [
   { name: "redis-stack.conf", path: "redis-stack.conf" },
 ];
 
+const icons = [
+  { name: "zrr-picker", path: "icon.svg" },
+  { name: "zrr-chat", path: "icon-chat.svg" },
+];
+
 const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 const version = manifest.version ?? "unknown";
 const stamp = `# zotero-redisearch-rag tool version: ${version}`;
@@ -38,3 +43,11 @@ for (const entry of tools) {
 lines.push("};");
 
 writeFileSync(join("src", "toolAssets.ts"), lines.join("\n"), "utf8");
+
+const iconLines = ["export const ICON_ASSETS: Record<string, string> = {"];
+for (const entry of icons) {
+  const content = readFileSync(entry.path, "utf8");
+  iconLines.push(`  "${entry.name}": ${JSON.stringify(content)},`);
+}
+iconLines.push("};");
+writeFileSync(join("src", "iconAssets.ts"), iconLines.join("\n"), "utf8");

@@ -1,0 +1,4 @@
+export const ICON_ASSETS: Record<string, string> = {
+  "zrr-picker": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"3\"/>\n  <path d=\"M7.5 8h9\"/>\n  <path d=\"M16.5 8 7.5 16\"/>\n  <path d=\"M7.5 16h9\"/>\n</svg>\n",
+  "zrr-chat": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"m6.67,4.05l10.65,0a2.66,2.66 0 0 1 2.66,2.66l0,10.63a2.66,2.66 0 0 1 -2.66,2.66l-7.31,0l-3.36,2.85l0.02,-2.85a2.66,2.66 0 0 1 -2.66,-2.66l0,-10.63a2.66,2.66 0 0 1 2.66,-2.66z\"/>\n  <path d=\"m7.5,8l9,0\"/>\n  <path d=\"m16.5,8l-9,8\"/>\n  <path d=\"m7.5,16l9,0\"/>\n</svg>\n",
+};
