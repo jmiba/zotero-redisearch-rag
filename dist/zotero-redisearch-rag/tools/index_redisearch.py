@@ -68,6 +68,8 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         "TAG",
         "chunk_id",
         "TAG",
+        "attachment_key",
+        "TAG",
         "title",
         "TEXT",
         "authors",
@@ -109,6 +111,7 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
 
 def ensure_schema_fields(client: redis.Redis, index_name: str) -> None:
     fields: List[Tuple[str, List[str]]] = [
+        ("attachment_key", ["TAG"]),
         ("title", ["TEXT"]),
         ("authors", ["TAG", "SEPARATOR", "|"]),
         ("tags", ["TAG", "SEPARATOR", "|"]),
@@ -222,6 +225,15 @@ def main() -> int:
         eprint("Invalid chunks JSON schema")
         return 2
 
+    attachment_key = None
+    try:
+        meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        key_val = meta.get("attachment_key") if isinstance(meta, dict) else None
+        if isinstance(key_val, str) and key_val.strip():
+            attachment_key = key_val.strip()
+    except Exception:
+        attachment_key = None
+
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
 
     try:
@@ -276,6 +288,7 @@ def main() -> int:
         fields: Dict[str, Any] = {
             "doc_id": str(doc_id),
             "chunk_id": stable_chunk_id,
+            "attachment_key": str(attachment_key or ""),
             "title": str(item_metadata.get("title", "")),
             "authors": str(item_metadata.get("authors", "")),
             "tags": str(item_metadata.get("tags", "")),

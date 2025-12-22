@@ -1,10 +1,13 @@
-import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, MarkdownRenderer, Modal, Notice, Setting, WorkspaceLeaf } from "obsidian";
 import type ZoteroRagPlugin from "./main";
 
 export const VIEW_TYPE_ZOTERO_CHAT = "zotero-redisearch-rag-chat";
 
 export type ChatCitation = {
   doc_id: string;
+  attachment_key?: string;
+  chunk_id?: string;
+  annotation_key?: string;
   page_start?: string;
   page_end?: string;
   pages?: string;
@@ -16,7 +19,19 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   citations?: ChatCitation[];
+  retrieved?: ChatRetrievedChunk[];
   createdAt: string;
+};
+
+export type ChatRetrievedChunk = {
+  doc_id?: string;
+  chunk_id?: string;
+  page_start?: string | number;
+  page_end?: string | number;
+  source_pdf?: string;
+  section?: string;
+  score?: string | number;
+  text?: string;
 };
 
 type MessageEls = {
@@ -31,7 +46,12 @@ export class ZoteroChatView extends ItemView {
   private messagesEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendButton!: HTMLButtonElement;
-  private clearButton!: HTMLButtonElement;
+  private newButton!: HTMLButtonElement;
+  private renameButton!: HTMLButtonElement;
+  private copyButton!: HTMLButtonElement;
+  private sessionSelect!: HTMLSelectElement;
+  private deleteButton!: HTMLButtonElement;
+  private activeSessionId = "default";
   private messageEls = new Map<string, MessageEls>();
   private pendingRender = new Map<string, number>();
   private busy = false;
@@ -60,8 +80,45 @@ export class ZoteroChatView extends ItemView {
 
     const header = containerEl.createEl("div", { cls: "zrr-chat-header" });
     header.createEl("div", { cls: "zrr-chat-title", text: "Zotero RAG Chat" });
-    this.clearButton = header.createEl("button", { cls: "zrr-chat-clear", text: "Clear" });
-    this.clearButton.addEventListener("click", () => this.clearChat());
+    const controls = header.createEl("div", { cls: "zrr-chat-controls" });
+    const selectRow = controls.createEl("div", { cls: "zrr-chat-controls-row" });
+    this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" }) as HTMLSelectElement;
+    this.sessionSelect.addEventListener("change", async () => {
+      await this.switchSession(this.sessionSelect.value);
+    });
+    const buttonRow = controls.createEl("div", { cls: "zrr-chat-controls-row zrr-chat-controls-actions" });
+    this.renameButton = buttonRow.createEl("button", {
+      cls: "zrr-chat-rename",
+      text: "Rename",
+      attr: { title: "Rename the current chat" },
+    });
+    this.renameButton.addEventListener("click", async () => {
+      await this.promptRenameSession();
+    });
+    this.copyButton = buttonRow.createEl("button", {
+      cls: "zrr-chat-copy",
+      text: "Copy",
+      attr: { title: "Copy this chat to a new note" },
+    });
+    this.copyButton.addEventListener("click", async () => {
+      await this.copyChatToNote();
+    });
+    this.deleteButton = buttonRow.createEl("button", {
+      cls: "zrr-chat-delete",
+      text: "Delete",
+      attr: { title: "Delete this chat" },
+    });
+    this.deleteButton.addEventListener("click", async () => {
+      await this.deleteChat();
+    });
+    this.newButton = buttonRow.createEl("button", {
+      cls: "zrr-chat-new",
+      text: "New chat",
+      attr: { title: "Start a new chat session" },
+    });
+    this.newButton.addEventListener("click", async () => {
+      await this.startNewChat();
+    });
 
     this.messagesEl = containerEl.createEl("div", { cls: "zrr-chat-messages" });
 
@@ -79,6 +136,7 @@ export class ZoteroChatView extends ItemView {
       }
     });
 
+    await this.loadSessions();
     await this.loadHistory();
     await this.renderAll();
   }
@@ -89,7 +147,7 @@ export class ZoteroChatView extends ItemView {
 
   private async loadHistory(): Promise<void> {
     try {
-      this.messages = await this.plugin.loadChatHistory();
+      this.messages = await this.plugin.loadChatHistoryForSession(this.activeSessionId);
     } catch (error) {
       console.error(error);
       this.messages = [];
@@ -98,10 +156,82 @@ export class ZoteroChatView extends ItemView {
 
   private async saveHistory(): Promise<void> {
     try {
-      await this.plugin.saveChatHistory(this.messages);
+      await this.plugin.saveChatHistoryForSession(this.activeSessionId, this.messages);
+      await this.plugin.finalizeChatSessionNameIfNeeded(this.activeSessionId, this.messages);
+      await this.loadSessions();
     } catch (error) {
       console.error(error);
     }
+  }
+
+  private async loadSessions(): Promise<void> {
+    const sessions = await this.plugin.listChatSessions();
+    this.activeSessionId = await this.plugin.getActiveChatSessionId();
+    this.sessionSelect.empty();
+    for (const session of sessions) {
+      const option = this.sessionSelect.createEl("option", { text: session.name }) as HTMLOptionElement;
+      option.value = session.id;
+      if (session.id === this.activeSessionId) {
+        option.selected = true;
+      }
+    }
+    if (!sessions.some((s) => s.id === this.activeSessionId) && sessions.length > 0) {
+      this.activeSessionId = sessions[0].id;
+      await this.plugin.setActiveChatSessionId(this.activeSessionId);
+      this.sessionSelect.value = this.activeSessionId;
+    }
+  }
+
+  private async promptRenameSession(): Promise<void> {
+    const sessions = await this.plugin.listChatSessions();
+    const current = sessions.find((s) => s.id === this.activeSessionId);
+    const modal = new RenameChatModal(this.app, current?.name ?? "New chat", async (name) => {
+      await this.plugin.renameChatSession(this.activeSessionId, name);
+      await this.loadSessions();
+    });
+    modal.open();
+  }
+
+  private async startNewChat(): Promise<void> {
+    await this.plugin.saveChatHistoryForSession(this.activeSessionId, this.messages);
+    await this.plugin.finalizeChatSessionNameIfNeeded(this.activeSessionId, this.messages, { force: true });
+    const sessionId = await this.plugin.createChatSession("New chat");
+    await this.switchSession(sessionId, { skipSave: true });
+  }
+
+  private async deleteChat(): Promise<void> {
+    const sessions = await this.plugin.listChatSessions();
+    if (sessions.length <= 1) {
+      new Notice("You must keep at least one chat.");
+      return;
+    }
+    const current = sessions.find((s) => s.id === this.activeSessionId);
+    if (!current) {
+      return;
+    }
+    const modal = new ConfirmDeleteChatModal(this.app, current.name, async () => {
+      await this.plugin.deleteChatSession(this.activeSessionId);
+      const nextSessionId = await this.plugin.getActiveChatSessionId();
+      await this.switchSession(nextSessionId, { skipSave: true });
+    });
+    modal.open();
+  }
+
+  private async switchSession(
+    sessionId: string,
+    options: { skipSave?: boolean } = {}
+  ): Promise<void> {
+    if (!sessionId || sessionId === this.activeSessionId) {
+      return;
+    }
+    if (!options.skipSave) {
+      await this.saveHistory();
+    }
+    this.activeSessionId = sessionId;
+    await this.plugin.setActiveChatSessionId(sessionId);
+    await this.loadSessions();
+    await this.loadHistory();
+    await this.renderAll();
   }
 
   private async renderAll(): Promise<void> {
@@ -145,9 +275,33 @@ export class ZoteroChatView extends ItemView {
     els.content.empty();
     els.citations.empty();
 
-    await MarkdownRenderer.renderMarkdown(message.content || "", els.content, "", this.plugin);
+    const content = await this.plugin.formatInlineCitations(
+      message.content || "",
+      message.citations ?? [],
+      message.retrieved ?? []
+    );
+    await MarkdownRenderer.renderMarkdown(content, els.content, "", this.plugin);
+    this.hookInternalLinks(els.content);
 
     await this.renderCitations(els.citations, message.citations ?? []);
+  }
+
+  private hookInternalLinks(container: HTMLElement): void {
+    const links = container.querySelectorAll<HTMLAnchorElement>("a.internal-link");
+    for (const link of Array.from(links)) {
+      if (link.dataset.zrrBound === "1") {
+        continue;
+      }
+      link.dataset.zrrBound = "1";
+      this.registerDomEvent(link, "click", (event) => {
+        event.preventDefault();
+        const href = link.getAttribute("data-href") || link.getAttribute("href") || "";
+        if (!href) {
+          return;
+        }
+        void this.plugin.openInternalLinkInMain(href);
+      });
+    }
   }
 
   private async renderCitations(container: HTMLElement, citations: ChatCitation[]): Promise<void> {
@@ -155,26 +309,47 @@ export class ZoteroChatView extends ItemView {
     if (!citations.length) {
       return;
     }
-    container.createEl("div", { cls: "zrr-chat-citations-label", text: "Citations" });
-    const list = container.createEl("ul", { cls: "zrr-chat-citation-list" });
+    const details = container.createEl("details", { cls: "zrr-chat-citations-details" });
+    details.createEl("summary", {
+      text: `Relevant context sources (${citations.length})`,
+      cls: "zrr-chat-citations-summary",
+    });
+    const list = details.createEl("ul", { cls: "zrr-chat-citation-list" });
 
     for (const citation of citations) {
       const display = await this.plugin.resolveCitationDisplay(citation);
       const item = list.createEl("li");
-      const link = item.createEl("a", { text: display.label, href: "#" });
-      link.addEventListener("click", (event) => {
+      const noteLink = item.createEl("a", { text: display.noteTitle, href: "#" });
+      noteLink.addEventListener("click", (event) => {
         event.preventDefault();
+        if (display.notePath) {
+          void this.plugin.openNoteInMain(display.notePath);
+        }
+      });
+
+      item.createEl("span", { text: ", p. " });
+
+      const pageLink = item.createEl("a", { text: display.pageLabel, href: "#" });
+      pageLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (display.zoteroUrl) {
+          this.plugin.openExternalUrl(display.zoteroUrl);
+          return;
+        }
+        if (display.pdfPath) {
+          void this.plugin.openPdfInMain(display.pdfPath, display.pageStart);
+          return;
+        }
         this.plugin.openCitationTarget(citation, display);
       });
-      if (display.zoteroUrl) {
-        item.createEl("span", { text: " · " });
-        const zoteroLink = item.createEl("a", { text: "Zotero", href: "#" });
-        zoteroLink.addEventListener("click", (event) => {
-          event.preventDefault();
-          this.plugin.openExternalUrl(display.zoteroUrl);
-        });
-      }
     }
+  }
+
+  private async copyChatToNote(): Promise<void> {
+    const sessions = await this.plugin.listChatSessions();
+    const current = sessions.find((s) => s.id === this.activeSessionId);
+    const title = current?.name ?? "New chat";
+    await this.plugin.createChatNoteFromSession(this.activeSessionId, title, this.messages);
   }
 
   private scrollToBottom(): void {
@@ -222,6 +397,7 @@ export class ZoteroChatView extends ItemView {
     this.scrollToBottom();
 
     let sawDelta = false;
+    const historyMessages = this.plugin.getRecentChatHistory(this.messages.slice(0, -2));
     try {
       await this.plugin.runRagQueryStreaming(
         query,
@@ -239,8 +415,12 @@ export class ZoteroChatView extends ItemView {
           if (Array.isArray(finalPayload?.citations)) {
             assistantMessage.citations = finalPayload.citations;
           }
+          if (Array.isArray(finalPayload?.retrieved)) {
+            assistantMessage.retrieved = finalPayload.retrieved;
+          }
           this.scheduleRender(assistantMessage);
-        }
+        },
+        historyMessages
       );
     } catch (error) {
       console.error(error);
@@ -264,5 +444,83 @@ export class ZoteroChatView extends ItemView {
       return crypto.randomUUID();
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
+class RenameChatModal extends Modal {
+  private initialValue: string;
+  private onSubmit: (value: string) => void;
+
+  constructor(app: App, initialValue: string, onSubmit: (value: string) => void) {
+    super(app);
+    this.initialValue = initialValue;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Rename chat" });
+
+    let value = this.initialValue;
+    new Setting(contentEl)
+      .setName("Name")
+      .addText((text) => {
+        text.setValue(value);
+        text.onChange((next) => {
+          value = next;
+        });
+      });
+
+    const buttons = contentEl.createEl("div");
+    buttons.style.display = "flex";
+    buttons.style.gap = "0.5rem";
+    buttons.style.marginTop = "1rem";
+
+    const cancel = buttons.createEl("button", { text: "Cancel" });
+    cancel.addEventListener("click", () => this.close());
+
+    const save = buttons.createEl("button", { text: "Save" });
+    save.addEventListener("click", () => {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        new Notice("Name cannot be empty.");
+        return;
+      }
+      this.close();
+      this.onSubmit(trimmed);
+    });
+  }
+}
+
+class ConfirmDeleteChatModal extends Modal {
+  private chatName: string;
+  private onConfirm: () => void;
+
+  constructor(app: App, chatName: string, onConfirm: () => void) {
+    super(app);
+    this.chatName = chatName;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Delete chat" });
+    contentEl.createEl("p", { text: `Delete "${this.chatName}"? This cannot be undone.` });
+
+    const buttons = contentEl.createEl("div");
+    buttons.style.display = "flex";
+    buttons.style.gap = "0.5rem";
+    buttons.style.marginTop = "1rem";
+
+    const cancel = buttons.createEl("button", { text: "Cancel" });
+    cancel.addEventListener("click", () => this.close());
+
+    const confirm = buttons.createEl("button", { text: "Delete" });
+    confirm.addEventListener("click", () => {
+      this.close();
+      this.onConfirm();
+    });
   }
 }

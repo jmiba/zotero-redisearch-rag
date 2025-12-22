@@ -28,7 +28,7 @@ import {
 import { ICON_ASSETS } from "./iconAssets";
 import { TOOL_ASSETS } from "./toolAssets";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
-import type { ChatCitation, ChatMessage } from "./chatView";
+import type { ChatCitation, ChatMessage, ChatRetrievedChunk } from "./chatView";
 
 type ZoteroItemValues = Record<string, any> & { version?: number };
 
@@ -483,12 +483,22 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath, doclingLanguageHint);
-      this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), null);
-      await this.runPython(
+      this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
+      await this.runPythonStreaming(
         doclingScript,
-        this.buildDoclingArgs(pdfSourcePath, docId, chunkPath, notePath, doclingLanguageHint)
+        this.buildDoclingArgs(
+          pdfSourcePath,
+          docId,
+          chunkPath,
+          notePath,
+          doclingLanguageHint,
+          true
+        ),
+        (payload) => this.handleDoclingProgress(payload, qualityLabel),
+        () => {}
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
+      await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachment.key);
     } catch (error) {
       new Notice("Docling extraction failed. See console for details.");
       console.error(error);
@@ -592,8 +602,143 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   async loadChatHistory(): Promise<ChatMessage[]> {
+    const sessionId = await this.getActiveChatSessionId();
+    return this.loadChatHistoryForSession(sessionId);
+  }
+
+  async saveChatHistory(messages: ChatMessage[]): Promise<void> {
+    const sessionId = await this.getActiveChatSessionId();
+    await this.saveChatHistoryForSession(sessionId, messages);
+  }
+
+  private getChatSessionsDir(): string {
+    return normalizePath(`${CACHE_ROOT}/chats`);
+  }
+
+  private getChatExportDir(): string {
+    const configured = (this.settings.chatOutputDir || "").trim();
+    if (configured) {
+      return normalizePath(configured);
+    }
+    return normalizePath("zotero/chats");
+  }
+
+  private getChatSessionsIndexPath(): string {
+    return normalizePath(`${this.getChatSessionsDir()}/index.json`);
+  }
+
+  private getChatSessionPath(sessionId: string): string {
+    return normalizePath(`${this.getChatSessionsDir()}/${sessionId}.json`);
+  }
+
+  public async listChatSessions(): Promise<{ id: string; name: string; createdAt: string; updatedAt: string }[]> {
+    await this.migrateLegacyChatHistory();
     const adapter = this.app.vault.adapter;
-    const historyPath = normalizePath(`${CACHE_ROOT}/chat.json`);
+    const indexPath = this.getChatSessionsIndexPath();
+    if (!(await adapter.exists(indexPath))) {
+      const now = new Date().toISOString();
+      const sessions = [{ id: "default", name: "New chat", createdAt: now, updatedAt: now }];
+      await this.writeChatSessionsIndex({ version: 1, active: "default", sessions });
+      return sessions;
+    }
+    try {
+      const raw = await adapter.read(indexPath);
+      const payload = JSON.parse(raw);
+      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+      return sessions
+        .filter((s: any) => s && typeof s.id === "string")
+        .map((s: any) => ({
+          id: String(s.id),
+          name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : String(s.id),
+          createdAt: typeof s.createdAt === "string" ? s.createdAt : new Date().toISOString(),
+          updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : new Date().toISOString(),
+        }));
+    } catch (error) {
+      console.warn("Failed to read chat sessions index", error);
+      return [];
+    }
+  }
+
+  public async getActiveChatSessionId(): Promise<string> {
+    await this.migrateLegacyChatHistory();
+    const adapter = this.app.vault.adapter;
+    const indexPath = this.getChatSessionsIndexPath();
+    if (!(await adapter.exists(indexPath))) {
+      return "default";
+    }
+    try {
+      const raw = await adapter.read(indexPath);
+      const payload = JSON.parse(raw);
+      const active = typeof payload?.active === "string" ? payload.active : "default";
+      return active || "default";
+    } catch {
+      return "default";
+    }
+  }
+
+  public async setActiveChatSessionId(sessionId: string): Promise<void> {
+    await this.migrateLegacyChatHistory();
+    const index = await this.readChatSessionsIndex();
+    const exists = (index.sessions ?? []).some((s) => s.id === sessionId);
+    const now = new Date().toISOString();
+    const sessions = exists
+      ? index.sessions
+      : [...(index.sessions ?? []), { id: sessionId, name: sessionId, createdAt: now, updatedAt: now }];
+    await this.writeChatSessionsIndex({ version: 1, active: sessionId, sessions });
+  }
+
+  public async createChatSession(name?: string): Promise<string> {
+    await this.migrateLegacyChatHistory();
+    const id = this.generateChatId();
+    const now = new Date().toISOString();
+    const safeName = (name || "").trim() || "New chat";
+    const index = await this.readChatSessionsIndex();
+    const sessions = [...(index.sessions ?? []), { id, name: safeName, createdAt: now, updatedAt: now }];
+    await this.ensureFolder(this.getChatSessionsDir());
+    await this.app.vault.adapter.write(this.getChatSessionPath(id), JSON.stringify({ version: 1, messages: [] }, null, 2));
+    await this.writeChatSessionsIndex({ version: 1, active: id, sessions });
+    return id;
+  }
+
+  public async renameChatSession(sessionId: string, name: string): Promise<void> {
+    await this.migrateLegacyChatHistory();
+    const trimmed = (name || "").trim();
+    if (!trimmed) {
+      return;
+    }
+    const index = await this.readChatSessionsIndex();
+    const sessions = (index.sessions ?? []).map((s) => (s.id === sessionId ? { ...s, name: trimmed } : s));
+    await this.writeChatSessionsIndex({ version: 1, active: index.active ?? "default", sessions });
+  }
+
+  public async deleteChatSession(sessionId: string): Promise<void> {
+    await this.migrateLegacyChatHistory();
+    if (!sessionId) {
+      return;
+    }
+    const adapter = this.app.vault.adapter;
+    const index = await this.readChatSessionsIndex();
+    const sessions = index.sessions ?? [];
+    if (sessions.length <= 1) {
+      return;
+    }
+    const remaining = sessions.filter((s) => s.id !== sessionId);
+    if (!remaining.length) {
+      return;
+    }
+    const nextActive = index.active === sessionId ? remaining[0].id : index.active;
+    try {
+      await adapter.remove(this.getChatSessionPath(sessionId));
+    } catch (error) {
+      console.warn("Failed to delete chat session file", error);
+    }
+    await this.writeChatSessionsIndex({ version: 1, active: nextActive, sessions: remaining });
+  }
+
+  public async loadChatHistoryForSession(sessionId: string): Promise<ChatMessage[]> {
+    await this.migrateLegacyChatHistory();
+    const adapter = this.app.vault.adapter;
+    const historyPath = this.getChatSessionPath(sessionId || "default");
     if (!(await adapter.exists(historyPath))) {
       return [];
     }
@@ -615,25 +760,247 @@ export default class ZoteroRagPlugin extends Plugin {
         role: msg.role === "assistant" ? "assistant" : "user",
         content: msg.content,
         citations: Array.isArray(msg.citations) ? msg.citations : [],
+        retrieved: Array.isArray(msg.retrieved) ? msg.retrieved : [],
         createdAt: msg.createdAt || new Date().toISOString(),
       }));
   }
 
-  async saveChatHistory(messages: ChatMessage[]): Promise<void> {
-    await this.ensureFolder(CACHE_ROOT);
+  public async saveChatHistoryForSession(sessionId: string, messages: ChatMessage[]): Promise<void> {
+    await this.migrateLegacyChatHistory();
+    await this.ensureFolder(this.getChatSessionsDir());
     const adapter = this.app.vault.adapter;
-    const historyPath = normalizePath(`${CACHE_ROOT}/chat.json`);
+    const historyPath = this.getChatSessionPath(sessionId || "default");
     const payload = {
       version: 1,
       messages,
     };
     await adapter.write(historyPath, JSON.stringify(payload, null, 2));
+
+    const index = await this.readChatSessionsIndex();
+    const now = new Date().toISOString();
+    const sessions = (index.sessions ?? []).map((s) => (s.id === sessionId ? { ...s, updatedAt: now } : s));
+    await this.writeChatSessionsIndex({ version: 1, active: index.active ?? sessionId, sessions });
+  }
+
+  public getRecentChatHistory(messages: ChatMessage[]): ChatMessage[] {
+    const limit = Math.max(0, this.settings.chatHistoryMessages || 0);
+    if (!limit) {
+      return [];
+    }
+    const filtered = messages.filter((message) => message && message.content?.trim());
+    return filtered.slice(-limit);
+  }
+
+  private async readChatSessionsIndex(): Promise<{
+    version: number;
+    active: string;
+    sessions: { id: string; name: string; createdAt: string; updatedAt: string }[];
+  }> {
+    const adapter = this.app.vault.adapter;
+    const indexPath = this.getChatSessionsIndexPath();
+    const now = new Date().toISOString();
+    if (!(await adapter.exists(indexPath))) {
+      return { version: 1, active: "default", sessions: [{ id: "default", name: "New chat", createdAt: now, updatedAt: now }] };
+    }
+    try {
+      const raw = await adapter.read(indexPath);
+      const payload = JSON.parse(raw);
+      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+      return {
+        version: 1,
+        active: typeof payload?.active === "string" ? payload.active : "default",
+        sessions: sessions.map((s: any) => ({
+          id: String(s.id),
+          name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : String(s.id),
+          createdAt: typeof s.createdAt === "string" ? s.createdAt : now,
+          updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : now,
+        })),
+      };
+    } catch (error) {
+      console.warn("Failed to parse chat sessions index", error);
+      return { version: 1, active: "default", sessions: [{ id: "default", name: "New chat", createdAt: now, updatedAt: now }] };
+    }
+  }
+
+  private async writeChatSessionsIndex(payload: {
+    version: number;
+    active: string;
+    sessions: { id: string; name: string; createdAt: string; updatedAt: string }[];
+  }): Promise<void> {
+    await this.ensureFolder(this.getChatSessionsDir());
+    await this.app.vault.adapter.write(this.getChatSessionsIndexPath(), JSON.stringify(payload, null, 2));
+  }
+
+  private async migrateLegacyChatHistory(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const legacyPath = normalizePath(`${CACHE_ROOT}/chat.json`);
+    const sessionsDir = this.getChatSessionsDir();
+    const indexPath = this.getChatSessionsIndexPath();
+    const defaultPath = this.getChatSessionPath("default");
+
+    const legacyExists = await adapter.exists(legacyPath);
+    const defaultExists = await adapter.exists(defaultPath);
+    const indexExists = await adapter.exists(indexPath);
+
+    if (!legacyExists && indexExists) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    await this.ensureFolder(sessionsDir);
+
+    if (legacyExists && !defaultExists) {
+      try {
+        await adapter.rename(legacyPath, defaultPath);
+      } catch {
+        try {
+          const raw = await adapter.read(legacyPath);
+          await adapter.write(defaultPath, raw);
+          await adapter.remove(legacyPath);
+        } catch (error) {
+          console.warn("Failed to migrate legacy chat history", error);
+        }
+      }
+    }
+
+    if (!indexExists) {
+      const sessions = [{ id: "default", name: "New chat", createdAt: now, updatedAt: now }];
+      await this.writeChatSessionsIndex({ version: 1, active: "default", sessions });
+    }
+
+    if (indexExists) {
+      try {
+        const raw = await adapter.read(indexPath);
+        const payload = JSON.parse(raw);
+        const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+        const hasDefault = sessions.some((s: any) => s?.id === "default");
+        const updatedSessions = sessions.map((s: any) => {
+          if (s?.id === "default" && typeof s?.name === "string" && s.name.trim().toLowerCase() === "default") {
+            return { ...s, name: "New chat" };
+          }
+          return s;
+        });
+        if (hasDefault && JSON.stringify(updatedSessions) !== JSON.stringify(sessions)) {
+          await this.writeChatSessionsIndex({
+            version: 1,
+            active: typeof payload?.active === "string" ? payload.active : "default",
+            sessions: updatedSessions.map((s: any) => ({
+              id: String(s.id),
+              name: typeof s.name === "string" ? s.name : "New chat",
+              createdAt: typeof s.createdAt === "string" ? s.createdAt : now,
+              updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : now,
+            })),
+          });
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private isPlaceholderChatName(name: string): boolean {
+    const normalized = (name || "").trim().toLowerCase();
+    return normalized === "new chat" || normalized === "default";
+  }
+
+  private normalizeChatTitle(title: string): string {
+    const cleaned = (title || "").replace(/\s+/g, " ").trim();
+    return cleaned.length > 60 ? `${cleaned.slice(0, 57)}...` : cleaned;
+  }
+
+  private guessTitleFromMessages(messages: ChatMessage[]): string {
+    const firstUser = messages.find((m) => m.role === "user" && m.content.trim());
+    if (!firstUser) {
+      return "New chat";
+    }
+    const words = firstUser.content
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .slice(0, 8)
+      .join(" ");
+    return this.normalizeChatTitle(words || "New chat");
+  }
+
+  private async suggestChatTitleWithLlm(messages: ChatMessage[]): Promise<string | null> {
+    const baseUrl = (this.settings.chatBaseUrl || "").trim();
+    const model = (this.settings.chatModel || "").trim();
+    if (!baseUrl || !model) {
+      return null;
+    }
+    try {
+      const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (this.settings.chatApiKey) {
+        headers["Authorization"] = `Bearer ${this.settings.chatApiKey}`;
+      }
+      const sample = messages
+        .slice(-8)
+        .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+        .join("\n")
+        .slice(0, 4000);
+      const payload = {
+        model,
+        temperature: 0.2,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Generate a short, specific title (3-7 words) for the chat. No quotes, no punctuation at the end.",
+          },
+          { role: "user", content: sample },
+        ],
+      };
+      const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload) });
+      if (!res.ok) {
+        return null;
+      }
+      const data: any = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      if (typeof text !== "string") {
+        return null;
+      }
+      return this.normalizeChatTitle(text.replace(/^\"|\"$/g, "").trim());
+    } catch (error) {
+      console.warn("Chat title suggestion failed", error);
+      return null;
+    }
+  }
+
+  public async finalizeChatSessionNameIfNeeded(
+    sessionId: string,
+    messages: ChatMessage[],
+    options: { force?: boolean } = {}
+  ): Promise<void> {
+    if (!sessionId) {
+      return;
+    }
+    const safeMessages = messages || [];
+    const hasUserMessage = safeMessages.some((m) => m.role === "user" && m.content.trim());
+    if (!hasUserMessage) {
+      return;
+    }
+    if (!options.force && safeMessages.length < 4) {
+      return;
+    }
+    const index = await this.readChatSessionsIndex();
+    const session = (index.sessions ?? []).find((s) => s.id === sessionId);
+    if (!session || !this.isPlaceholderChatName(session.name)) {
+      return;
+    }
+    const llmTitle = await this.suggestChatTitleWithLlm(safeMessages);
+    const name = llmTitle || this.guessTitleFromMessages(safeMessages);
+    if (!name || this.isPlaceholderChatName(name)) {
+      return;
+    }
+    await this.renameChatSession(sessionId, name);
   }
 
   async runRagQueryStreaming(
     query: string,
     onDelta: (delta: string) => void,
-    onFinal: (payload: any) => void
+    onFinal: (payload: any) => void,
+    historyMessages: ChatMessage[] = []
   ): Promise<void> {
     await this.ensureBundledTools();
     const pluginDir = this.getPluginDir();
@@ -666,28 +1033,71 @@ export default class ZoteroRagPlugin extends Plugin {
       "--stream",
     ];
 
-    return this.runPythonStreaming(
-      ragScript,
-      args,
-      (payload) => {
-        if (payload?.type === "delta" && typeof payload.content === "string") {
-          onDelta(payload.content);
-          return;
+    const historyPayload = this.buildChatHistoryPayload(historyMessages);
+    const historyFile = await this.writeChatHistoryTemp(historyPayload);
+    if (historyFile?.absolutePath) {
+      args.push("--history-file", historyFile.absolutePath);
+    }
+
+    try {
+      await this.runPythonStreaming(
+        ragScript,
+        args,
+        (payload) => {
+          if (payload?.type === "delta" && typeof payload.content === "string") {
+            onDelta(payload.content);
+            return;
+          }
+          if (payload?.type === "final") {
+            onFinal(payload);
+            return;
+          }
+          if (payload?.answer) {
+            onFinal(payload);
+          }
+        },
+        onFinal
+      );
+    } finally {
+      if (historyFile?.relativePath) {
+        try {
+          await this.app.vault.adapter.remove(historyFile.relativePath);
+        } catch (error) {
+          console.warn("Failed to remove chat history temp file", error);
         }
-        if (payload?.type === "final") {
-          onFinal(payload);
-          return;
-        }
-        if (payload?.answer) {
-          onFinal(payload);
-        }
-      },
-      onFinal
-    );
+      }
+    }
+  }
+
+  private buildChatHistoryPayload(messages: ChatMessage[]): Array<{ role: string; content: string }> {
+    const history = this.getRecentChatHistory(messages);
+    return history.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+  }
+
+  private async writeChatHistoryTemp(
+    messages: Array<{ role: string; content: string }>
+  ): Promise<{ relativePath: string; absolutePath: string } | null> {
+    if (!messages.length) {
+      return null;
+    }
+    const tmpDir = normalizePath(`${CACHE_ROOT}/tmp`);
+    await this.ensureFolder(tmpDir);
+    const filename = `chat_history_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`;
+    const relativePath = normalizePath(`${tmpDir}/${filename}`);
+    const payload = { version: 1, messages };
+    await this.app.vault.adapter.write(relativePath, JSON.stringify(payload, null, 2));
+    return {
+      relativePath,
+      absolutePath: this.getAbsoluteVaultPath(relativePath),
+    };
   }
 
   public async resolveCitationDisplay(citation: ChatCitation): Promise<{
-    label: string;
+    noteTitle: string;
+    pageLabel: string;
     notePath?: string;
     pdfPath?: string;
     zoteroUrl?: string;
@@ -703,19 +1113,239 @@ export default class ZoteroRagPlugin extends Plugin {
       entry?.note_title ||
       (notePath ? path.basename(notePath, ".md") : citation.doc_id || "?");
     const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
-    const label = `${noteTitle} pages ${pages}`;
+    const pageLabel = pages.includes("-") ? pages.replace("-", " - ") : pages;
     const pageStart = citation.page_start ? String(citation.page_start) : "";
     const pdfPath = entry?.pdf_path || citation.source_pdf || "";
+    const attachmentKey = citation.attachment_key || entry?.attachment_key;
+    const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
     const zoteroUrl = citation.doc_id
-      ? this.buildZoteroDeepLink(citation.doc_id, entry?.attachment_key, pageStart)
+      ? this.buildZoteroDeepLink(citation.doc_id, attachmentKey, pageStart, annotationKey)
       : undefined;
     return {
-      label,
+      noteTitle,
+      pageLabel,
       notePath: notePath || undefined,
       pdfPath: pdfPath || undefined,
       zoteroUrl,
       pageStart: pageStart || undefined,
     };
+  }
+
+  public async formatInlineCitations(
+    content: string,
+    citations: ChatCitation[],
+    retrieved: ChatRetrievedChunk[] = []
+  ): Promise<string> {
+    if (!content) {
+      return content;
+    }
+    const pattern = /\[\[?cite:([A-Za-z0-9]+):([^\]\n]+?)\]?\]/g;
+    const matches = Array.from(content.matchAll(pattern));
+    if (matches.length === 0) {
+      return content;
+    }
+
+    const replacements = new Map<string, string>();
+    for (const match of matches) {
+      const token = match[0];
+      if (replacements.has(token)) {
+        continue;
+      }
+      const docId = match[1];
+      const rawRef = match[2].trim();
+      const pageMatch = rawRef.match(/^(\d+)-(\d+)(?::([A-Za-z0-9]+))?$/);
+      let pageStart = "";
+      let pageEnd = "";
+      let annotationKey: string | undefined;
+      let chunkRef: string | undefined;
+
+      if (pageMatch) {
+        pageStart = pageMatch[1];
+        pageEnd = pageMatch[2];
+        annotationKey = pageMatch[3];
+      } else {
+        chunkRef = rawRef;
+      }
+
+      const chunkMatch = chunkRef
+        ? retrieved.find((item) => {
+            const itemDocId = typeof item.doc_id === "string" ? item.doc_id : "";
+            if (itemDocId && itemDocId !== docId) {
+              return false;
+            }
+            const chunkId = typeof item.chunk_id === "string" ? item.chunk_id : "";
+            if (!chunkId) {
+              return false;
+            }
+            return (
+              chunkId === chunkRef ||
+              chunkId === `${docId}:${chunkRef}` ||
+              chunkId.endsWith(`:${chunkRef}`)
+            );
+          })
+        : undefined;
+
+      if (chunkMatch) {
+        if (!pageStart && chunkMatch.page_start !== undefined) {
+          pageStart = String(chunkMatch.page_start);
+        }
+        if (!pageEnd && chunkMatch.page_end !== undefined) {
+          pageEnd = String(chunkMatch.page_end);
+        }
+        if (!annotationKey && typeof chunkMatch.chunk_id === "string") {
+          annotationKey = this.extractAnnotationKey(chunkMatch.chunk_id);
+        }
+      }
+
+      const inferredCitation: ChatCitation = {
+        doc_id: docId,
+        chunk_id: chunkMatch?.chunk_id,
+        annotation_key: annotationKey,
+      };
+      if (pageStart || pageEnd) {
+        inferredCitation.page_start = pageStart || pageEnd;
+        inferredCitation.page_end = pageEnd || pageStart;
+        inferredCitation.pages = `${inferredCitation.page_start}-${inferredCitation.page_end}`;
+      }
+      if (chunkMatch?.source_pdf) {
+        inferredCitation.source_pdf = String(chunkMatch.source_pdf);
+      }
+
+      let citation =
+        (pageStart || pageEnd
+          ? citations.find(
+              (item) =>
+                item.doc_id === docId &&
+                String(item.page_start ?? "") === pageStart &&
+                String(item.page_end ?? "") === pageEnd
+            )
+          : undefined) ||
+        citations.find((item) => item.doc_id === docId) ||
+        inferredCitation;
+
+      if (!citation.annotation_key && annotationKey) {
+        citation = { ...citation, annotation_key: annotationKey };
+      }
+
+      const display = await this.resolveCitationDisplay(citation);
+      if (display.zoteroUrl) {
+        const label = `${display.noteTitle} p. ${display.pageLabel}`;
+        replacements.set(token, `[${label}](${display.zoteroUrl})`);
+      } else {
+        const fallbackLabel = display.pageLabel
+          ? `${docId} p. ${display.pageLabel}`
+          : `${docId}`;
+        replacements.set(token, `(${fallbackLabel})`);
+      }
+    }
+
+    let result = content;
+    for (const [token, replacement] of replacements) {
+      result = result.split(token).join(replacement);
+    }
+    return result;
+  }
+
+  private handleDoclingProgress(payload: any, qualityLabel: string | null): void {
+    if (!payload || payload.type !== "progress") {
+      return;
+    }
+    const percent = Number(payload.percent);
+    if (!Number.isFinite(percent)) {
+      return;
+    }
+    const message =
+      typeof payload.message === "string" && payload.message.trim()
+        ? payload.message
+        : "Docling extraction...";
+    this.showStatusProgress(this.formatStatusLabel(message, qualityLabel), Math.round(percent));
+  }
+
+  public async createChatNoteFromSession(
+    sessionId: string,
+    sessionName: string,
+    messages: ChatMessage[]
+  ): Promise<void> {
+    const noteDir = this.getChatExportDir();
+    await this.ensureFolder(noteDir);
+    await this.getDocIndex();
+
+    const baseName = this.sanitizeFileName(sessionName) || "Zotero Chat";
+    const timestamp = this.formatTimestamp(new Date());
+    const draftPath = normalizePath(`${noteDir}/${baseName}.md`);
+    const notePath = await this.resolveUniqueNotePath(draftPath, `${baseName}-${timestamp}.md`);
+    const content = await this.buildChatTranscript(sessionName, messages);
+
+    await this.app.vault.adapter.write(notePath, content);
+    await this.openNoteInNewTab(notePath);
+    new Notice(`Chat copied to ${notePath}`);
+  }
+
+  private async buildChatTranscript(sessionName: string, messages: ChatMessage[]): Promise<string> {
+    const lines: string[] = [];
+    lines.push(`# ${sessionName || "Zotero Chat"}`);
+    lines.push("");
+    lines.push(`Created: ${new Date().toISOString()}`);
+    lines.push("");
+
+    for (const message of messages) {
+      const header = message.role === "user" ? "## You" : "## Assistant";
+      lines.push(header);
+      lines.push("");
+      const content =
+        message.role === "assistant"
+          ? await this.formatInlineCitations(
+              message.content || "",
+              message.citations ?? [],
+              message.retrieved ?? []
+            )
+          : message.content || "";
+      lines.push(content.trim());
+      lines.push("");
+      if (message.role === "assistant" && message.citations?.length) {
+        lines.push("### Relevant context sources");
+        const citations = this.formatCitationsMarkdown(message.citations);
+        if (citations) {
+          lines.push(citations);
+          lines.push("");
+        }
+      }
+    }
+
+    return lines.join("\n").trim() + "\n";
+  }
+
+  private async resolveUniqueNotePath(basePath: string, fallbackFile: string): Promise<string> {
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(basePath)) {
+      return basePath;
+    }
+    const folder = path.dirname(basePath);
+    const fallbackPath = normalizePath(path.join(folder, fallbackFile));
+    if (!await adapter.exists(fallbackPath)) {
+      return fallbackPath;
+    }
+    let counter = 2;
+    while (counter < 1000) {
+      const candidate = normalizePath(path.join(folder, `${path.basename(fallbackFile, ".md")}-${counter}.md`));
+      if (!await adapter.exists(candidate)) {
+        return candidate;
+      }
+      counter += 1;
+    }
+    return fallbackPath;
+  }
+
+  private formatTimestamp(date: Date): string {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return [
+      date.getFullYear(),
+      pad(date.getMonth() + 1),
+      pad(date.getDate()),
+      "-",
+      pad(date.getHours()),
+      pad(date.getMinutes()),
+    ].join("");
   }
 
   public async openCitationTarget(
@@ -842,7 +1472,7 @@ export default class ZoteroRagPlugin extends Plugin {
     new Notice(`Rebuilt doc index for ${docIds.length} items.`);
   }
 
-  private async recreateMissingNotesFromCache(): Promise<void> {
+  public async recreateMissingNotesFromCache(): Promise<void> {
     const adapter = this.app.vault.adapter;
     const itemDocIds = await this.listDocIds(ITEM_CACHE_DIR);
     const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
@@ -894,7 +1524,7 @@ export default class ZoteroRagPlugin extends Plugin {
     new Notice(`Recreated ${rebuilt}/${missing.length} missing notes.`);
   }
 
-  private async reindexRedisFromCache(): Promise<void> {
+  public async reindexRedisFromCache(): Promise<void> {
     try {
       await this.ensureBundledTools();
     } catch (error) {
@@ -1840,6 +2470,25 @@ export default class ZoteroRagPlugin extends Plugin {
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
   }
 
+  private async annotateChunkJsonWithAttachmentKey(chunkPath: string, attachmentKey: string): Promise<void> {
+    if (!attachmentKey) {
+      return;
+    }
+    try {
+      const raw = await this.app.vault.adapter.read(chunkPath);
+      const payload = JSON.parse(raw);
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+      const metadata = payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+      metadata.attachment_key = attachmentKey;
+      payload.metadata = metadata;
+      await this.app.vault.adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+    } catch (error) {
+      console.warn("Failed to annotate chunks JSON with attachment key", error);
+    }
+  }
+
   public buildPdfLinkFromSourcePath(sourcePdf: string): string {
     if (!sourcePdf) {
       return "";
@@ -1878,12 +2527,54 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.buildPdfLinkFromSourcePath(sourcePdf);
   }
 
+  private getMainLeaf(): WorkspaceLeaf {
+    const chatLeaves = new Set(this.app.workspace.getLeavesOfType(VIEW_TYPE_ZOTERO_CHAT));
+    const markdownLeaf = this.app.workspace.getLeavesOfType("markdown").find((leaf) => !chatLeaves.has(leaf));
+    if (markdownLeaf) {
+      return markdownLeaf;
+    }
+    const fallback = this.app.workspace.getLeaf(false);
+    if (fallback && !chatLeaves.has(fallback)) {
+      return fallback;
+    }
+    return this.app.workspace.getLeaf("tab");
+  }
+
   public async openNoteInMain(notePath: string): Promise<void> {
+    const normalized = normalizePath(notePath);
+    const file = this.app.vault.getAbstractFileByPath(normalized);
+    const leaf = this.getMainLeaf();
+    if (file instanceof TFile) {
+      await leaf.openFile(file, { active: true });
+      return;
+    }
+    await this.app.workspace.openLinkText(normalized, "", false);
+  }
+
+  public async openInternalLinkInMain(linkText: string): Promise<void> {
+    const leaf = this.getMainLeaf();
+    const linkPath = linkText.split("#")[0].trim();
+    const file = linkPath
+      ? this.app.metadataCache.getFirstLinkpathDest(linkPath, "")
+      : null;
+    if (file instanceof TFile) {
+      await leaf.openFile(file, { active: true });
+      if (linkText.includes("#")) {
+        this.app.workspace.setActiveLeaf(leaf, { focus: true });
+        await this.app.workspace.openLinkText(linkText, "", false);
+      }
+      return;
+    }
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
+    await this.app.workspace.openLinkText(linkText, "", false);
+  }
+
+  private async openNoteInNewTab(notePath: string): Promise<void> {
     const normalized = normalizePath(notePath);
     await this.app.workspace.openLinkText(normalized, "", "tab");
   }
 
-  private async openPdfInMain(sourcePdf: string, pageStart?: string): Promise<boolean> {
+  public async openPdfInMain(sourcePdf: string, pageStart?: string): Promise<boolean> {
     if (!sourcePdf) {
       return false;
     }
@@ -1911,12 +2602,36 @@ export default class ZoteroRagPlugin extends Plugin {
     window.open(url);
   }
 
-  private buildZoteroDeepLink(docId: string, attachmentKey?: string, pageStart?: string): string {
+  private buildZoteroDeepLink(
+    docId: string,
+    attachmentKey?: string,
+    pageStart?: string,
+    annotationKey?: string
+  ): string {
     if (attachmentKey) {
-      const page = pageStart ? `?page=${encodeURIComponent(pageStart)}` : "";
-      return `zotero://open-pdf/library/items/${attachmentKey}${page}`;
+      const params = new URLSearchParams();
+      if (pageStart) {
+        params.set("page", pageStart);
+      }
+      if (annotationKey) {
+        params.set("annotation", annotationKey);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      return `zotero://open-pdf/library/items/${attachmentKey}${suffix}`;
     }
     return `zotero://select/library/items/${docId}`;
+  }
+
+  private extractAnnotationKey(chunkId?: string): string | undefined {
+    if (!chunkId) {
+      return undefined;
+    }
+    const raw = chunkId.includes(":") ? chunkId.split(":").slice(1).join(":") : chunkId;
+    const candidate = raw.trim().toUpperCase();
+    if (/^[A-Z0-9]{8}$/.test(candidate)) {
+      return candidate;
+    }
+    return undefined;
   }
 
   public formatCitationsMarkdown(citations: ChatCitation[]): string {
@@ -1930,20 +2645,23 @@ export default class ZoteroRagPlugin extends Plugin {
   private formatCitationMarkdown(citation: ChatCitation): string {
     const docId = citation.doc_id || "?";
     const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
-    const label = `${docId} pages ${pages}`;
-    const sourcePdf = citation.source_pdf || "";
-    if (sourcePdf) {
-      const link = this.buildPdfLinkFromSourcePath(sourcePdf);
-      if (link.startsWith("[[")) {
-        const target = link.slice(2, -2);
-        return `- [[${target}|${label}]]`;
-      }
-      const match = link.match(/^\[PDF\]\((.+)\)$/);
-      if (match) {
-        return `- [${label}](${match[1]})`;
-      }
+    const label = `${docId}`;
+    const pageLabel = pages.includes("-") ? pages.replace("-", " - ") : pages;
+    const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
+    const attachmentKey = citation.attachment_key || this.docIndex?.[citation.doc_id || ""]?.attachment_key;
+    const pageStart = citation.page_start ? String(citation.page_start) : "";
+    const entry = this.docIndex?.[citation.doc_id || ""] ?? null;
+    const noteTitle = entry?.zotero_title || entry?.note_title || label;
+    const noteTarget = entry?.note_path
+      ? normalizePath(entry.note_path).replace(/\.md$/i, "")
+      : this.sanitizeFileName(noteTitle) || noteTitle;
+    const noteLink =
+      noteTarget && noteTarget !== noteTitle ? `[[${noteTarget}|${noteTitle}]]` : `[[${noteTitle}]]`;
+    if (attachmentKey) {
+      const zoteroUrl = this.buildZoteroDeepLink(docId, attachmentKey, pageStart, annotationKey);
+      return `- ${noteLink}, p. [${pageLabel}](${zoteroUrl})`;
     }
-    return `- ${label}`;
+    return `- ${noteLink}, p. ${pageLabel}`;
   }
 
   private generateChatId(): string {
@@ -2205,8 +2923,11 @@ export default class ZoteroRagPlugin extends Plugin {
     const languageHint = await this.resolveLanguageHint(values, item.key ?? values.key);
     const doclingLanguageHint = this.buildDoclingLanguageHint(languageHint ?? undefined);
     let notePath = "";
-
     const existingEntry = await this.getDocIndexEntry(docId);
+    const attachmentKey =
+      typeof chunkPayload?.metadata?.attachment_key === "string"
+        ? chunkPayload.metadata.attachment_key
+        : existingEntry?.attachment_key;
     if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
       notePath = normalizePath(existingEntry.note_path);
     }
@@ -2238,12 +2959,24 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf, doclingLanguageHint);
-      this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), null);
-      await this.runPython(
+      this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
+      await this.runPythonStreaming(
         doclingScript,
-        this.buildDoclingArgs(sourcePdf, docId, chunkPath, notePath, doclingLanguageHint)
+        this.buildDoclingArgs(
+          sourcePdf,
+          docId,
+          chunkPath,
+          notePath,
+          doclingLanguageHint,
+          true
+        ),
+        (payload) => this.handleDoclingProgress(payload, qualityLabel),
+        () => {}
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
+      if (attachmentKey) {
+        await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachmentKey);
+      }
     } catch (error) {
       if (showNotices) {
         new Notice("Docling extraction failed. See console for details.");
@@ -2551,7 +3284,8 @@ export default class ZoteroRagPlugin extends Plugin {
     docId: string,
     chunkPath: string,
     notePath: string,
-    languageHint?: string | null
+    languageHint?: string | null,
+    includeProgress = false
   ): string[] {
     const ocrMode =
       this.settings.ocrMode === "force_low_quality" ? "auto" : this.settings.ocrMode;
@@ -2570,12 +3304,24 @@ export default class ZoteroRagPlugin extends Plugin {
       ocrMode,
     ];
 
+    if (includeProgress) {
+      args.push("--progress");
+    }
     if (this.settings.ocrMode === "force_low_quality") {
       args.push("--force-ocr-low-quality");
     }
     args.push("--quality-threshold", String(this.settings.ocrQualityThreshold));
     if (languageHint) {
       args.push("--language-hint", languageHint);
+    }
+    if (this.settings.maxChunkChars > 0) {
+      args.push("--max-chunk-chars", String(this.settings.maxChunkChars));
+    }
+    if (this.settings.chunkOverlapChars > 0) {
+      args.push("--chunk-overlap-chars", String(this.settings.chunkOverlapChars));
+    }
+    if (!this.settings.removeImagePlaceholders) {
+      args.push("--keep-image-tags");
     }
     if (this.settings.enableLlmCleanup) {
       args.push("--enable-llm-cleanup");

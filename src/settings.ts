@@ -21,6 +21,7 @@ export interface ZoteroRagSettings {
   frontmatterTemplate: string;
   outputPdfDir: string;
   outputNoteDir: string;
+  chatOutputDir: string;
   chatPaneLocation: "right" | "main";
   redisUrl: string;
   redisIndex: string;
@@ -32,8 +33,12 @@ export interface ZoteroRagSettings {
   chatApiKey: string;
   chatModel: string;
   chatTemperature: number;
+  chatHistoryMessages: number;
   ocrMode: OcrMode;
   chunkingMode: ChunkingMode;
+  maxChunkChars: number;
+  chunkOverlapChars: number;
+  removeImagePlaceholders: boolean;
   ocrQualityThreshold: number;
   enableLlmCleanup: boolean;
   llmCleanupBaseUrl: string;
@@ -66,6 +71,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "item_json: {{item_json}}",
   outputPdfDir: "zotero/pdfs",
   outputNoteDir: "zotero/notes",
+  chatOutputDir: "zotero/chats",
   chatPaneLocation: "right",
   redisUrl: "redis://127.0.0.1:6379",
   redisIndex: "idx:zotero",
@@ -77,8 +83,12 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatApiKey: "",
   chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
+  chatHistoryMessages: 6,
   ocrMode: "auto",
   chunkingMode: "page",
+  maxChunkChars: 4000,
+  chunkOverlapChars: 250,
+  removeImagePlaceholders: true,
   ocrQualityThreshold: 0.5,
   enableLlmCleanup: false,
   llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
@@ -94,6 +104,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     settings: ZoteroRagSettings;
     saveSettings: () => Promise<void>;
     startRedisStack: (silent?: boolean) => Promise<void>;
+    reindexRedisFromCache: () => Promise<void>;
+    recreateMissingNotesFromCache: () => Promise<void>;
+    deleteChatSession?: (sessionId: string) => Promise<void>;
   };
 
   constructor(
@@ -102,6 +115,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       settings: ZoteroRagSettings;
       saveSettings: () => Promise<void>;
       startRedisStack: (silent?: boolean) => Promise<void>;
+      reindexRedisFromCache: () => Promise<void>;
+      recreateMissingNotesFromCache: () => Promise<void>;
     }
   ) {
     super(app, plugin as any);
@@ -274,6 +289,19 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("Saved chats folder")
+      .setDesc("Where exported chat notes are stored (vault-relative).")
+      .addText((text) =>
+        text
+          .setPlaceholder("zotero/chats")
+          .setValue(this.plugin.settings.chatOutputDir)
+          .onChange(async (value) => {
+            this.plugin.settings.chatOutputDir = value.trim() || "zotero/chats";
+            await this.plugin.saveSettings();
+          })
+      );
+
     containerEl.createEl("h3", { text: "Redis Stack" });
 
     new Setting(containerEl)
@@ -422,6 +450,20 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Chat history messages")
+      .setDesc("Number of recent messages to include for conversational continuity (0 disables).")
+      .addText((text) =>
+        text
+          .setPlaceholder("6")
+          .setValue(String(this.plugin.settings.chatHistoryMessages))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.chatHistoryMessages = Number.isFinite(parsed) ? Math.max(0, parsed) : 6;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Chat panel location")
       .setDesc("Where to open the chat view by default.")
       .addDropdown((dropdown) =>
@@ -478,6 +520,44 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.chunkingMode = value as ChunkingMode;
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Section chunk max chars")
+      .setDesc("Split large section chunks into smaller pieces (section mode only).")
+      .addText((text) =>
+        text
+          .setPlaceholder("3000")
+          .setValue(String(this.plugin.settings.maxChunkChars))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.maxChunkChars = Number.isFinite(parsed) ? parsed : 3000;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Section chunk overlap chars")
+      .setDesc("Number of characters to overlap when splitting section chunks.")
+      .addText((text) =>
+        text
+          .setPlaceholder("250")
+          .setValue(String(this.plugin.settings.chunkOverlapChars))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.chunkOverlapChars = Number.isFinite(parsed) ? parsed : 250;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Remove image placeholders")
+      .setDesc("Strip '<!-- image -->' tags before chunking.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.removeImagePlaceholders).onChange(async (value) => {
+          this.plugin.settings.removeImagePlaceholders = value;
+          await this.plugin.saveSettings();
+        })
       );
 
     containerEl.createEl("h4", { text: "OCR cleanup (optional)" });
@@ -548,13 +628,13 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("LLM cleanup min quality")
       .setDesc("Only run cleanup when chunk quality is below this threshold (0-1).")
-      .addText((text) =>
-        text
-          .setPlaceholder("0.35")
-          .setValue(String(this.plugin.settings.llmCleanupMinQuality))
+      .addSlider((slider) =>
+        slider
+          .setLimits(0, 1, 0.05)
+          .setValue(this.plugin.settings.llmCleanupMinQuality)
+          .setDynamicTooltip()
           .onChange(async (value) => {
-            const parsed = Number.parseFloat(value);
-            this.plugin.settings.llmCleanupMinQuality = Number.isFinite(parsed) ? parsed : 0.35;
+            this.plugin.settings.llmCleanupMinQuality = value;
             await this.plugin.saveSettings();
           })
       );
@@ -571,6 +651,26 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.llmCleanupMaxChars = Number.isFinite(parsed) ? parsed : 2000;
             await this.plugin.saveSettings();
           })
+      );
+
+    containerEl.createEl("h3", { text: "Maintenance" });
+
+    new Setting(containerEl)
+      .setName("Reindex Redis from cached chunks")
+      .setDesc("Rebuild the Redis index from cached chunk JSON files.")
+      .addButton((button) =>
+        button.setButtonText("Reindex").onClick(async () => {
+          await this.plugin.reindexRedisFromCache();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Recreate missing notes from cache")
+      .setDesc("Rebuild missing notes using cached Zotero items and chunks.")
+      .addButton((button) =>
+        button.setButtonText("Recreate").onClick(async () => {
+          await this.plugin.recreateMissingNotesFromCache();
+        })
       );
   }
 }

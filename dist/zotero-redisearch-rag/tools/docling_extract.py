@@ -18,6 +18,27 @@ def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
 
 
+ProgressCallback = Callable[[int, str, str], None]
+
+
+def make_progress_emitter(enabled: bool) -> ProgressCallback:
+    if not enabled:
+        def _noop(percent: int, stage: str, message: str) -> None:
+            return None
+        return _noop
+
+    def _emit(percent: int, stage: str, message: str) -> None:
+        payload = {
+            "type": "progress",
+            "percent": max(0, min(100, int(percent))),
+            "stage": stage,
+            "message": message,
+        }
+        print(json.dumps(payload), flush=True)
+
+    return _emit
+
+
 @dataclass
 class DoclingProcessingConfig:
     ocr_mode: str = "auto"
@@ -56,6 +77,9 @@ class DoclingProcessingConfig:
     page_range_peak_ratio: float = 0.5
     page_range_cluster_gap: int = 1
     page_range_max_span_ratio: float = 0.7
+    max_chunk_chars: int = 3000
+    chunk_overlap_chars: int = 250
+    cleanup_remove_image_tags: bool = True
     per_page_ocr_on_low_quality: bool = True
     force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
@@ -114,6 +138,19 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def remove_image_placeholders(text: str) -> str:
+    return re.sub(r"<!--\s*image\s*-->", "", text, flags=re.IGNORECASE)
+
+
+def clean_chunk_text(text: str, config: Optional[DoclingProcessingConfig]) -> str:
+    if not text:
+        return ""
+    cleaned = text
+    if config and config.cleanup_remove_image_tags:
+        cleaned = remove_image_placeholders(cleaned)
+    return cleaned
+
+
 def normalize_whitespace(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
@@ -132,6 +169,79 @@ def replace_ligatures(text: str) -> str:
         .replace("\ufb03", "ffi")
         .replace("\ufb04", "ffl")
     )
+
+
+def split_paragraphs(text: str) -> List[str]:
+    paragraphs = re.split(r"\n\s*\n", text)
+    return [para.strip() for para in paragraphs if para.strip()]
+
+
+def split_long_text(text: str, max_chars: int) -> List[str]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    if len(sentences) <= 1:
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for sentence in sentences:
+        sent = sentence.strip()
+        if not sent:
+            continue
+        if current_len + len(sent) + 1 > max_chars and current:
+            chunks.append(" ".join(current).strip())
+            current = [sent]
+            current_len = len(sent)
+        else:
+            current.append(sent)
+            current_len += len(sent) + 1
+    if current:
+        chunks.append(" ".join(current).strip())
+    return chunks
+
+
+def split_text_by_size(text: str, max_chars: int, overlap_chars: int) -> List[str]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    paragraphs = split_paragraphs(text) or [text]
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    def flush() -> None:
+        nonlocal current, current_len
+        if not current:
+            return
+        chunk = "\n\n".join(current).strip()
+        chunks.append(chunk)
+        current = []
+        current_len = 0
+
+    for para in paragraphs:
+        for piece in split_long_text(para, max_chars):
+            piece_len = len(piece)
+            if current_len + piece_len + 2 > max_chars and current:
+                flush()
+            current.append(piece)
+            current_len += piece_len + 2
+
+    flush()
+
+    if overlap_chars <= 0 or len(chunks) <= 1:
+        return chunks
+
+    overlapped: List[str] = []
+    previous = ""
+    for chunk in chunks:
+        if previous:
+            overlap = previous[-overlap_chars:]
+            combined = f"{overlap}\n{chunk}".strip()
+        else:
+            combined = chunk
+        overlapped.append(combined)
+        previous = chunk
+    return overlapped
 
 
 def select_wordfreq_languages(languages: str) -> List[str]:
@@ -1045,7 +1155,13 @@ def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
     return temp_file.name
 
 
-def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def ocr_pages_with_paddle(
+    images: Sequence[Any],
+    languages: str,
+    progress_cb: Optional[ProgressCallback] = None,
+    progress_base: int = 0,
+    progress_span: int = 0,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     from paddleocr import PaddleOCR
 
     try:
@@ -1057,6 +1173,7 @@ def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[D
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
+    total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
         result = ocr.ocr(np.array(image), cls=True)
         lines: List[str] = []
@@ -1073,18 +1190,31 @@ def ocr_pages_with_paddle(images: Sequence[Any], languages: str) -> Tuple[List[D
                     else:
                         lines.append(str(text_part))
         pages.append({"page_num": idx, "text": "\n".join(lines)})
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int(idx / total * progress_span)
+            progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
 
     avg_conf = sum(confidences) / len(confidences) if confidences else None
     return pages, {"ocr_confidence_avg": avg_conf}
 
 
-def ocr_pages_with_tesseract(images: Sequence[Any], languages: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def ocr_pages_with_tesseract(
+    images: Sequence[Any],
+    languages: str,
+    progress_cb: Optional[ProgressCallback] = None,
+    progress_base: int = 0,
+    progress_span: int = 0,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     import pytesseract
 
     pages: List[Dict[str, Any]] = []
+    total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
         text = pytesseract.image_to_string(image, lang=languages)
         pages.append({"page_num": idx, "text": text})
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int(idx / total * progress_span)
+            progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
     return pages, {}
 
 
@@ -1093,12 +1223,27 @@ def run_external_ocr_pages(
     engine: str,
     languages: str,
     config: DoclingProcessingConfig,
+    progress_cb: Optional[ProgressCallback] = None,
+    progress_base: int = 0,
+    progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     images = render_pdf_pages(pdf_path, config.ocr_dpi)
     if engine == "paddle":
-        return ocr_pages_with_paddle(images, normalize_languages_for_engine(languages, engine))
+        return ocr_pages_with_paddle(
+            images,
+            normalize_languages_for_engine(languages, engine),
+            progress_cb,
+            progress_base,
+            progress_span,
+        )
     if engine == "tesseract":
-        return ocr_pages_with_tesseract(images, normalize_languages_for_engine(languages, engine))
+        return ocr_pages_with_tesseract(
+            images,
+            normalize_languages_for_engine(languages, engine),
+            progress_cb,
+            progress_base,
+            progress_span,
+        )
     return [], {}
 
 
@@ -1123,7 +1268,13 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
     }
 
 
-def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> DoclingConversionResult:
+def convert_pdf_with_docling(
+    pdf_path: str,
+    config: DoclingProcessingConfig,
+    progress_cb: Optional[ProgressCallback] = None,
+) -> DoclingConversionResult:
+    emit = progress_cb or (lambda _p, _s, _m: None)
+    emit(5, "analysis", "Analyzing text layer")
     analysis_pages = extract_pages_from_pdf(
         pdf_path,
         max_pages=config.analysis_max_pages,
@@ -1135,6 +1286,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
     low_quality = is_low_quality(quality, config)
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
+    emit(15, "route", "Selecting OCR route")
     rasterized_source = False
     rasterized_pdf_path = ""
     rasterize_error: Optional[str] = None
@@ -1143,6 +1295,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         try:
             rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
             rasterized_source = True
+            emit(25, "rasterize", "Rasterized PDF for OCR")
             LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
         except Exception as exc:
             rasterize_error = str(exc)
@@ -1164,6 +1317,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
                 column_layout.detected,
                 column_layout.reason,
             )
+            emit(30, "layout", "Checked column layout")
             if column_layout.detected and decision.use_external_ocr and decision.per_page_ocr:
                 decision.per_page_ocr = False
                 decision.per_page_reason = "Columns detected; keep Docling layout"
@@ -1196,6 +1350,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
 
     converter = build_converter(config, decision)
     docling_input = rasterized_pdf_path or pdf_path
+    emit(40, "docling", "Docling conversion running")
     result = converter.convert(docling_input)
     doc = result.document if hasattr(result, "document") else result
     markdown = export_markdown(doc)
@@ -1204,11 +1359,20 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         fallback_pages = extract_pages_from_pdf(pdf_path)
         if len(fallback_pages) > len(pages):
             pages = fallback_pages
+    emit(70, "docling", "Docling conversion complete")
 
     ocr_stats: Dict[str, Any] = {}
     if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and not rasterized_source:
         try:
-            ocr_pages, ocr_stats = run_external_ocr_pages(pdf_path, decision.ocr_engine, languages, config)
+            ocr_pages, ocr_stats = run_external_ocr_pages(
+                pdf_path,
+                decision.ocr_engine,
+                languages,
+                config,
+                progress_cb=emit,
+                progress_base=70,
+                progress_span=20,
+            )
             if ocr_pages:
                 pages = ocr_pages
                 if config.postprocess_markdown and not markdown.strip():
@@ -1221,6 +1385,7 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         except Exception:
             pass
 
+    emit(90, "chunking", "Building chunks")
     metadata = {
         "ocr_used": decision.ocr_used,
         "ocr_engine": decision.ocr_engine,
@@ -1243,12 +1408,14 @@ def convert_pdf_with_docling(pdf_path: str, config: DoclingProcessingConfig) -> 
         "per_page_ocr": decision.per_page_ocr,
     }
     metadata.update(ocr_stats)
+    emit(100, "done", "Extraction complete")
     return DoclingConversionResult(markdown=markdown, pages=pages, metadata=metadata)
 
 
 def build_chunks_page(
     doc_id: str,
     pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str], str]] = None,
 ) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
@@ -1256,6 +1423,7 @@ def build_chunks_page(
         raw_text = str(page.get("text", ""))
         if postprocess:
             raw_text = postprocess(raw_text)
+        raw_text = clean_chunk_text(raw_text, config)
         cleaned = normalize_text(raw_text)
         if not cleaned:
             continue
@@ -1284,32 +1452,39 @@ def build_chunks_section(
     seen_ids: Dict[str, int] = {}
 
     if not sections:
-        return build_chunks_page(doc_id, pages)
+        return build_chunks_page(doc_id, pages, config=config)
 
     for idx, section in enumerate(sections, start=1):
         title = section.get("title", "")
         text = section.get("text", "")
         if postprocess:
             text = postprocess(text)
-        cleaned = normalize_text(text)
-        if not cleaned:
+        text = clean_chunk_text(text, config)
+        if not text.strip():
             continue
-        page_start, page_end = find_page_range(cleaned, pages, config)
         base_id = slugify(title) or f"section-{idx}"
         if base_id in seen_ids:
             seen_ids[base_id] += 1
-            chunk_id = f"{base_id}-{seen_ids[base_id]}"
+            base_id = f"{base_id}-{seen_ids[base_id]}"
         else:
             seen_ids[base_id] = 1
-            chunk_id = base_id
-        chunks.append({
-            "chunk_id": chunk_id,
-            "text": cleaned,
-            "page_start": page_start,
-            "page_end": page_end,
-            "section": title,
-            "char_count": len(cleaned),
-        })
+        max_chars = config.max_chunk_chars if config else 0
+        overlap_chars = config.chunk_overlap_chars if config else 0
+        segments = split_text_by_size(text, max_chars, overlap_chars)
+        for seg_idx, segment in enumerate(segments, start=1):
+            cleaned = normalize_text(segment)
+            if not cleaned:
+                continue
+            page_start, page_end = find_page_range(cleaned, pages, config)
+            chunk_id = base_id if seg_idx == 1 else f"{base_id}-{seg_idx}"
+            chunks.append({
+                "chunk_id": chunk_id,
+                "text": cleaned,
+                "page_start": page_start,
+                "page_end": page_end,
+                "section": title,
+                "char_count": len(cleaned),
+            })
     return chunks
 
 
@@ -1322,6 +1497,21 @@ def main() -> int:
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
+    parser.add_argument(
+        "--max-chunk-chars",
+        type=int,
+        help="Max chars for section chunks before splitting (section mode only).",
+    )
+    parser.add_argument(
+        "--chunk-overlap-chars",
+        type=int,
+        help="Overlap chars when splitting large section chunks.",
+    )
+    parser.add_argument(
+        "--keep-image-tags",
+        action="store_true",
+        help="Preserve '<!-- image -->' tags instead of removing them.",
+    )
     parser.add_argument(
         "--force-ocr-low-quality",
         action="store_true",
@@ -1340,6 +1530,7 @@ def main() -> int:
     parser.add_argument("--llm-cleanup-temperature", type=float, help="Temperature for LLM cleanup")
     parser.add_argument("--llm-cleanup-max-chars", type=int, help="Max chars per chunk for LLM cleanup")
     parser.add_argument("--llm-cleanup-min-quality", type=float, help="Min quality threshold for LLM cleanup")
+    parser.add_argument("--progress", action="store_true", help="Emit JSON progress events to stdout")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -1380,6 +1571,12 @@ def main() -> int:
         config.quality_confidence_threshold = args.quality_threshold
     if args.language_hint:
         config.language_hint = args.language_hint
+    if args.max_chunk_chars is not None:
+        config.max_chunk_chars = args.max_chunk_chars
+    if args.chunk_overlap_chars is not None:
+        config.chunk_overlap_chars = args.chunk_overlap_chars
+    if args.keep_image_tags:
+        config.cleanup_remove_image_tags = False
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
     if args.llm_cleanup_base_url:
@@ -1397,8 +1594,10 @@ def main() -> int:
 
     config.llm_correct = build_llm_cleanup_callback(config)
 
+    progress_cb = make_progress_emitter(bool(args.progress))
+
     try:
-        conversion = convert_pdf_with_docling(args.pdf, config)
+        conversion = convert_pdf_with_docling(args.pdf, config, progress_cb=progress_cb)
     except Exception as exc:
         eprint(f"Docling conversion failed: {exc}")
         return 2
@@ -1439,7 +1638,7 @@ def main() -> int:
                 postprocess=postprocess_fn,
             )
         else:
-            chunks = build_chunks_page(args.doc_id, pages)
+            chunks = build_chunks_page(args.doc_id, pages, config=config)
     except Exception as exc:
         eprint(f"Failed to build chunks: {exc}")
         return 2

@@ -1,6 +1,8 @@
 # Ask Your Zotero Library in Obsidian
 
-Obisdian plugin for Zotero RAG and Chatbot using Redis Stack and LM Studio/OpenAI-compatible endpoints.
+![Zotero Redis RAG icon](icon.svg)
+
+Obsidian plugin for Zotero RAG and chat using Redis Stack and LM Studio/OpenAI-compatible endpoints.
 
 > [!CAUTION]
 > This plugin is early and may change. Keep backups of important notes.
@@ -12,7 +14,8 @@ Zotero is your source of truth for references, and Obsidian is where you think. 
 ## What you get
 
 - Ask questions over your Zotero PDFs inside Obsidian.
-- Answers include citations that link back to your notes and PDFs.
+- Answers include citations that link back to your notes and Zotero PDFs (page links).
+- A chat panel with saved sessions and one-click export to notes.
 - Everything runs locally (Redis, embeddings, chat). Web API is optional.
 
 ## How it works
@@ -94,11 +97,13 @@ Key settings:
 - Embeddings base URL: `http://localhost:1234/v1`
 - Embeddings model: LM Studio model ID
 - Chat base URL/model: LM Studio chat model ID
+- Saved chats folder: where exported chat notes are stored
 
 ## Using the plugin
 
 1) Command palette -> "Import Zotero item and index (Docling -> RedisSearch)"
 2) Command palette -> "Ask my Zotero library (RAG via RedisSearch)"
+3) Command palette -> "Open Zotero RAG chat panel"
 
 Answers are generated from retrieved text only and include citations.
 
@@ -129,10 +134,12 @@ If you want Web API file downloads, your Zotero library must be synced and the A
 
 - `zotero/pdfs/<title>.pdf` (optional if PDF copy is enabled)
 - `zotero/notes/<title>.md`
+- `zotero/chats/<chat-title>.md` (exported chats; folder configurable)
 - `.zotero-redisearch-rag/items/<doc_id>.json`
 - `.zotero-redisearch-rag/chunks/<doc_id>.json`
 - `.zotero-redisearch-rag/doc_index.json`
-- `.zotero-redisearch-rag/chat.json`
+- `.zotero-redisearch-rag/chats/index.json`
+- `.zotero-redisearch-rag/chats/<session-id>.json`
 
 ## OCR options (simple summary)
 

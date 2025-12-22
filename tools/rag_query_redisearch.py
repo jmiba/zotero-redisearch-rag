@@ -251,9 +251,10 @@ def run_lexical_search(
             "0",
             str(limit),
             "RETURN",
-            "8",
+            "9",
             "doc_id",
             "chunk_id",
+            "attachment_key",
             "source_pdf",
             "page_start",
             "page_end",
@@ -287,20 +288,67 @@ def build_context(retrieved: List[Dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
+def load_history_messages(path: str) -> List[Dict[str, Any]]:
+    if not path:
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    if isinstance(messages, list):
+        return [item for item in messages if isinstance(item, dict)]
+    return []
+
+
+def format_history_block(messages: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for message in messages:
+        role = str(message.get("role", "")).strip().lower()
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines)
+
+
+def extract_annotation_key(chunk_id: str) -> str:
+    if not chunk_id:
+        return ""
+    if ":" in chunk_id:
+        chunk_id = chunk_id.split(":", 1)[1]
+    candidate = chunk_id.strip().upper()
+    if re.fullmatch(r"[A-Z0-9]{8}", candidate):
+        return candidate
+    return ""
+
+
 def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set()
     citations: List[Dict[str, Any]] = []
     for chunk in retrieved:
         doc_id = chunk.get("doc_id", "")
+        chunk_id = chunk.get("chunk_id", "")
+        attachment_key = chunk.get("attachment_key", "")
         page_start = chunk.get("page_start", "")
         page_end = chunk.get("page_end", "")
         source_pdf = chunk.get("source_pdf", "")
-        key = (doc_id, page_start, page_end, source_pdf)
+        key = (doc_id, attachment_key, page_start, page_end, source_pdf)
         if key in seen:
             continue
         seen.add(key)
+        annotation_key = extract_annotation_key(str(chunk_id))
         citations.append({
             "doc_id": doc_id,
+            "chunk_id": chunk_id,
+            "attachment_key": attachment_key,
+            "annotation_key": annotation_key or None,
             "page_start": page_start,
             "page_end": page_end,
             "pages": f"{page_start}-{page_end}",
@@ -324,6 +372,7 @@ def main() -> int:
     parser.add_argument("--chat-model", required=True)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--history-file", help="Optional JSON file with recent chat history")
     args = parser.parse_args()
 
     try:
@@ -350,9 +399,10 @@ def main() -> int:
             "SORTBY",
             "score",
             "RETURN",
-            "8",
+            "9",
             "doc_id",
             "chunk_id",
+            "attachment_key",
             "source_pdf",
             "page_start",
             "page_end",
@@ -384,10 +434,16 @@ def main() -> int:
     context = build_context(retrieved)
 
     system_prompt = (
-        "Use ONLY the provided context. If insufficient, say you do not know. "
-        "Provide citations by doc_id and pages."
+        "Use ONLY the provided context for factual claims. If insufficient, say you do not know. "
+        "Chat history is only for conversational continuity. "
+        "Add inline citations using this exact format: [[cite:DOC_ID:PAGE_START-PAGE_END]]. "
+        "Example: ... [[cite:ABC123:12-13]]."
     )
-    user_prompt = f"Question: {args.query}\n\nContext:\n{context}"
+    history_messages = load_history_messages(args.history_file) if args.history_file else []
+    history_block = format_history_block(history_messages)
+    if history_block:
+        history_block = f"Chat history (for reference only):\n{history_block}\n\n"
+    user_prompt = f"{history_block}Question: {args.query}\n\nContext:\n{context}"
 
     citations = build_citations(retrieved)
 
