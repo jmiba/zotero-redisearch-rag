@@ -45,7 +45,13 @@ Option A (recommended):
    `<vault>/.obsidian/plugins/zotero-redisearch-rag/`
 3) The folder must contain `main.js`, `manifest.json`, `versions.json`, and `tools/`.
 
-Option B (build from source):
+Option B (BRAT, beta testing):
+1) Install the BRAT plugin in Obsidian.
+2) BRAT -> Add Beta plugin.
+3) Enter the repo slug: `jmiba/zotero-redisearch-rag`
+4) Enable the plugin in Community plugins.
+
+Option C (build from source, power users):
 ```bash
 npm install
 npm run build
