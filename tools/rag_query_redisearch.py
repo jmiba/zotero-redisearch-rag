@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import argparse
 import json
 import math
@@ -12,7 +13,8 @@ import redis
 import requests
 
 
-
+def eprint(message: str) -> None:
+    sys.stderr.write(message + "\n")
 
 def is_temperature_unsupported(message: str) -> bool:
     lowered = message.lower()
@@ -236,6 +238,35 @@ def run_lexical_search(
         return []
     return parse_results(raw)
 
+def is_content_chunk(chunk: Dict[str, Any]) -> bool:
+    text = chunk.get("text", "")
+    if not text:
+        return False
+
+    # 1. Minimum length (filters title pages, citations)
+    if len(text) < 500:
+        return False
+
+    # 2. Must contain narrative sentences
+    # (bibliographies rarely have multiple full sentences)
+    if text.count(". ") < 3:
+        return False
+
+    return True
+
+def looks_narrative(text: str) -> bool:
+    if not text:
+        return False
+
+    # Must contain several complete sentences
+    if text.count(". ") < 4:
+        return False
+
+    # Optional: avoid list-like text
+    if text.count("\n") > len(text) / 80:
+        return False
+
+    return True
 
 def build_context(retrieved: List[Dict[str, Any]]) -> str:
     blocks = []
@@ -328,7 +359,7 @@ def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Query RedisSearch and answer with RAG.")
     parser.add_argument("--query", required=True)
-    parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--redis-url", required=True)
     parser.add_argument("--index", required=True)
     parser.add_argument("--prefix", required=True)
@@ -385,8 +416,10 @@ def main() -> int:
         return 2
 
     retrieved = parse_results(raw)
+
+    # merge lexical results (unchanged)
     keywords = extract_keywords(args.query)
-    lexical_limit = max(args.k, 3)
+    lexical_limit = max(args.k, 5)
     lexical_results = run_lexical_search(client, args.index, keywords, lexical_limit)
     if lexical_results:
         seen = {item.get("chunk_id") for item in retrieved if item.get("chunk_id")}
@@ -396,14 +429,28 @@ def main() -> int:
                 continue
             retrieved.append(item)
             seen.add(chunk_id)
+
         max_total = args.k + lexical_limit
         if len(retrieved) > max_total:
             retrieved = retrieved[:max_total]
+
+    # Strict filter
+    filtered = [
+        c for c in retrieved
+        if is_content_chunk(c) and looks_narrative(c.get("text", ""))
+    ]
+
+    # Fallback: if too strict, keep "contentful" chunks at least (from ORIGINAL retrieved)
+    if not filtered:
+        filtered = [c for c in retrieved if is_content_chunk(c)]
+
+    retrieved = filtered
+
     context = build_context(retrieved)
 
     system_prompt = (
         "Use ONLY the provided context for factual claims. If insufficient, say you do not know. "
-        "Chat history is only for conversational continuity. "
+        "Chat history is only for conversational continuity or for providing concepts to be retrieved. "
         "Add inline citations using this exact format: [[cite:DOC_ID:PAGE_START-PAGE_END]]. "
         "Example: ... [[cite:ABC123:12-13]]."
     )

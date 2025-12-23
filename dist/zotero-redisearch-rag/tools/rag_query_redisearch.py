@@ -1,3 +1,5 @@
+def eprint(message: str) -> None:
+    sys.stderr.write(message + "\n")
 #!/usr/bin/env python3
 import argparse
 import json
@@ -403,7 +405,7 @@ def main() -> int:
 
     system_prompt = (
         "Use ONLY the provided context for factual claims. If insufficient, say you do not know. "
-        "Chat history is only for conversational continuity. "
+        "Chat history is only for conversational continuity or for providing concepts to be retrieved"
         "Add inline citations using this exact format: [[cite:DOC_ID:PAGE_START-PAGE_END]]. "
         "Example: ... [[cite:ABC123:12-13]]."
     )

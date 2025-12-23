@@ -206,11 +206,22 @@ def main() -> int:
         eprint(f"Failed to read chunks JSON: {exc}")
         return 2
 
+
     doc_id = payload.get("doc_id")
     chunks = payload.get("chunks")
     if not doc_id or not isinstance(chunks, list):
         eprint("Invalid chunks JSON schema")
         return 2
+
+    # Delete all existing chunk keys for this doc_id before indexing
+    pattern = f"{args.prefix}{doc_id}:*"
+    try:
+        keys_to_delete = client.keys(pattern)
+        if keys_to_delete:
+            client.delete(*keys_to_delete)
+            eprint(f"Deleted {len(keys_to_delete)} existing chunk keys for doc_id {doc_id}")
+    except Exception as exc:
+        eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
 
     attachment_key = None
     try:

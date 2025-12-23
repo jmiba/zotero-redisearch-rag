@@ -3610,7 +3610,7 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     }
     if (pdfStatus === "no") {
       addSeparator();
-      metaEl.createSpan({ text: "No PDF", cls: "zrr-no-pdf-flag" });
+      metaEl.createSpan({ text: "No attachment", cls: "zrr-no-pdf-flag" });
       hasMeta = true;
     }
     el.addEventListener("click", () => {

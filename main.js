@@ -19,7 +19,7 @@ item_json: {{item_json}}`,outputPdfDir:"zotero/pdfs",outputNoteDir:"zotero/notes
   <path d="m7.5,16l9,0"/>
 </svg>
 `};var ee={"docling_extract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.2.1
+# zotero-redisearch-rag tool version: 0.2.2
 import argparse
 import json
 import logging
@@ -1686,7 +1686,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"index_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.2.1
+# zotero-redisearch-rag tool version: 0.2.2
 import argparse
 import json
 import math
@@ -1894,11 +1894,22 @@ def main() -> int:
         eprint(f"Failed to read chunks JSON: {exc}")
         return 2
 
+
     doc_id = payload.get("doc_id")
     chunks = payload.get("chunks")
     if not doc_id or not isinstance(chunks, list):
         eprint("Invalid chunks JSON schema")
         return 2
+
+    # Delete all existing chunk keys for this doc_id before indexing
+    pattern = f"{args.prefix}{doc_id}:*"
+    try:
+        keys_to_delete = client.keys(pattern)
+        if keys_to_delete:
+            client.delete(*keys_to_delete)
+            eprint(f"Deleted {len(keys_to_delete)} existing chunk keys for doc_id {doc_id}")
+    except Exception as exc:
+        eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
 
     attachment_key = None
     try:
@@ -1992,7 +2003,8 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"rag_query_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.2.1
+# zotero-redisearch-rag tool version: 0.2.2
+
 import argparse
 import json
 import math
@@ -2006,7 +2018,8 @@ import redis
 import requests
 
 
-
+def eprint(message: str) -> None:
+    sys.stderr.write(message + "\\n")
 
 def is_temperature_unsupported(message: str) -> bool:
     lowered = message.lower()
@@ -2230,6 +2243,35 @@ def run_lexical_search(
         return []
     return parse_results(raw)
 
+def is_content_chunk(chunk: Dict[str, Any]) -> bool:
+    text = chunk.get("text", "")
+    if not text:
+        return False
+
+    # 1. Minimum length (filters title pages, citations)
+    if len(text) < 500:
+        return False
+
+    # 2. Must contain narrative sentences
+    # (bibliographies rarely have multiple full sentences)
+    if text.count(". ") < 3:
+        return False
+
+    return True
+
+def looks_narrative(text: str) -> bool:
+    if not text:
+        return False
+
+    # Must contain several complete sentences
+    if text.count(". ") < 4:
+        return False
+
+    # Optional: avoid list-like text
+    if text.count("\\n") > len(text) / 80:
+        return False
+
+    return True
 
 def build_context(retrieved: List[Dict[str, Any]]) -> str:
     blocks = []
@@ -2322,7 +2364,7 @@ def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Query RedisSearch and answer with RAG.")
     parser.add_argument("--query", required=True)
-    parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--redis-url", required=True)
     parser.add_argument("--index", required=True)
     parser.add_argument("--prefix", required=True)
@@ -2379,8 +2421,10 @@ def main() -> int:
         return 2
 
     retrieved = parse_results(raw)
+
+    # merge lexical results (unchanged)
     keywords = extract_keywords(args.query)
-    lexical_limit = max(args.k, 3)
+    lexical_limit = max(args.k, 5)
     lexical_results = run_lexical_search(client, args.index, keywords, lexical_limit)
     if lexical_results:
         seen = {item.get("chunk_id") for item in retrieved if item.get("chunk_id")}
@@ -2390,14 +2434,28 @@ def main() -> int:
                 continue
             retrieved.append(item)
             seen.add(chunk_id)
+
         max_total = args.k + lexical_limit
         if len(retrieved) > max_total:
             retrieved = retrieved[:max_total]
+
+    # Strict filter
+    filtered = [
+        c for c in retrieved
+        if is_content_chunk(c) and looks_narrative(c.get("text", ""))
+    ]
+
+    # Fallback: if too strict, keep "contentful" chunks at least (from ORIGINAL retrieved)
+    if not filtered:
+        filtered = [c for c in retrieved if is_content_chunk(c)]
+
+    retrieved = filtered
+
     context = build_context(retrieved)
 
     system_prompt = (
         "Use ONLY the provided context for factual claims. If insufficient, say you do not know. "
-        "Chat history is only for conversational continuity. "
+        "Chat history is only for conversational continuity or for providing concepts to be retrieved. "
         "Add inline citations using this exact format: [[cite:DOC_ID:PAGE_START-PAGE_END]]. "
         "Example: ... [[cite:ABC123:12-13]]."
     )
@@ -2464,7 +2522,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"batch_index_pyzotero.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.2.1
+# zotero-redisearch-rag tool version: 0.2.2
 import argparse
 import json
 import os
@@ -2668,7 +2726,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"utils_embedding.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.2.1
+# zotero-redisearch-rag tool version: 0.2.2
 import math
 import struct
 import requests
@@ -2699,7 +2757,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
     if not embedding:
         raise RuntimeError("Embedding response missing embedding")
     return [float(x) for x in embedding]
-`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.2.1
+`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.2.2
 # Minimal English/German wordlist for optional OCR correction
 abstract
 analysis
@@ -2766,7 +2824,7 @@ abbildung
 tabelle
 methode
 analyse
-`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.2.1
+`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.2.2
 services:
   redis-stack:
     image: redis/redis-stack-server:latest
@@ -2778,7 +2836,7 @@ services:
     volumes:
       - "\${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
       - "./redis-stack.conf:/redis-stack.conf:ro"
-`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.2.1
+`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.2.2
 # Redis Stack persistence config for local RAG index
 appendonly yes
 appendfsync everysec
@@ -2797,4 +2855,4 @@ ${o}
 Item JSON: ${a}
 
 ${i}`}renderFrontmatter(e,t,n,s,r){var o;let i=(o=this.settings.frontmatterTemplate)!=null?o:"";if(!i.trim())return"";let a=this.buildTemplateVars(e,t,n,s,r);return i.replace(/{{\s*([a-z0-9_]+)\s*}}/gi,(c,l)=>{var u;return(u=a[l])!=null?u:""}).trim()}buildTemplateVars(e,t,n,s,r){let i=typeof e.title=="string"?e.title:"",a=typeof e.shortTitle=="string"?e.shortTitle:"",o=typeof e.date=="string"?e.date:"",c=typeof(t==null?void 0:t.parsedDate)=="string"?t.parsedDate:"",l=this.extractYear(c||o),m=(Array.isArray(e.creators)?e.creators:[]).filter(w=>w.creatorType==="author").map(w=>this.formatCreatorName(w)),h=m.join("; "),f=Array.isArray(e.tags)?e.tags.map(w=>typeof w=="string"?w:w==null?void 0:w.tag).filter(Boolean):[],_=f.join("; "),b=typeof e.itemType=="string"?e.itemType:"",k=typeof(t==null?void 0:t.creatorSummary)=="string"?t.creatorSummary:"",v={doc_id:n,zotero_key:typeof e.key=="string"?e.key:n,title:i,short_title:a,date:o,year:l,authors:h,tags:_,item_type:b,creator_summary:k,pdf_link:this.escapeYamlString(s),item_json:this.escapeYamlString(r)};for(let[w,D]of Object.entries(v))v[`${w}_yaml`]=this.escapeYamlString(D);return v.authors_yaml=this.toYamlList(m),v.tags_yaml=this.toYamlList(f),v}extractYear(e){if(!e)return"";let t=e.match(/\b(\d{4})\b/);return t?t[1]:""}formatCreatorName(e){if(!e||typeof e!="object")return"";if(e.name)return String(e.name);let t=e.firstName?String(e.firstName):"",n=e.lastName?String(e.lastName):"";return[n,t].filter(Boolean).join(", ")||`${t} ${n}`.trim()}escapeYamlString(e){return`"${String(e).replace(/\\/g,"\\\\").replace(/"/g,'\\"')}"`}toYamlList(e){return e.length?e.map(t=>`  - ${this.escapeYamlString(t)}`).join(`
-`):'  - ""'}getVaultBasePath(){var n;let e=this.app.vault.adapter;if(e instanceof d.FileSystemAdapter)return e.getBasePath();let t=(n=e.getBasePath)==null?void 0:n.call(e);if(t)return t;throw new Error("Vault base path is unavailable.")}getPluginDir(){var s;let e=this.getVaultBasePath(),t=(s=this.manifest.dir)!=null?s:this.manifest.id;if(!t)throw new Error("Plugin directory is unavailable.");let n=y.default.isAbsolute(t)?t:y.default.join(e,t);return y.default.normalize(n)}async ensureBundledTools(){let e=this.getPluginDir(),t=y.default.join(e,"tools");await O.promises.mkdir(t,{recursive:!0});for(let[n,s]of Object.entries(ee)){let r=y.default.join(t,n),i=!0;try{await O.promises.readFile(r,"utf8")===s&&(i=!1)}catch(a){}i&&await O.promises.writeFile(r,s,"utf8")}}async migrateCachePaths(){let e="zotero/items",t="zotero/chunks",n=N,s=E,r=this.app.vault.adapter,i=(0,d.normalizePath)(e),a=(0,d.normalizePath)(t),o=(0,d.normalizePath)(n),c=(0,d.normalizePath)(s),l=o.split("/").slice(0,-1).join("/"),u=c.split("/").slice(0,-1).join("/");l&&await this.ensureFolder(l),u&&await this.ensureFolder(u);let m=await r.exists(i),h=await r.exists(a),f=await r.exists(o),_=await r.exists(c);m&&!f&&await r.rename(i,o),h&&!_&&await r.rename(a,c)}getAbsoluteVaultPath(e){let t=this.getVaultBasePath(),n=y.default.isAbsolute(e)?e:y.default.join(t,e);return y.default.normalize(n)}buildDoclingArgs(e,t,n,s,r,i=!1){let a=this.settings.ocrMode==="force_low_quality"?"auto":this.settings.ocrMode,o=["--pdf",e,"--doc-id",t,"--out-json",this.getAbsoluteVaultPath(n),"--out-md",this.getAbsoluteVaultPath(s),"--chunking",this.settings.chunkingMode,"--ocr",a];return i&&o.push("--progress"),this.settings.ocrMode==="force_low_quality"&&o.push("--force-ocr-low-quality"),o.push("--quality-threshold",String(this.settings.ocrQualityThreshold)),r&&o.push("--language-hint",r),this.settings.maxChunkChars>0&&o.push("--max-chunk-chars",String(this.settings.maxChunkChars)),this.settings.chunkOverlapChars>0&&o.push("--chunk-overlap-chars",String(this.settings.chunkOverlapChars)),this.settings.removeImagePlaceholders||o.push("--keep-image-tags"),this.settings.enableLlmCleanup&&(o.push("--enable-llm-cleanup"),this.settings.llmCleanupBaseUrl&&o.push("--llm-cleanup-base-url",this.settings.llmCleanupBaseUrl),this.settings.llmCleanupApiKey&&o.push("--llm-cleanup-api-key",this.settings.llmCleanupApiKey),this.settings.llmCleanupModel&&o.push("--llm-cleanup-model",this.settings.llmCleanupModel),o.push("--llm-cleanup-temperature",String(this.settings.llmCleanupTemperature)),o.push("--llm-cleanup-min-quality",String(this.settings.llmCleanupMinQuality)),o.push("--llm-cleanup-max-chars",String(this.settings.llmCleanupMaxChars))),o}getRedisDataDir(){return y.default.join(this.getVaultBasePath(),R,"redis-data")}getDockerComposePath(){let e=this.getPluginDir();return y.default.join(e,"tools","docker-compose.yml")}getDockerProjectName(){let e=this.getVaultBasePath(),t=y.default.basename(e).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,18),n=(0,ie.createHash)("sha1").update(e).digest("hex").slice(0,8);return`zrr-${t||"vault"}-${n}`}getRedisPortFromUrl(){try{let e=new URL(this.settings.redisUrl),t=e.port?Number(e.port):6379;return Number.isFinite(t)&&t>0?t:6379}catch(e){return 6379}}async startRedisStack(e){var t;try{await this.ensureBundledTools();let n=this.getDockerComposePath(),s=this.getRedisDataDir();await O.promises.mkdir(s,{recursive:!0});let r=((t=this.settings.dockerPath)==null?void 0:t.trim())||"docker",i=this.getDockerProjectName(),a=String(this.getRedisPortFromUrl());try{await this.runCommand(r,["compose","-p",i,"-f",n,"down"],{cwd:y.default.dirname(n)})}catch(o){console.warn("Redis Stack stop before restart failed",o)}await this.runCommand(r,["compose","-p",i,"-f",n,"up","-d"],{cwd:y.default.dirname(n),env:{...process.env,ZRR_DATA_DIR:s,ZRR_PORT:a}}),e||new d.Notice("Redis Stack started.")}catch(n){e||new d.Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing."),console.error("Failed to start Redis Stack",n)}}runPython(e,t){return new Promise((n,s)=>{let r=(0,M.spawn)(this.settings.pythonPath,[e,...t],{cwd:y.default.dirname(e)}),i="";r.stderr.on("data",a=>{i+=a.toString()}),r.on("close",a=>{a===0?n():s(new Error(i||`Process exited with code ${a}`))})})}runCommand(e,t,n){return new Promise((s,r)=>{let i=(0,M.spawn)(e,t,{cwd:n==null?void 0:n.cwd,env:n==null?void 0:n.env}),a="";i.stderr.on("data",o=>{a+=o.toString()}),i.on("close",o=>{o===0?s():r(new Error(a||`Process exited with code ${o}`))})})}runPythonStreaming(e,t,n,s){return new Promise((r,i)=>{let a=(0,M.spawn)(this.settings.pythonPath,[e,...t],{cwd:y.default.dirname(e)}),o="",c="",l=null,u=!1,m=h=>{if(h.trim())try{let f=JSON.parse(h);l=f,((f==null?void 0:f.type)==="final"||f!=null&&f.answer)&&(u=!0),n(f)}catch(f){}};a.stdout.on("data",h=>{var _;o+=h.toString();let f=o.split(/\r?\n/);o=(_=f.pop())!=null?_:"";for(let b of f)m(b)}),a.stderr.on("data",h=>{c+=h.toString()}),a.on("close",h=>{o.trim()&&m(o),!u&&l&&s(l),h===0?r():i(new Error(c||`Process exited with code ${h}`))})})}runPythonWithOutput(e,t){return new Promise((n,s)=>{let r=(0,M.spawn)(this.settings.pythonPath,[e,...t],{cwd:y.default.dirname(e)}),i="",a="";r.stdout.on("data",o=>{i+=o.toString()}),r.stderr.on("data",o=>{a+=o.toString()}),r.on("close",o=>{o===0?n(i.trim()):s(new Error(a||`Process exited with code ${o}`))})})}},Q=class extends d.SuggestModal{constructor(e,t,n){super(e);this.lastError=null;this.indexedDocIds=null;this.plugin=t,this.resolveSelection=n,this.setPlaceholder("Search Zotero items...")}async getSuggestions(e){try{if(!this.indexedDocIds){let t=await this.plugin.getDocIndex();this.indexedDocIds=new Set(Object.keys(t))}return await this.plugin.searchZoteroItems(e)}catch(t){let n=t instanceof Error?t.message:String(t);return this.lastError!==n&&(this.lastError=n,new d.Notice(n)),console.error("Zotero search failed",t),[]}}renderSuggestion(e,t){var u,m,h;let n=(m=(u=e.data)==null?void 0:u.title)!=null?m:"[No title]",s=this.extractYear(e),r=this.getDocId(e),i=r?(h=this.indexedDocIds)==null?void 0:h.has(r):!1,a=this.getPdfStatus(e);i&&t.addClass("zrr-indexed-item"),a==="no"&&t.addClass("zrr-no-pdf-item"),t.createEl("div",{text:n});let o=t.createEl("small"),c=!1,l=()=>{c&&o.createSpan({text:" \u2022 "})};s&&(o.createSpan({text:s}),c=!0),i&&(l(),o.createSpan({text:"Indexed",cls:"zrr-indexed-flag"}),c=!0),a==="no"&&(l(),o.createSpan({text:"No PDF",cls:"zrr-no-pdf-flag"}),c=!0),t.addEventListener("click",()=>{this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()})}onChooseSuggestion(e,t){this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()}onClose(){this.resolveSelection&&(this.resolveSelection(null),this.resolveSelection=null)}getDocId(e){var n,s,r;let t=(r=(s=e.key)!=null?s:(n=e.data)==null?void 0:n.key)!=null?r:"";return typeof t=="string"?t:""}getPdfStatus(e){var s,r,i,a,o,c,l;let t=(c=(o=(i=(s=e.data)==null?void 0:s.attachments)!=null?i:(r=e.data)==null?void 0:r.children)!=null?o:(a=e.data)==null?void 0:a.items)!=null?c:[];if(Array.isArray(t)&&t.length>0)return t.some(m=>this.isPdfAttachment(m))?"yes":"no";let n=(l=e.meta)==null?void 0:l.numChildren;return typeof n=="number"&&n===0?"no":"unknown"}isPdfAttachment(e){var n,s,r,i,a,o;return((o=(a=(r=(n=e==null?void 0:e.contentType)!=null?n:e==null?void 0:e.mimeType)!=null?r:(s=e==null?void 0:e.data)==null?void 0:s.contentType)!=null?a:(i=e==null?void 0:e.data)==null?void 0:i.mimeType)!=null?o:"")==="application/pdf"}extractYear(e){var s,r,i,a;let t=(a=(i=(s=e.meta)==null?void 0:s.parsedDate)!=null?i:(r=e.data)==null?void 0:r.date)!=null?a:"";if(typeof t!="string")return"";let n=t.match(/\b(\d{4})\b/);return n?n[1]:""}};
+`):'  - ""'}getVaultBasePath(){var n;let e=this.app.vault.adapter;if(e instanceof d.FileSystemAdapter)return e.getBasePath();let t=(n=e.getBasePath)==null?void 0:n.call(e);if(t)return t;throw new Error("Vault base path is unavailable.")}getPluginDir(){var s;let e=this.getVaultBasePath(),t=(s=this.manifest.dir)!=null?s:this.manifest.id;if(!t)throw new Error("Plugin directory is unavailable.");let n=y.default.isAbsolute(t)?t:y.default.join(e,t);return y.default.normalize(n)}async ensureBundledTools(){let e=this.getPluginDir(),t=y.default.join(e,"tools");await O.promises.mkdir(t,{recursive:!0});for(let[n,s]of Object.entries(ee)){let r=y.default.join(t,n),i=!0;try{await O.promises.readFile(r,"utf8")===s&&(i=!1)}catch(a){}i&&await O.promises.writeFile(r,s,"utf8")}}async migrateCachePaths(){let e="zotero/items",t="zotero/chunks",n=N,s=E,r=this.app.vault.adapter,i=(0,d.normalizePath)(e),a=(0,d.normalizePath)(t),o=(0,d.normalizePath)(n),c=(0,d.normalizePath)(s),l=o.split("/").slice(0,-1).join("/"),u=c.split("/").slice(0,-1).join("/");l&&await this.ensureFolder(l),u&&await this.ensureFolder(u);let m=await r.exists(i),h=await r.exists(a),f=await r.exists(o),_=await r.exists(c);m&&!f&&await r.rename(i,o),h&&!_&&await r.rename(a,c)}getAbsoluteVaultPath(e){let t=this.getVaultBasePath(),n=y.default.isAbsolute(e)?e:y.default.join(t,e);return y.default.normalize(n)}buildDoclingArgs(e,t,n,s,r,i=!1){let a=this.settings.ocrMode==="force_low_quality"?"auto":this.settings.ocrMode,o=["--pdf",e,"--doc-id",t,"--out-json",this.getAbsoluteVaultPath(n),"--out-md",this.getAbsoluteVaultPath(s),"--chunking",this.settings.chunkingMode,"--ocr",a];return i&&o.push("--progress"),this.settings.ocrMode==="force_low_quality"&&o.push("--force-ocr-low-quality"),o.push("--quality-threshold",String(this.settings.ocrQualityThreshold)),r&&o.push("--language-hint",r),this.settings.maxChunkChars>0&&o.push("--max-chunk-chars",String(this.settings.maxChunkChars)),this.settings.chunkOverlapChars>0&&o.push("--chunk-overlap-chars",String(this.settings.chunkOverlapChars)),this.settings.removeImagePlaceholders||o.push("--keep-image-tags"),this.settings.enableLlmCleanup&&(o.push("--enable-llm-cleanup"),this.settings.llmCleanupBaseUrl&&o.push("--llm-cleanup-base-url",this.settings.llmCleanupBaseUrl),this.settings.llmCleanupApiKey&&o.push("--llm-cleanup-api-key",this.settings.llmCleanupApiKey),this.settings.llmCleanupModel&&o.push("--llm-cleanup-model",this.settings.llmCleanupModel),o.push("--llm-cleanup-temperature",String(this.settings.llmCleanupTemperature)),o.push("--llm-cleanup-min-quality",String(this.settings.llmCleanupMinQuality)),o.push("--llm-cleanup-max-chars",String(this.settings.llmCleanupMaxChars))),o}getRedisDataDir(){return y.default.join(this.getVaultBasePath(),R,"redis-data")}getDockerComposePath(){let e=this.getPluginDir();return y.default.join(e,"tools","docker-compose.yml")}getDockerProjectName(){let e=this.getVaultBasePath(),t=y.default.basename(e).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,18),n=(0,ie.createHash)("sha1").update(e).digest("hex").slice(0,8);return`zrr-${t||"vault"}-${n}`}getRedisPortFromUrl(){try{let e=new URL(this.settings.redisUrl),t=e.port?Number(e.port):6379;return Number.isFinite(t)&&t>0?t:6379}catch(e){return 6379}}async startRedisStack(e){var t;try{await this.ensureBundledTools();let n=this.getDockerComposePath(),s=this.getRedisDataDir();await O.promises.mkdir(s,{recursive:!0});let r=((t=this.settings.dockerPath)==null?void 0:t.trim())||"docker",i=this.getDockerProjectName(),a=String(this.getRedisPortFromUrl());try{await this.runCommand(r,["compose","-p",i,"-f",n,"down"],{cwd:y.default.dirname(n)})}catch(o){console.warn("Redis Stack stop before restart failed",o)}await this.runCommand(r,["compose","-p",i,"-f",n,"up","-d"],{cwd:y.default.dirname(n),env:{...process.env,ZRR_DATA_DIR:s,ZRR_PORT:a}}),e||new d.Notice("Redis Stack started.")}catch(n){e||new d.Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing."),console.error("Failed to start Redis Stack",n)}}runPython(e,t){return new Promise((n,s)=>{let r=(0,M.spawn)(this.settings.pythonPath,[e,...t],{cwd:y.default.dirname(e)}),i="";r.stderr.on("data",a=>{i+=a.toString()}),r.on("close",a=>{a===0?n():s(new Error(i||`Process exited with code ${a}`))})})}runCommand(e,t,n){return new Promise((s,r)=>{let i=(0,M.spawn)(e,t,{cwd:n==null?void 0:n.cwd,env:n==null?void 0:n.env}),a="";i.stderr.on("data",o=>{a+=o.toString()}),i.on("close",o=>{o===0?s():r(new Error(a||`Process exited with code ${o}`))})})}runPythonStreaming(e,t,n,s){return new Promise((r,i)=>{let a=(0,M.spawn)(this.settings.pythonPath,[e,...t],{cwd:y.default.dirname(e)}),o="",c="",l=null,u=!1,m=h=>{if(h.trim())try{let f=JSON.parse(h);l=f,((f==null?void 0:f.type)==="final"||f!=null&&f.answer)&&(u=!0),n(f)}catch(f){}};a.stdout.on("data",h=>{var _;o+=h.toString();let f=o.split(/\r?\n/);o=(_=f.pop())!=null?_:"";for(let b of f)m(b)}),a.stderr.on("data",h=>{c+=h.toString()}),a.on("close",h=>{o.trim()&&m(o),!u&&l&&s(l),h===0?r():i(new Error(c||`Process exited with code ${h}`))})})}runPythonWithOutput(e,t){return new Promise((n,s)=>{let r=(0,M.spawn)(this.settings.pythonPath,[e,...t],{cwd:y.default.dirname(e)}),i="",a="";r.stdout.on("data",o=>{i+=o.toString()}),r.stderr.on("data",o=>{a+=o.toString()}),r.on("close",o=>{o===0?n(i.trim()):s(new Error(a||`Process exited with code ${o}`))})})}},Q=class extends d.SuggestModal{constructor(e,t,n){super(e);this.lastError=null;this.indexedDocIds=null;this.plugin=t,this.resolveSelection=n,this.setPlaceholder("Search Zotero items...")}async getSuggestions(e){try{if(!this.indexedDocIds){let t=await this.plugin.getDocIndex();this.indexedDocIds=new Set(Object.keys(t))}return await this.plugin.searchZoteroItems(e)}catch(t){let n=t instanceof Error?t.message:String(t);return this.lastError!==n&&(this.lastError=n,new d.Notice(n)),console.error("Zotero search failed",t),[]}}renderSuggestion(e,t){var u,m,h;let n=(m=(u=e.data)==null?void 0:u.title)!=null?m:"[No title]",s=this.extractYear(e),r=this.getDocId(e),i=r?(h=this.indexedDocIds)==null?void 0:h.has(r):!1,a=this.getPdfStatus(e);i&&t.addClass("zrr-indexed-item"),a==="no"&&t.addClass("zrr-no-pdf-item"),t.createEl("div",{text:n});let o=t.createEl("small"),c=!1,l=()=>{c&&o.createSpan({text:" \u2022 "})};s&&(o.createSpan({text:s}),c=!0),i&&(l(),o.createSpan({text:"Indexed",cls:"zrr-indexed-flag"}),c=!0),a==="no"&&(l(),o.createSpan({text:"No attachment",cls:"zrr-no-pdf-flag"}),c=!0),t.addEventListener("click",()=>{this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()})}onChooseSuggestion(e,t){this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()}onClose(){this.resolveSelection&&(this.resolveSelection(null),this.resolveSelection=null)}getDocId(e){var n,s,r;let t=(r=(s=e.key)!=null?s:(n=e.data)==null?void 0:n.key)!=null?r:"";return typeof t=="string"?t:""}getPdfStatus(e){var s,r,i,a,o,c,l;let t=(c=(o=(i=(s=e.data)==null?void 0:s.attachments)!=null?i:(r=e.data)==null?void 0:r.children)!=null?o:(a=e.data)==null?void 0:a.items)!=null?c:[];if(Array.isArray(t)&&t.length>0)return t.some(m=>this.isPdfAttachment(m))?"yes":"no";let n=(l=e.meta)==null?void 0:l.numChildren;return typeof n=="number"&&n===0?"no":"unknown"}isPdfAttachment(e){var n,s,r,i,a,o;return((o=(a=(r=(n=e==null?void 0:e.contentType)!=null?n:e==null?void 0:e.mimeType)!=null?r:(s=e==null?void 0:e.data)==null?void 0:s.contentType)!=null?a:(i=e==null?void 0:e.data)==null?void 0:i.mimeType)!=null?o:"")==="application/pdf"}extractYear(e){var s,r,i,a;let t=(a=(i=(s=e.meta)==null?void 0:s.parsedDate)!=null?i:(r=e.data)==null?void 0:r.date)!=null?a:"";if(typeof t!="string")return"";let n=t.match(/\b(\d{4})\b/);return n?n[1]:""}};
