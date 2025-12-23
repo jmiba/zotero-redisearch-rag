@@ -12,13 +12,6 @@ import redis
 import requests
 
 
-    data = payload.get("data")
-    if not data:
-        raise RuntimeError("Embedding response missing data field")
-    embedding = data[0].get("embedding")
-    if not embedding:
-        raise RuntimeError("Embedding response missing embedding")
-    return [float(x) for x in embedding]
 
 
 def is_temperature_unsupported(message: str) -> bool:

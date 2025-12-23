@@ -272,17 +272,21 @@ export class ZoteroChatView extends ItemView {
     if (!els) {
       return;
     }
-    els.content.empty();
-    els.citations.empty();
-
-    const content = await this.plugin.formatInlineCitations(
+    // Only update if content actually changed to reduce flicker
+    const newContent = await this.plugin.formatInlineCitations(
       message.content || "",
       message.citations ?? [],
       message.retrieved ?? []
     );
-    await MarkdownRenderer.renderMarkdown(content, els.content, "", this.plugin);
-    this.hookInternalLinks(els.content);
-
+    // Use a data attribute to store last rendered content
+    if (els.content.dataset.lastRendered !== newContent) {
+      els.content.empty();
+      await MarkdownRenderer.renderMarkdown(newContent, els.content, "", this.plugin);
+      this.hookInternalLinks(els.content);
+      els.content.dataset.lastRendered = newContent;
+    }
+    // Always update citations (they may change at end)
+    els.citations.empty();
     await this.renderCitations(els.citations, message.citations ?? []);
   }
 

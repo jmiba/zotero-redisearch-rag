@@ -7,6 +7,7 @@ import struct
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
 import redis
 import requests
 
@@ -64,31 +65,17 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         "1",
         prefix,
         "SCHEMA",
-        "doc_id",
+    
+    
+    
         "TAG",
-        "chunk_id",
-        "TAG",
-        "attachment_key",
-        "TAG",
-        "title",
-        "TEXT",
+    
+    
+    
         "authors",
-        "TAG",
-        "SEPARATOR",
-        "|",
-        "tags",
-        "TAG",
-        "SEPARATOR",
-        "|",
-        "year",
-        "NUMERIC",
-        "item_type",
-        "TAG",
-        "SEPARATOR",
-        "|",
-        "source_pdf",
-        "TEXT",
-        "page_start",
+    
+    
+    
         "NUMERIC",
         "page_end",
         "NUMERIC",
