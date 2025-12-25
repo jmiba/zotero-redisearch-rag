@@ -47,6 +47,8 @@ export interface ZoteroRagSettings {
   llmCleanupTemperature: number;
   llmCleanupMinQuality: number;
   llmCleanupMaxChars: number;
+  enableFileLogging: boolean;
+  logFilePath: string;
 }
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
@@ -97,6 +99,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   llmCleanupTemperature: 0.0,
   llmCleanupMinQuality: 0.35,
   llmCleanupMaxChars: 2000,
+  enableFileLogging: false,
+  logFilePath: `${CACHE_ROOT}/logs/docling_extract.log`,
 };
 
 export class ZoteroRagSettingTab extends PluginSettingTab {
@@ -107,6 +111,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     reindexRedisFromCache: () => Promise<void>;
     recreateMissingNotesFromCache: () => Promise<void>;
     deleteChatSession?: (sessionId: string) => Promise<void>;
+    openLogFile?: () => Promise<void>;
+    clearLogFile?: () => Promise<void>;
   };
 
   constructor(
@@ -117,6 +123,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       startRedisStack: (silent?: boolean) => Promise<void>;
       reindexRedisFromCache: () => Promise<void>;
       recreateMissingNotesFromCache: () => Promise<void>;
+      openLogFile: () => Promise<void>;
+      clearLogFile: () => Promise<void>;
     }
   ) {
     super(app, plugin as any);
@@ -651,6 +659,45 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.llmCleanupMaxChars = Number.isFinite(parsed) ? parsed : 2000;
             await this.plugin.saveSettings();
           })
+      );
+
+    containerEl.createEl("h3", { text: "Logging" });
+
+    new Setting(containerEl)
+      .setName("Enable logging to file")
+      .setDesc("Write Docling/Python logs to a file during extraction.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableFileLogging).onChange(async (value) => {
+          this.plugin.settings.enableFileLogging = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Log file path (vault-relative)")
+      .setDesc("Where to write logs. Keep inside the vault.")
+      .addText((text) =>
+        text
+          .setPlaceholder(`${CACHE_ROOT}/logs/docling_extract.log`)
+          .setValue(this.plugin.settings.logFilePath)
+          .onChange(async (value) => {
+            this.plugin.settings.logFilePath = value.trim() || `${CACHE_ROOT}/logs/docling_extract.log`;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("View or clear log")
+      .setDesc("Open the log contents or clear the file.")
+      .addButton((button) =>
+        button.setButtonText("Open log").onClick(async () => {
+          await this.plugin.openLogFile?.();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Clear log").onClick(async () => {
+          await this.plugin.clearLogFile?.();
+        })
       );
 
     containerEl.createEl("h3", { text: "Maintenance" });

@@ -4,14 +4,18 @@ import json
 import logging
 import os
 import re
-import statistics
 import shutil
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import langcodes
 
 
 LOGGER = logging.getLogger("docling_extract")
+
+# Stores details about the last spellchecker built (backend and dictionary files)
+# Example: {"backend": "spylls", "aff": "/path/en_GB.aff", "dic": "/path/en_GB.dic"}
+LAST_SPELLCHECKER_INFO: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
@@ -70,6 +74,12 @@ class DoclingProcessingConfig:
     column_detect_min_gap_ratio: float = 0.03
     column_detect_min_pages_ratio: float = 0.4
     column_detect_smooth_window: int = 5
+    # When columns are detected, optionally prefer doing external OCR per column
+    column_split_ocr: bool = False
+    column_split_margin_px: int = 8
+    # Optionally rasterize (render pages to images) and then run per-column OCR,
+    # guaranteeing the original text layer is ignored
+    column_split_after_rasterize: bool = False
     page_range_sample_tokens: int = 200
     page_range_min_overlap: float = 0.02
     page_range_min_hits: int = 5
@@ -100,6 +110,20 @@ class DoclingProcessingConfig:
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
+    # Tesseract tuning
+    tesseract_psm: int = 6  # Assume a uniform block of text
+    tesseract_oem: int = 1  # LSTM only
+    # Optional Hunspell integration
+    enable_hunspell: bool = True
+    hunspell_aff_path: Optional[str] = None
+    hunspell_dic_path: Optional[str] = None
+    # Tesseract tuning
+    tesseract_psm: int = 6  # Assume a uniform block of text
+    tesseract_oem: int = 1  # LSTM only
+    # Optional Hunspell integration
+    enable_hunspell: bool = True
+    hunspell_aff_path: Optional[str] = None
+    hunspell_dic_path: Optional[str] = None
 
 
 @dataclass
@@ -371,23 +395,73 @@ def select_language_set(
     hint = (language_hint or "").lower().strip()
     name = os.path.basename(filename).lower()
 
-    if hint:
-        if any(token in hint for token in ("de", "deu", "ger", "german", "deutsch")):
-            return config.default_lang_german
-        if any(token in hint for token in ("en", "eng", "english")):
-            return config.default_lang_english
-        return hint
+    # import langcodes
 
-    if re.search(r"(\bde\b|_de\b|-de\b|deu|german|deutsch)", name):
-        return config.default_lang_german
+    def normalize_hint(h: str) -> str:
+        if not h:
+            return ""
+        try:
+            lang = langcodes.find(h)
+            code = lang.to_alpha3()
+            if code == "deu":
+                return config.default_lang_german
+            if code == "eng":
+                return config.default_lang_english
+            if code == "fra":
+                return "fra+eng"  # French + English fallback
+            if code == "pol":
+                return "pol+eng"  # Polish + English fallback
+            # Add more as needed
+            return code
+        except Exception:
+            return h
+
+    if hint:
+        return normalize_hint(hint)
+
+    # Try to infer from filename using langcodes
+    for pattern, lang_code in [
+        (r"(\bde\b|_de\b|-de\b|deu|german|deutsch)", config.default_lang_german),
+        (r"(\bfr\b|_fr\b|-fr\b|fra|french|francais|français)", "fra+eng"),
+        (r"(\bit\b|_it\b|-it\b|ita|italian|italiano)", "ita+eng"),
+        (r"(\bes\b|_es\b|-es\b|spa|spanish|espanol|español)", "spa+eng"),
+        (r"(\bpl\b|_pl\b|-pl\b|pol|polish|polski)", "pol+eng"),
+    ]:
+        if re.search(pattern, name):
+            return lang_code
     return config.default_lang_english
 
 
 def normalize_languages_for_engine(languages: str, engine: str) -> str:
     lang = languages.lower()
     if engine == "paddle":
-        if any(token in lang for token in ("deu", "ger", "de", "german", "deutsch")):
-            return "german"
+        # PaddleOCR expects ISO 639-1 or specific language names (e.g., 'german', 'french', etc.)
+        try:
+            # Use the first language if multiple are given
+            first_lang = lang.split('+')[0].strip()
+            code = langcodes.find(first_lang)
+            paddle_map = {
+                "de": "german",
+                "deu": "german",
+                "fr": "french",
+                "fra": "french",
+                "en": "en",
+                "eng": "en",
+                "it": "italian",
+                "ita": "italian",
+                "es": "spanish",
+                "spa": "spanish",
+                "pl": "polish",
+                "pol": "polish",
+            }
+            alpha2 = code.to_alpha2()
+            alpha3 = code.to_alpha3()
+            if alpha2 in paddle_map:
+                return paddle_map[alpha2]
+            if alpha3 in paddle_map:
+                return paddle_map[alpha3]
+        except Exception:
+            return "en"
         return "en"
     return languages
 
@@ -455,6 +529,11 @@ def detect_available_ocr_engines() -> List[str]:
     available: List[str] = []
     try:
         import paddleocr  # noqa: F401
+        try:
+            import paddle  # type: ignore  # paddlepaddle runtime required by PaddleOCR
+            _ = paddle  # silence linter
+        except Exception:
+            raise
         from pdf2image import convert_from_path  # noqa: F401
         available.append("paddle")
     except Exception:
@@ -493,10 +572,318 @@ def prepare_dictionary_words(config: DoclingProcessingConfig) -> Sequence[str]:
     return words
 
 
-def apply_dictionary_correction(text: str, wordlist: Sequence[str]) -> str:
+def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages: str):
+    """
+    Build a cross-platform spellchecker adapter with a .spell(word) method.
+    Tries:
+      1) hunspell (C binding) if available
+      2) spylls (pure Python) if available
+    Returns an object with .spell(str)->bool, or None if unavailable.
+    """
+    if not config.enable_hunspell:
+        return None
+
+    # Resolve aff/dic paths (explicit or auto in tools/hunspell)
+    def resolve_paths() -> List[Tuple[str, str]]:
+        pairs: List[Tuple[str, str]] = []
+        aff = config.hunspell_aff_path
+        dic = config.hunspell_dic_path
+        if aff and dic and os.path.isfile(aff) and os.path.isfile(dic):
+            pairs.append((aff, dic))
+            return pairs
+        base_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        lang = (languages or "").lower()
+        try_codes: List[str] = []
+        if any(t in lang for t in ("de", "deu", "german", "deutsch")):
+            try_codes += ["de_DE", "de_AT", "de_CH"]
+        if any(t in lang for t in ("en", "eng", "english")):
+            try_codes += ["en_US", "en_GB"]
+        if not try_codes:
+            try_codes = ["en_US"]
+        # Exact matches first
+        for code in try_codes:
+            aff_path = os.path.join(base_dir, f"{code}.aff")
+            dic_path = os.path.join(base_dir, f"{code}.dic")
+            if os.path.isfile(aff_path) and os.path.isfile(dic_path):
+                pairs.append((aff_path, dic_path))
+        if pairs:
+            return pairs
+
+        # Flexible matching: accept stems like de_DE_frami.* or en_US-large.* when both files share the same stem
+        try:
+            names = os.listdir(base_dir)
+        except Exception:
+            names = []
+        stems_with_aff = {n[:-4] for n in names if n.endswith(".aff")}
+        stems_with_dic = {n[:-4] for n in names if n.endswith(".dic")}
+        common_stems = list(stems_with_aff & stems_with_dic)
+
+        def stem_priority(stem: str, code: str) -> int:
+            # Higher number = higher priority
+            if stem == code:
+                return 3
+            if stem.startswith(code + "_"):
+                return 2
+            if code in stem:
+                return 1
+            return 0
+
+        for code in try_codes:
+            candidates = sorted(
+                [s for s in common_stems if stem_priority(s, code) > 0],
+                key=lambda s: stem_priority(s, code),
+                reverse=True,
+            )
+            for stem in candidates:
+                aff_path = os.path.join(base_dir, f"{stem}.aff")
+                dic_path = os.path.join(base_dir, f"{stem}.dic")
+                if os.path.isfile(aff_path) and os.path.isfile(dic_path):
+                    pairs.append((aff_path, dic_path))
+                    break
+        return pairs
+
+
+    pairs = resolve_paths()
+    # If no pairs found, try to download on demand
+    if not pairs:
+        # Map special cases for repo structure
+        repo_map = {
+            "de_DE": ("de", "de_DE_frami"),
+            "de_AT": ("de", "de_AT"),
+            "de_CH": ("de", "de_CH"),
+            "en_US": ("en", "en_US"),
+            "en_GB": ("en", "en_GB"),
+            "fr_FR": ("fr_FR", "fr"),
+        }
+        lang_code = None
+        lang = (languages or "").lower()
+        if any(t in lang for t in ("de", "deu", "german", "deutsch")):
+            lang_code = "de_DE"
+        elif any(t in lang for t in ("en", "eng", "english")):
+            lang_code = "en_US"
+        elif any(t in lang for t in ("fr", "fra", "french", "francais")):
+            lang_code = "fr_FR"
+        if not lang_code:
+            lang_code = "en_US"
+        folder, prefix = repo_map.get(lang_code, (lang_code, lang_code))
+        base_url = f"https://raw.githubusercontent.com/LibreOffice/dictionaries/master/{folder}/"
+        aff_name = f"{prefix}.aff"
+        dic_name = f"{prefix}.dic"
+        aff_url = base_url + aff_name
+        dic_url = base_url + dic_name
+        out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        os.makedirs(out_dir, exist_ok=True)
+        aff_path = os.path.join(out_dir, f"{lang_code}.aff")
+        dic_path = os.path.join(out_dir, f"{lang_code}.dic")
+        def download(url, out_path):
+            try:
+                import urllib.request
+                print(f"Downloading {url} -> {out_path}")
+                urllib.request.urlretrieve(url, out_path)
+                return True
+            except Exception as exc:
+                print(f"Failed to download {url}: {exc}")
+                return False
+        ok_aff = download(aff_url, aff_path)
+        ok_dic = download(dic_url, dic_path)
+        if ok_aff and ok_dic:
+            print(f"Successfully downloaded Hunspell dictionary for {lang_code} to {out_dir}")
+        # Try to resolve again
+        pairs = resolve_paths()
+
+    # Attempt hunspell binding first
+    try:
+        import hunspell  # type: ignore
+
+        for aff_path, dic_path in pairs:
+            try:
+                hs = hunspell.HunSpell(dic_path, aff_path)
+                LOGGER.info(
+                    "Spellchecker: using hunspell binding (%s, %s)",
+                    os.path.basename(dic_path),
+                    os.path.basename(aff_path),
+                )
+                try:
+                    # Record details for external visibility
+                    LAST_SPELLCHECKER_INFO.update({
+                        "backend": "hunspell",
+                        "dic": dic_path,
+                        "aff": aff_path,
+                    })
+                except Exception:
+                    pass
+                return hs
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Attempt spylls fallback (pure Python)
+    try:
+        from spylls.hunspell import Dictionary as SpyllsDictionary  # type: ignore
+
+        class SpyllsWrapper:
+            def __init__(self, d):
+                self.d = d
+
+            def spell(self, word: str) -> bool:
+                # Try common case variants to recognize lowercased nouns etc.
+                variants = [word, word.lower(), word.capitalize(), word.title(), word.upper()]
+                seen = set()
+                for v in variants:
+                    if v in seen:
+                        continue
+                    seen.add(v)
+                    try:
+                        if hasattr(self.d, "lookup") and self.d.lookup(v):
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        sugg = self.d.suggest(v)
+                        if isinstance(sugg, (list, tuple)) and v in sugg:
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+        for aff_path, dic_path in pairs:
+            try:
+                d = None
+                errors: List[str] = []
+                # Variant A: (aff, dic)
+                try:
+                    d = SpyllsDictionary.from_files(aff_path, dic_path)
+                except Exception as eA:
+                    errors.append(f"A(aff,dic): {eA}")
+                # Variant B: directory containing both
+                if d is None:
+                    try:
+                        d = SpyllsDictionary.from_files(os.path.dirname(dic_path))
+                    except Exception as eB:
+                        errors.append(f"B(dir): {eB}")
+                # Variant C: stem without extension
+                if d is None:
+                    try:
+                        stem = os.path.splitext(dic_path)[0]
+                        d = SpyllsDictionary.from_files(stem)
+                    except Exception as eC:
+                        errors.append(f"C(stem): {eC}")
+                # Variant D: single-path dic
+                if d is None:
+                    try:
+                        d = SpyllsDictionary.from_files(dic_path)
+                    except Exception as eD:
+                        errors.append(f"D(dic): {eD}")
+                # Variant E: single-path aff
+                if d is None:
+                    try:
+                        d = SpyllsDictionary.from_files(aff_path)
+                    except Exception as eE:
+                        errors.append(f"E(aff): {eE}")
+
+                if d is None:
+                    raise RuntimeError("spylls load failed: " + "; ".join(errors))
+
+                LOGGER.info(
+                    "Spellchecker: using spylls fallback (%s, %s)",
+                    os.path.basename(dic_path),
+                    os.path.basename(aff_path),
+                )
+                try:
+                    LAST_SPELLCHECKER_INFO.update({
+                        "backend": "spylls",
+                        "dic": dic_path,
+                        "aff": aff_path,
+                    })
+                except Exception:
+                    pass
+                return SpyllsWrapper(d)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Naive .dic fallback (no affix rules) when hunspell/spylls are unavailable
+    try:
+        class NaiveDicWrapper:
+            def __init__(self, words: Sequence[str]):
+                self.words = set(w.lower() for w in words if w)
+
+            def spell(self, word: str) -> bool:
+                variants = [word, word.lower(), word.capitalize(), word.title(), word.upper()]
+                for v in variants:
+                    if v.lower() in self.words:
+                        return True
+                return False
+
+        def load_naive_dic(path: str) -> Optional[NaiveDicWrapper]:
+            try:
+                entries: List[str] = []
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    first = True
+                    for raw in fh:
+                        line = raw.strip().lstrip("\ufeff")
+                        if not line:
+                            continue
+                        if first and line.isdigit():
+                            first = False
+                            continue
+                        first = False
+                        base = line.split("/")[0].strip()
+                        if base:
+                            entries.append(base)
+                if entries:
+                    LOGGER.info("Spellchecker: using naive .dic (%s) entries=%d", os.path.basename(path), len(entries))
+                    return NaiveDicWrapper(entries)
+            except Exception as exc:
+                LOGGER.warning("Naive .dic load failed for %s: %s", path, exc)
+            return None
+
+        # Prefer .dic paths discovered via resolve_paths(); otherwise scan tools/hunspell
+        dic_paths: List[str] = []
+        for _aff, _dic in pairs:
+            if os.path.isfile(_dic):
+                dic_paths.append(_dic)
+        if not dic_paths:
+            base_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+            try:
+                candidates = [os.path.join(base_dir, name) for name in os.listdir(base_dir) if name.endswith(".dic")]
+            except Exception:
+                candidates = []
+            lang = (languages or "").lower()
+            filtered: List[str] = []
+            for p in candidates:
+                name = os.path.basename(p).lower()
+                if ("en" in lang or "eng" in lang) and (name.startswith("en_") or name.startswith("en")):
+                    filtered.append(p)
+                if ("de" in lang or "deu" in lang or "german" in lang or "deutsch" in lang) and (name.startswith("de_") or name.startswith("de")):
+                    filtered.append(p)
+            dic_paths = filtered or candidates
+
+        for dic_path in dic_paths:
+            wrapper = load_naive_dic(dic_path)
+            if wrapper is not None:
+                return wrapper
+    except Exception:
+        pass
+
+    LOGGER.info("Spellchecker: no hunspell/spylls dictionary available")
+    try:
+        LAST_SPELLCHECKER_INFO.update({"backend": "none"})
+    except Exception:
+        pass
+    return None
+
+
+def apply_dictionary_correction(text: str, wordlist: Sequence[str], hs=None) -> str:
     if not wordlist:
-        return text
-    dictionary = {word.lower() for word in wordlist}
+        # If Hunspell available, do a minimal pass using it only
+        if hs is None:
+            return text
+        dictionary = set()
+    else:
+        dictionary = {word.lower() for word in wordlist}
     token_re = re.compile(r"[A-Za-z0-9]+")
 
     def match_case(candidate: str, original: str) -> str:
@@ -519,49 +906,224 @@ def apply_dictionary_correction(text: str, wordlist: Sequence[str]) -> str:
     def replace_token(match: re.Match) -> str:
         token = match.group(0)
         lower = token.lower()
-        if lower in dictionary:
+        if lower in dictionary or (hs is not None and hs.spell(token)):
             return token
         for candidate in generate_candidates(token):
-            if candidate.lower() in dictionary:
-                return match_case(candidate, token)
+            cand_lower = candidate.lower()
+            if cand_lower in dictionary or (hs is not None and hs.spell(candidate)):
+                replaced = match_case(candidate, token)
+                try:
+                    LOGGER.info("Dict correction: %s -> %s", token, replaced)
+                except Exception:
+                    pass
+                return replaced
         return token
 
     return token_re.sub(replace_token, text)
 
 
-def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str]) -> str:
-    lang = languages.lower()
+def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str], hs=None) -> str:
+    """
+    Convert ASCII digraphs ae/oe/ue to German umlauts ä/ö/ü more comprehensively.
+
+    Strategy:
+    - If a dictionary is provided, prefer candidates that appear in it.
+    - Otherwise, use word frequency (wordfreq.zipf_frequency) for German to
+      select candidates whose frequency noticeably exceeds the original.
+    - Preserve original casing (UPPER, Title, lower).
+    - Only operate when language is German.
+    - Keep conservative: if no strong signal, leave token unchanged.
+    """
+    lang = (languages or "").lower()
     if not any(token in lang for token in ("de", "deu", "german", "deutsch")):
         return text
 
-    dictionary = {word.lower() for word in wordlist}
-    replacements = {
-        "ueber": "\u00fcber",
-        "fuer": "f\u00fcr",
-        "koennen": "k\u00f6nnen",
-        "muessen": "m\u00fcssen",
-        "haeufig": "h\u00e4ufig",
-    }
+    dictionary = {word.lower() for word in (wordlist or [])}
 
-    def replace_match(match: re.Match) -> str:
-        token = match.group(0)
+    try:
+        from wordfreq import zipf_frequency as _zipf
+    except Exception:
+        _zipf = None  # wordfreq optional
+
+    ascii_to_umlaut = (("ae", "\u00e4"), ("oe", "\u00f6"), ("ue", "\u00fc"))
+
+    def case_match(candidate: str, original: str) -> str:
+        if original.isupper():
+            return candidate.upper()
+        if original[:1].isupper() and original[1:].islower():
+            return candidate.capitalize()
+        return candidate
+
+    def generate_variants(token_lower: str) -> List[str]:
+        # Generate all unique variants by replacing any subset of ae/oe/ue occurrences
+        indices: List[Tuple[int, str, str]] = []
+        for ascii_seq, uml in ascii_to_umlaut:
+            start = 0
+            while True:
+                idx = token_lower.find(ascii_seq, start)
+                if idx == -1:
+                    break
+                # Heuristic: avoid replacing "ue" when preceded by 'e' (e.g., "neue", "Treue")
+                if ascii_seq == "ue" and idx > 0 and token_lower[idx - 1] == "e":
+                    pass
+                else:
+                    indices.append((idx, ascii_seq, uml))
+                start = idx + 1 if idx != -1 else start
+
+        if not indices:
+            return []
+
+        # Build combinations
+        variants = {token_lower}
+        for idx, ascii_seq, uml in indices:
+            new_set = set()
+            for base in variants:
+                # Replace at the same position if still matching
+                if base[idx:idx + len(ascii_seq)] == ascii_seq:
+                    new_set.add(base[:idx] + uml + base[idx + len(ascii_seq):])
+                new_set.add(base)
+            variants = new_set
+        return [v for v in variants if v != token_lower]
+
+    def pick_best(token: str) -> str:
         lower = token.lower()
-        if lower in replacements:
-            replacement = replacements[lower]
-            if token.isupper():
-                return replacement.upper()
-            if token[:1].isupper():
-                return replacement.capitalize()
-            return replacement
-        if dictionary:
-            for ascii_seq, umlaut in (("ae", "\u00e4"), ("oe", "\u00f6"), ("ue", "\u00fc")):
-                if ascii_seq in lower:
-                    candidate = lower.replace(ascii_seq, umlaut)
-                    if candidate in dictionary:
-                        return candidate
-        return token
+        # Quick path: if already contains umlaut, skip
+        if any(ch in lower for ch in ("ä", "ö", "ü")):
+            return token
 
-    return re.sub(r"[A-Za-z]{4,}", replace_match, text)
+        # Generate candidate variants
+        candidates = generate_variants(lower)
+        if not candidates:
+            return token
+
+        # Score candidates
+        best = None
+        best_score = float("-inf")
+        # Base frequency for original
+        base_freq = _zipf(lower, "de") if _zipf else 0.0
+        for cand in candidates:
+            score = 0.0
+            if cand in dictionary or (hs is not None and hs.spell(cand)):
+                score += 10.0  # strong signal from dictionary
+            if _zipf:
+                freq = _zipf(cand, "de")
+                # Prefer if notably more frequent than original
+                score += (freq - base_freq)
+            # Prefer shorter (umlaut variant shortens by 1 char per replacement)
+            score += (len(lower) - len(cand)) * 0.05
+            if score > best_score:
+                best = cand
+                best_score = score
+
+        # Acceptance threshold: either in dictionary or frequency improved by >= 0.5
+        accept = False
+        if best is not None:
+            if best in dictionary or (hs is not None and hs.spell(best)):
+                accept = True
+            elif _zipf:
+                if (_zipf(best, "de") - base_freq) >= 0.5:
+                    accept = True
+
+        if not accept or not best:
+            return token
+        replaced = case_match(best, token)
+        try:
+            LOGGER.info("Umlaut correction: %s -> %s", token, replaced)
+        except Exception:
+            pass
+        return replaced
+
+    # Replace word tokens conservatively (length >= 4 to avoid short codes)
+    return re.sub(r"[A-Za-zÄÖÜäöüß]{4,}", lambda m: pick_best(m.group(0)), text)
+
+
+def restore_missing_spaces(text: str, languages: str, hs=None) -> str:
+    """
+    Conservatively insert spaces inside overlong tokens when a split yields two
+    valid words (by Hunspell/Splylls or by wordfreq Zipf >= 3.0 for target langs).
+
+    Heuristics:
+    - Consider tokens of length >= 12 with only letters (incl. German chars).
+    - Prefer camelCase boundaries (a…zA…Z) when both sides are valid.
+    - Otherwise, try a single split; accept only if BOTH parts look valid.
+    - Log accepted splits.
+    """
+    try:
+        from wordfreq import zipf_frequency as _zipf
+    except Exception:
+        _zipf = None
+
+    lang_codes = select_wordfreq_languages(languages)
+
+    def score_word(w: str) -> Tuple[float, bool]:
+        spelled = False
+        try:
+            if hs is not None and hs.spell(w):
+                spelled = True
+        except Exception:
+            pass
+        if spelled:
+            return 4.0, True
+        if _zipf is None:
+            return 0.0, False
+        try:
+            z = max(_zipf(w.lower(), lc) for lc in lang_codes)
+        except Exception:
+            z = 0.0
+        return float(z), False
+
+    token_re = re.compile(r"[A-Za-zÄÖÜäöüß]{12,}")
+
+    def consider_split(tok: str) -> str:
+        best = None  # type: Optional[Tuple[str, float, bool, str, float, bool]]
+
+        # Try camelCase boundary first: a…zA…Z
+        for m in re.finditer(r"([a-zäöüß])([A-ZÄÖÜ])", tok):
+            i = m.start(2)
+            left, right = tok[:i], tok[i:]
+            if len(left) < 3 or len(right) < 3:
+                continue
+            s1, d1 = score_word(left)
+            s2, d2 = score_word(right)
+            if (d1 or s1 >= 3.0) and (d2 or s2 >= 3.0):
+                combined = s1 + s2
+                best = (left, s1, d1, right, s2, d2)
+                break
+
+        # Otherwise, try single split positions
+        if best is None:
+            n = len(tok)
+            for i in range(3, n - 2):
+                left, right = tok[:i], tok[i:]
+                if len(left) < 3 or len(right) < 3:
+                    continue
+                s1, d1 = score_word(left)
+                s2, d2 = score_word(right)
+                if (d1 or s1 >= 3.0) and (d2 or s2 >= 3.0):
+                    combined = s1 + s2
+                    if best is None or combined > (best[1] + best[4]):
+                        best = (left, s1, d1, right, s2, d2)
+
+        if best is None:
+            return tok
+
+        left, s1, d1, right, s2, d2 = best
+        replacement = f"{left} {right}"
+        try:
+            LOGGER.info(
+                "Inserted space: %s -> %s (scores=%.2f/%.2f, dict=%s/%s)",
+                tok,
+                replacement,
+                s1,
+                s2,
+                d1,
+                d2,
+            )
+        except Exception:
+            pass
+        return replacement
+
+    return token_re.sub(lambda m: consider_split(m.group(0)), text)
 
 
 def should_apply_llm_correction(text: str, config: DoclingProcessingConfig) -> bool:
@@ -637,9 +1199,18 @@ def postprocess_text(
     cleaned = dehyphenate_text(text)
     cleaned = replace_ligatures(cleaned)
     cleaned = normalize_whitespace(cleaned)
-    if config.enable_dictionary_correction:
-        cleaned = apply_dictionary_correction(cleaned, wordlist)
-    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist)
+    hs = build_spellchecker_for_languages(config, languages) if config.enable_hunspell else None
+    # Attempt to restore missing spaces before word-level corrections
+    try:
+        restored = restore_missing_spaces(cleaned, languages, hs)
+        if restored != cleaned:
+            LOGGER.info("Applied missing-space restoration pass")
+        cleaned = restored
+    except Exception as exc:
+        LOGGER.warning("Missing-space restoration failed: %s", exc)
+    if config.enable_dictionary_correction or hs is not None:
+        cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
+    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
     if should_apply_llm_correction(cleaned, config) and config.llm_correct:
         cleaned = config.llm_correct(cleaned)
     return cleaned
@@ -986,6 +1557,18 @@ def find_poppler_path() -> Optional[str]:
     return None
 
 
+def find_tesseract_cmd() -> Optional[str]:
+    # Try PATH first
+    path = shutil.which("tesseract")
+    if path:
+        return path
+    # Common macOS/Linux locations
+    for candidate in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"):
+        if os.path.isfile(candidate) or shutil.which(candidate):
+            return candidate
+    return None
+
+
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
     from pdf2image import convert_from_path
 
@@ -1140,6 +1723,97 @@ def detect_multicolumn_layout(
     return ColumnLayoutDetection(detected, ratio, reason)
 
 
+def _find_column_gutters_from_density(
+    density: Sequence[float],
+    config: DoclingProcessingConfig,
+) -> List[int]:
+    """
+    Return x-index positions (relative to density array) for vertical gutters.
+    Uses same thresholds as count_column_gaps but returns midpoints of long gaps.
+    """
+    if not density:
+        return []
+    total = len(density)
+    margin = max(1, int(total * 0.05))
+    start = margin
+    end = max(start + 1, total - margin)
+    core = density[start:end]
+    if not core:
+        return []
+    text_level = density_percentile(core, config.column_detect_text_percentile)
+    if text_level < config.column_detect_min_text_density:
+        return []
+    threshold = max(config.column_detect_min_gap_density, text_level * config.column_detect_gap_threshold_ratio)
+    min_gap = max(1, int(len(core) * config.column_detect_min_gap_ratio))
+
+    gutters: List[int] = []
+    idx = 0
+    while idx < len(core):
+        if core[idx] < threshold:
+            gap_start = idx
+            while idx < len(core) and core[idx] < threshold:
+                idx += 1
+            gap_end = idx
+            if gap_end - gap_start >= min_gap:
+                gutters.append(start + (gap_start + gap_end) // 2)
+        else:
+            idx += 1
+    # Return up to 2 strongest (center-most) gutters for typical 2-3 columns
+    if len(gutters) > 2:
+        center = total / 2.0
+        gutters = sorted(gutters, key=lambda x: abs(x - center))[:2]
+        gutters.sort()
+    return sorted(gutters)
+
+
+def _find_column_splits(image: Any, config: DoclingProcessingConfig) -> List[Tuple[int, int]]:
+    """
+    Compute x-intervals for columns using density gutters. Returns a list of
+    (x0, x1) pixel bounds covering the page width split into columns.
+    """
+    density = compute_column_density(image, config)
+    density = smooth_density(density, config.column_detect_smooth_window)
+    gutters = _find_column_gutters_from_density(density, config)
+    width = image.size[0]
+    if not gutters:
+        return [(0, width)]
+    xs = [0] + gutters + [width]
+    splits: List[Tuple[int, int]] = []
+    for i in range(len(xs) - 1):
+        x0 = xs[i]
+        x1 = xs[i + 1]
+        # Expand slightly away from gutter to avoid cutting characters
+        if i > 0:
+            x0 += config.column_split_margin_px
+        if i < len(xs) - 2:
+            x1 -= config.column_split_margin_px
+        x0 = max(0, min(x0, width))
+        x1 = max(0, min(x1, width))
+        if x1 - x0 > max(10, int(width * 0.1)):
+            splits.append((x0, x1))
+    return splits or [(0, width)]
+
+
+def _fixed_column_splits(image: Any, ncols: int, margin_px: int) -> List[Tuple[int, int]]:
+    width = image.size[0]
+    if ncols <= 1:
+        return [(0, width)]
+    col_w = width / float(ncols)
+    splits: List[Tuple[int, int]] = []
+    for i in range(ncols):
+        x0 = int(round(i * col_w))
+        x1 = int(round((i + 1) * col_w))
+        if i > 0:
+            x0 += margin_px
+        if i < ncols - 1:
+            x1 -= margin_px
+        x0 = max(0, min(x0, width))
+        x1 = max(0, min(x1, width))
+        if x1 - x0 > max(10, int(width * 0.1)):
+            splits.append((x0, x1))
+    return splits or [(0, width)]
+
+
 def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
     from tempfile import NamedTemporaryFile
 
@@ -1206,11 +1880,25 @@ def ocr_pages_with_tesseract(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     import pytesseract
+    # Ensure the tesseract binary is set explicitly (macOS PATH issues)
+    try:
+        cmd = find_tesseract_cmd()
+        if cmd:
+            pytesseract.pytesseract.tesseract_cmd = cmd
+            LOGGER.info("Using tesseract binary: %s", cmd)
+    except Exception:
+        pass
 
     pages: List[Dict[str, Any]] = []
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
-        text = pytesseract.image_to_string(image, lang=languages)
+        try:
+            # Default to a sensible page segmentation and engine mode
+            cfg = f"--psm {DoclingProcessingConfig.tesseract_psm} --oem {DoclingProcessingConfig.tesseract_oem}"
+            text = pytesseract.image_to_string(image, lang=languages, config=cfg)
+        except Exception as exc:
+            LOGGER.warning("Tesseract image_to_string failed: %s", exc)
+            text = ""
         pages.append({"page_num": idx, "text": text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
@@ -1228,23 +1916,146 @@ def run_external_ocr_pages(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     images = render_pdf_pages(pdf_path, config.ocr_dpi)
+    try:
+        LOGGER.info("External OCR: rendered %d page images at %ddpi", len(images), config.ocr_dpi)
+    except Exception:
+        pass
+
+    norm_lang = normalize_languages_for_engine(languages, engine)
+
+    # Fast path: no column splitting requested
+    if not config.column_split_ocr:
+        if engine == "paddle":
+            return ocr_pages_with_paddle(
+                images,
+                norm_lang,
+                progress_cb,
+                progress_base,
+                progress_span,
+            )
+        if engine == "tesseract":
+            return ocr_pages_with_tesseract(
+                images,
+                norm_lang,
+                progress_cb,
+                progress_base,
+                progress_span,
+            )
+        return [], {}
+
+    # Per-column OCR: split each image into columns and OCR left->right
+    try:
+        LOGGER.info("Using external OCR with per-column splitting (engine=%s, lang=%s)", engine, norm_lang)
+    except Exception:
+        pass
+    pages: List[Dict[str, Any]] = []
+    confidences: List[float] = []
+    total = max(1, len(images))
+
+    # Prepare engine instance (Paddle is heavy to init)
+    paddle_ocr = None
     if engine == "paddle":
-        return ocr_pages_with_paddle(
-            images,
-            normalize_languages_for_engine(languages, engine),
-            progress_cb,
-            progress_base,
-            progress_span,
-        )
-    if engine == "tesseract":
-        return ocr_pages_with_tesseract(
-            images,
-            normalize_languages_for_engine(languages, engine),
-            progress_cb,
-            progress_base,
-            progress_span,
-        )
-    return [], {}
+        try:
+            from paddleocr import PaddleOCR  # type: ignore
+            import numpy as np  # noqa: F401
+            paddle_ocr = PaddleOCR(use_angle_cls=True, lang=norm_lang)
+        except Exception as exc:
+            LOGGER.warning("Paddle init failed for per-column OCR: %s", exc)
+            # Fallback to Tesseract if available
+            try:
+                import pytesseract  # noqa: F401
+                LOGGER.info("Falling back to Tesseract for per-column OCR")
+                engine = "tesseract"
+            except Exception:
+                return [], {}
+
+    for idx, image in enumerate(images, start=1):
+        # Determine columns for this page
+        splits = _find_column_splits(image, config)
+
+        # OCR helper over a list of crops
+        def ocr_column_crops(crops: List[Tuple[int, int]]) -> Tuple[List[str], float]:
+            texts: List[str] = []
+            total_len = 0.0
+            try:
+                import numpy as np
+            except Exception:
+                np = None  # type: ignore
+            for (x0, x1) in crops:
+                crop = image.crop((x0, 0, x1, image.size[1]))
+                text_part = ""
+                if engine == "paddle" and paddle_ocr is not None and np is not None:
+                    try:
+                        result = paddle_ocr.ocr(np.array(crop), cls=True)
+                    except Exception:
+                        result = None
+                    lines: List[str] = []
+                    if result:
+                        for entry in result[0] if isinstance(result, list) else result:
+                            if not entry:
+                                continue
+                            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                                txt = entry[1]
+                                if isinstance(txt, (list, tuple)) and txt:
+                                    lines.append(str(txt[0]))
+                                    if len(txt) > 1 and isinstance(txt[1], (float, int)):
+                                        confidences.append(float(txt[1]))
+                                else:
+                                    lines.append(str(txt))
+                    text_part = "\n".join(lines)
+                elif engine == "tesseract":
+                    try:
+                        import pytesseract
+                        cfg = f"--psm {DoclingProcessingConfig.tesseract_psm} --oem {DoclingProcessingConfig.tesseract_oem}"
+                        text_part = pytesseract.image_to_string(crop, lang=norm_lang, config=cfg)
+                    except Exception as exc:
+                        LOGGER.warning("Tesseract OCR failed on column crop: %s", exc)
+                        text_part = ""
+                else:
+                    text_part = ""
+                text_part = text_part.strip()
+                texts.append(text_part)
+                total_len += float(len(text_part))
+            return texts, total_len
+
+        col_texts, score = ocr_column_crops(splits)
+
+        # If detection failed or content is very low, try fixed 2/3-column grids and pick best
+        if score < 50.0 or len(splits) <= 1:
+            best_texts = col_texts
+            best_score = score
+            best_n = 0
+            for n in (2, 3):
+                fixed = _fixed_column_splits(image, n, config.column_split_margin_px)
+                texts_n, score_n = ocr_column_crops(fixed)
+                try:
+                    LOGGER.info("Per-column fallback: %d-col grid score=%.0f vs %.0f", n, score_n, best_score)
+                except Exception:
+                    pass
+                if score_n > best_score:
+                    best_texts, best_score, best_n = texts_n, score_n, n
+            if best_n:
+                col_texts = best_texts
+                try:
+                    LOGGER.info("Per-column fallback chosen: %d columns", best_n)
+                except Exception:
+                    pass
+
+        # Concatenate columns left->right, keep separation
+        page_text = "\n\n".join([t for t in col_texts if t])
+        if not page_text:
+            page_text = ""  # ensure string
+        pages.append({"page_num": idx, "text": page_text})
+
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int(idx / total * progress_span)
+            progress_cb(percent, "ocr", f"Per-column OCR page {idx}/{total}")
+
+    stats: Dict[str, Any] = {}
+    if confidences:
+        stats["ocr_confidence_avg"] = sum(confidences) / len(confidences)
+    LOGGER.info("Applied per-column external OCR on %d pages (engine=%s)", len(pages), engine)
+    return pages, stats
 
 
 def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict[str, Any]:
@@ -1273,6 +2084,16 @@ def convert_pdf_with_docling(
     config: DoclingProcessingConfig,
     progress_cb: Optional[ProgressCallback] = None,
 ) -> DoclingConversionResult:
+    try:
+        LOGGER.info(
+            "convert:start | per_column=%s, ocr=%s, prefer=%s, fallback=%s",
+            getattr(config, "column_split_ocr", False),
+            getattr(config, "ocr_mode", "auto"),
+            getattr(config, "prefer_ocr_engine", "paddle"),
+            getattr(config, "fallback_ocr_engine", "tesseract"),
+        )
+    except Exception:
+        pass
     emit = progress_cb or (lambda _p, _s, _m: None)
     emit(5, "analysis", "Analyzing text layer")
     analysis_pages = extract_pages_from_pdf(
@@ -1287,24 +2108,48 @@ def convert_pdf_with_docling(
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
     emit(15, "route", "Selecting OCR route")
+    # Hard override: if per-column OCR is requested, ensure we plan external per-page OCR
+    if getattr(config, "column_split_ocr", False):
+        try:
+            # Force external OCR path; choose prefer engine, else fallback, else keep prefer
+            # (run_external_ocr_pages will auto-fallback to Tesseract if Paddle init fails)
+            decision.ocr_engine = (
+                config.prefer_ocr_engine
+                if config.prefer_ocr_engine in ("paddle", "tesseract")
+                else "tesseract"
+            )
+            if decision.ocr_engine == "paddle" and ("paddle" not in available_engines) and ("tesseract" in available_engines):
+                decision.ocr_engine = "tesseract"
+            decision.use_external_ocr = True
+            decision.ocr_used = True
+            decision.per_page_ocr = True
+            decision.per_page_reason = "Per-column OCR requested by config"
+            LOGGER.info("Per-column OCR override engaged (engine=%s)", decision.ocr_engine)
+        except Exception:
+            pass
     rasterized_source = False
     rasterized_pdf_path = ""
     rasterize_error: Optional[str] = None
     column_layout: Optional[ColumnLayoutDetection] = None
     if should_rasterize_text_layer(has_text_layer, low_quality, config):
-        try:
-            rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
-            rasterized_source = True
-            emit(25, "rasterize", "Rasterized PDF for OCR")
-            LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
-        except Exception as exc:
-            rasterize_error = str(exc)
-            LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
+        # If we intend to use external OCR with per-column splitting directly from the PDF,
+        # skip rasterization. If 'after_rasterize' is requested, we still rasterize here.
+        if config.column_split_ocr and not getattr(config, "column_split_after_rasterize", False) and decision.use_external_ocr and decision.per_page_ocr:
+            LOGGER.info("Skipping rasterization to allow external per-column OCR (engine=%s)", decision.ocr_engine)
+        else:
+            try:
+                rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
+                rasterized_source = True
+                emit(25, "rasterize", "Rasterized PDF for OCR")
+                LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
+            except Exception as exc:
+                rasterize_error = str(exc)
+                LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
     if rasterized_source:
         decision.per_page_ocr = False
         decision.per_page_reason = "Rasterized PDF for Docling OCR"
 
-    if config.column_detect_enable and decision.ocr_used and (rasterized_source or not has_text_layer):
+    if config.column_detect_enable and ( (decision.ocr_used and (rasterized_source or not has_text_layer)) or config.column_split_ocr ):
         try:
             sample_images = render_pdf_pages_sample(
                 pdf_path,
@@ -1318,9 +2163,42 @@ def convert_pdf_with_docling(
                 column_layout.reason,
             )
             emit(30, "layout", "Checked column layout")
-            if column_layout.detected and decision.use_external_ocr and decision.per_page_ocr:
-                decision.per_page_ocr = False
-                decision.per_page_reason = "Columns detected; keep Docling layout"
+            if column_layout.detected:
+                if config.column_split_ocr:
+                    # Enforce per-column external OCR
+                    available_engines = detect_available_ocr_engines()
+                    if not decision.use_external_ocr:
+                        if config.prefer_ocr_engine in available_engines:
+                            decision.ocr_engine = config.prefer_ocr_engine
+                            decision.use_external_ocr = True
+                            decision.ocr_used = True
+                        elif config.fallback_ocr_engine in available_engines:
+                            decision.ocr_engine = config.fallback_ocr_engine
+                            decision.use_external_ocr = True
+                            decision.ocr_used = True
+                    decision.per_page_ocr = True
+                    decision.per_page_reason = "Columns detected; using per-column external OCR"
+                    LOGGER.info("Per-column OCR will be used due to column layout (engine=%s)", decision.ocr_engine)
+                elif decision.use_external_ocr and decision.per_page_ocr:
+                    # Without per-column OCR, Docling layout tends to be better
+                    decision.per_page_ocr = False
+                    decision.per_page_reason = "Columns detected; keep Docling layout"
+            else:
+                # If detection fails but per-column OCR is requested, try anyway with split heuristics.
+                if config.column_split_ocr:
+                    available_engines = detect_available_ocr_engines()
+                    if not decision.use_external_ocr:
+                        if config.prefer_ocr_engine in available_engines:
+                            decision.ocr_engine = config.prefer_ocr_engine
+                            decision.use_external_ocr = True
+                            decision.ocr_used = True
+                        elif config.fallback_ocr_engine in available_engines:
+                            decision.ocr_engine = config.fallback_ocr_engine
+                            decision.use_external_ocr = True
+                            decision.ocr_used = True
+                    decision.per_page_ocr = True
+                    decision.per_page_reason = "Column gutters not found; attempting heuristic per-column OCR"
+                    LOGGER.info("Per-column OCR will be attempted heuristically (no gutters detected)")
         except Exception as exc:
             LOGGER.warning("Column layout detection failed: %s", exc)
 
@@ -1362,7 +2240,19 @@ def convert_pdf_with_docling(
     emit(70, "docling", "Docling conversion complete")
 
     ocr_stats: Dict[str, Any] = {}
-    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and not rasterized_source:
+    try:
+        LOGGER.info(
+            "External OCR gate: used=%s external=%s per_page=%s rasterized=%s column_split=%s after_rasterize=%s",
+            decision.ocr_used,
+            decision.use_external_ocr,
+            decision.per_page_ocr,
+            rasterized_source,
+            config.column_split_ocr,
+            config.column_split_after_rasterize,
+        )
+    except Exception:
+        pass
+    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and (not rasterized_source or config.column_split_ocr or config.column_split_after_rasterize):
         try:
             ocr_pages, ocr_stats = run_external_ocr_pages(
                 pdf_path,
@@ -1379,6 +2269,8 @@ def convert_pdf_with_docling(
                     markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
         except Exception as exc:
             LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
+    elif decision.ocr_used and config.column_split_ocr and not decision.use_external_ocr:
+        LOGGER.info("Per-column OCR requested, but no external engine available; falling back to Docling OCR")
     if rasterized_source and rasterized_pdf_path:
         try:
             os.unlink(rasterized_pdf_path)
@@ -1407,6 +2299,18 @@ def convert_pdf_with_docling(
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
+    if column_layout and config.column_split_ocr and decision.use_external_ocr and decision.per_page_ocr:
+        metadata["per_column_ocr"] = True
+    # Attach spellchecker backend info if available
+    if LAST_SPELLCHECKER_INFO:
+        try:
+            metadata.update({
+                "spellchecker_backend": LAST_SPELLCHECKER_INFO.get("backend"),
+                "spellchecker_dic": LAST_SPELLCHECKER_INFO.get("dic"),
+                "spellchecker_aff": LAST_SPELLCHECKER_INFO.get("aff"),
+            })
+        except Exception:
+            pass
     metadata.update(ocr_stats)
     emit(100, "done", "Extraction complete")
     return DoclingConversionResult(markdown=markdown, pages=pages, metadata=metadata)
@@ -1490,10 +2394,13 @@ def build_chunks_section(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract PDF content with Docling and produce chunks.")
-    parser.add_argument("--pdf", required=True, help="Path to PDF")
+    parser.add_argument("--download-hunspell", metavar="LANG_CODE", type=str, help="Download Hunspell dictionary for given language code (e.g. de_DE, en_US, fr_FR)")
+    parser.add_argument("--pdf", required=False, help="Path to PDF")
     parser.add_argument("--doc-id", help="Document identifier")
     parser.add_argument("--out-json", help="Output JSON path")
     parser.add_argument("--out-md", help="Output markdown path")
+    parser.add_argument("--log-file", help="Optional path to write a detailed log file")
+    parser.add_argument("--spellchecker-info-out", help="Optional path to write spellchecker backend info JSON")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
@@ -1531,15 +2438,111 @@ def main() -> int:
     parser.add_argument("--llm-cleanup-max-chars", type=int, help="Max chars per chunk for LLM cleanup")
     parser.add_argument("--llm-cleanup-min-quality", type=float, help="Min quality threshold for LLM cleanup")
     parser.add_argument("--progress", action="store_true", help="Emit JSON progress events to stdout")
-    args = parser.parse_args()
+    parser.add_argument("--enable-dictionary-correction", action="store_true", help="Enable dictionary-based OCR corrections")
+    parser.add_argument("--dictionary-path", help="Path to dictionary wordlist (one word per line)")
+    parser.add_argument("--enable-hunspell", action="store_true", help="Enable Hunspell dictionary support if available")
+    parser.add_argument("--hunspell-aff", help="Path to Hunspell .aff file")
+    parser.add_argument("--hunspell-dic", help="Path to Hunspell .dic file")
+    parser.add_argument(
+        "--prefer-per-column-ocr",
+        action="store_true",
+        help="If a multi-column layout is detected, force external OCR with per-column splitting",
+    )
+    parser.add_argument(
+        "--column-split-margin",
+        type=int,
+        help="Pixel margin to keep away from detected gutters when splitting columns",
+    )
+    parser.add_argument(
+        "--column-split-after-rasterize",
+        action="store_true",
+        help="Render pages to images and then run per-column OCR, ignoring the PDF text layer",
+    )
+    parser.add_argument(
+        "--external-ocr-only",
+        action="store_true",
+        help="Bypass Docling conversion; render pages to images and run external OCR (respects per-column flags)",
+    )
+
+    # Parse only known args to allow --download-hunspell to work standalone
+    args, _ = parser.parse_known_args()
+
+    if args.download_hunspell:
+        lang_code = args.download_hunspell
+        # Map special cases for repo structure
+        repo_map = {
+            "de_DE": ("de", "de_DE_frami"),
+            "de_AT": ("de", "de_AT"),
+            "de_CH": ("de", "de_CH"),
+            "en_US": ("en", "en_US"),
+            "en_GB": ("en", "en_GB"),
+            "fr_FR": ("fr_FR", "fr"),
+        }
+        # Default: folder and file prefix are lang_code
+        folder, prefix = repo_map.get(lang_code, (lang_code, lang_code))
+        base_url = f"https://raw.githubusercontent.com/LibreOffice/dictionaries/master/{folder}/"
+        aff_name = f"{prefix}.aff"
+        dic_name = f"{prefix}.dic"
+        aff_url = base_url + aff_name
+        dic_url = base_url + dic_name
+        out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        os.makedirs(out_dir, exist_ok=True)
+        aff_path = os.path.join(out_dir, f"{lang_code}.aff")
+        dic_path = os.path.join(out_dir, f"{lang_code}.dic")
+        def download(url, out_path):
+            try:
+                import urllib.request
+                urllib.request.urlretrieve(url, out_path)
+                return True
+            except Exception as exc:
+                print(f"Failed to download {url}: {exc}")
+                return False
+        print(f"Downloading {aff_url} -> {aff_path}")
+        ok_aff = download(aff_url, aff_path)
+        print(f"Downloading {dic_url} -> {dic_path}")
+        ok_dic = download(dic_url, dic_path)
+        if ok_aff and ok_dic:
+            print(f"Successfully downloaded Hunspell dictionary for {lang_code} to {out_dir}")
+            return 0
+        else:
+            print(f"Failed to download Hunspell dictionary for {lang_code}. Check the language code or try manually.")
+            return 1
+
+    # Require --pdf for normal operation
+    if not args.pdf:
+        parser.print_help()
+        return 2
 
     logging.basicConfig(level=logging.INFO)
+    # If a log file was requested, add a file handler
+    if args.log_file:
+        try:
+            fh = logging.FileHandler(args.log_file, encoding="utf-8")
+            fh.setLevel(logging.INFO)
+            formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            fh.setFormatter(formatter)
+            logging.getLogger().addHandler(fh)
+            LOGGER.info("Logging to file: %s", args.log_file)
+        except Exception as exc:
+            eprint(f"Failed to set up log file {args.log_file}: {exc}")
+
 
     if not os.path.isfile(args.pdf):
         eprint(f"PDF not found: {args.pdf}")
         return 2
 
     if args.quality_only:
+        try:
+            LOGGER.info(
+                "Mode=quality-only | ocr=%s, prefer=%s, fallback=%s, column_split_ocr=%s, lang_hint=%s",
+                args.ocr,
+                DoclingProcessingConfig().prefer_ocr_engine,
+                DoclingProcessingConfig().fallback_ocr_engine,
+                False,
+                args.language_hint or "",
+            )
+        except Exception:
+            pass
         config = DoclingProcessingConfig(ocr_mode=args.ocr)
         if args.force_ocr_low_quality:
             config.force_ocr_on_low_quality_text = True
@@ -1579,6 +2582,16 @@ def main() -> int:
         config.cleanup_remove_image_tags = False
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
+    if args.enable_dictionary_correction:
+        config.enable_dictionary_correction = True
+    if args.dictionary_path:
+        config.dictionary_path = args.dictionary_path
+    if args.enable_hunspell:
+        config.enable_hunspell = True
+    if args.hunspell_aff:
+        config.hunspell_aff_path = args.hunspell_aff
+    if args.hunspell_dic:
+        config.hunspell_dic_path = args.hunspell_dic
     if args.llm_cleanup_base_url:
         config.llm_cleanup_base_url = args.llm_cleanup_base_url
     if args.llm_cleanup_api_key:
@@ -1592,7 +2605,173 @@ def main() -> int:
     if args.llm_cleanup_min_quality is not None:
         config.llm_correction_min_quality = args.llm_cleanup_min_quality
 
+    # Column OCR preferences
+    if args.prefer_per_column_ocr:
+        config.column_split_ocr = True
+    if args.column_split_margin is not None:
+        config.column_split_margin_px = max(0, int(args.column_split_margin))
+    if args.column_split_after_rasterize:
+        config.column_split_after_rasterize = True
+
     config.llm_correct = build_llm_cleanup_callback(config)
+
+    # Log a concise run configuration summary
+    try:
+        LOGGER.info(
+            "Mode=full | ocr=%s, prefer=%s, fallback=%s, force_low_q=%s, column_split_ocr=%s, split_margin=%spx, after_rasterize=%s, keep_img=%s, dict_correction=%s, lang_hint=%s",
+            config.ocr_mode,
+            config.prefer_ocr_engine,
+            config.fallback_ocr_engine,
+            config.force_ocr_on_low_quality_text,
+            config.column_split_ocr,
+            config.column_split_margin_px,
+            getattr(config, "column_split_after_rasterize", False),
+            not config.cleanup_remove_image_tags,
+            config.enable_dictionary_correction,
+            config.language_hint or "",
+        )
+    except Exception:
+        pass
+
+    # Proactively build spellchecker once to record backend info; will be reused lazily later
+    spell_langs = select_language_set(config.language_hint, args.pdf, config)
+    if config.enable_hunspell:
+        try:
+            _ = build_spellchecker_for_languages(config, spell_langs)
+        except Exception:
+            pass
+
+    # Optionally write spellchecker backend info to a file
+    if args.spellchecker_info_out:
+        try:
+            info = dict(LAST_SPELLCHECKER_INFO)
+            info["languages"] = spell_langs
+            out_dir = os.path.dirname(args.spellchecker_info_out)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(args.spellchecker_info_out, "w", encoding="utf-8") as fh:
+                json.dump(info, fh, indent=2)
+            LOGGER.info("Wrote spellchecker info to %s", args.spellchecker_info_out)
+        except Exception as exc:
+            LOGGER.warning("Failed to write spellchecker info file: %s", exc)
+
+    # External OCR only mode
+    if args.external_ocr_only:
+        try:
+            LOGGER.info("Mode=external-ocr-only | per_column=%s, after_rasterize=%s", config.column_split_ocr, config.column_split_after_rasterize)
+        except Exception:
+            pass
+        # Choose engine
+        engines = detect_available_ocr_engines()
+        engine = config.prefer_ocr_engine if config.prefer_ocr_engine in engines else (
+            config.fallback_ocr_engine if config.fallback_ocr_engine in engines else (engines[0] if engines else "tesseract")
+        )
+        languages = select_language_set(config.language_hint, args.pdf, config)
+        ocr_pages, ocr_stats = run_external_ocr_pages(
+            args.pdf,
+            engine,
+            languages,
+            config,
+        )
+        pages = ocr_pages
+        total_chars = sum(len(p.get("text", "")) for p in pages)
+        try:
+            LOGGER.info("External OCR produced %d pages, total_chars=%d (engine=%s)", len(pages), total_chars, engine)
+        except Exception:
+            pass
+        # Fallbacks: if empty text, retry with whole-page OCR and/or Tesseract
+        if total_chars == 0:
+            try:
+                LOGGER.warning("External OCR produced no text; retrying with whole-page OCR")
+                cfg2 = DoclingProcessingConfig(ocr_mode="force")
+                cfg2.ocr_dpi = config.ocr_dpi
+                cfg2.column_split_ocr = False
+                retry_engine = engine
+                if engine != "tesseract":
+                    retry_engine = "tesseract"
+                pages2, stats2 = run_external_ocr_pages(
+                    args.pdf,
+                    retry_engine,
+                    languages,
+                    cfg2,
+                )
+                t2 = sum(len(p.get("text", "")) for p in pages2)
+                LOGGER.info("Retry external OCR whole-page total_chars=%d (engine=%s)", t2, retry_engine)
+                if t2 > total_chars:
+                    pages, ocr_stats, total_chars, engine = pages2, stats2, t2, retry_engine
+            except Exception as exc:
+                LOGGER.warning("Retry OCR failed: %s", exc)
+
+        # Final fallback: use Docling OCR (ocrmac) so we never return empty
+        if total_chars == 0:
+            try:
+                LOGGER.warning("External OCR still empty; falling back to Docling OCR pipeline")
+                cfg3 = DoclingProcessingConfig(ocr_mode="force")
+                cfg3.force_ocr_on_low_quality_text = True
+                result = convert_pdf_with_docling(args.pdf, cfg3)
+                pages = result.pages
+                languages = result.metadata.get("languages", languages)
+                engine = result.metadata.get("ocr_engine", "docling")
+                total_chars = sum(len(str(p.get("text", ""))) for p in pages)
+                LOGGER.info("Docling OCR fallback produced %d pages, total_chars=%d", len(pages), total_chars)
+            except Exception as exc:
+                LOGGER.warning("Docling OCR fallback failed: %s", exc)
+        markdown = "\n\n".join(p.get("text", "") for p in pages)
+        payload = {
+            "doc_id": args.doc_id or "doc",
+            "source_pdf": args.pdf,
+            "chunks": build_chunks_page(args.doc_id or "doc", pages, config=config),
+            "metadata": {
+                "ocr_used": True,
+                "ocr_engine": engine,
+                "languages": languages,
+                "per_column_ocr": bool(config.column_split_ocr),
+                **ocr_stats,
+            },
+        }
+        # Optional post-correction (spellchecker/dictionary/umlauts)
+        try:
+            post_pages = []
+            if config.enable_post_correction:
+                wordlist = prepare_dictionary_words(config)
+                for p in pages:
+                    txt = str(p.get("text", ""))
+                    if not txt:
+                        post_pages.append(p)
+                        continue
+                    fixed = postprocess_text(txt, config, languages, wordlist)
+                    post_pages.append({"page_num": p.get("page_num", 0), "text": fixed})
+                pages = post_pages
+                total_chars = sum(len(p.get("text", "")) for p in pages)
+                LOGGER.info("Post-correction applied; total_chars now %d", total_chars)
+        except Exception as exc:
+            LOGGER.warning("Post-correction failed: %s", exc)
+
+        # Build markdown and chunks
+        markdown = "\n\n".join(p.get("text", "") for p in pages)
+        postprocess_fn: Optional[Callable[[str], str]] = None
+        if config.enable_post_correction:
+            wordlist = prepare_dictionary_words(config)
+            postprocess_fn = lambda text: postprocess_text(text, config, languages, wordlist)
+
+        chunks = build_chunks_page(args.doc_id or "doc", pages, config=config, postprocess=postprocess_fn)
+
+        # Write outputs if requested
+        try:
+            if args.out_md:
+                with open(args.out_md, "w", encoding="utf-8") as handle:
+                    handle.write(markdown)
+        except Exception as exc:
+            eprint(f"Failed to write markdown: {exc}")
+            return 2
+        try:
+            if args.out_json:
+                with open(args.out_json, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+        except Exception as exc:
+            eprint(f"Failed to write JSON: {exc}")
+            return 2
+        return 0
 
     progress_cb = make_progress_emitter(bool(args.progress))
 

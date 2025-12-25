@@ -4,14 +4,18 @@ import json
 import logging
 import os
 import re
-import statistics
 import shutil
 import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import langcodes
 
 
 LOGGER = logging.getLogger("docling_extract")
+
+# Stores details about the last spellchecker built (backend and dictionary files)
+# Example: {"backend": "spylls", "aff": "/path/en_GB.aff", "dic": "/path/en_GB.dic"}
+LAST_SPELLCHECKER_INFO: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
@@ -100,6 +104,10 @@ class DoclingProcessingConfig:
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
+    # Optional Hunspell integration
+    enable_hunspell: bool = True
+    hunspell_aff_path: Optional[str] = None
+    hunspell_dic_path: Optional[str] = None
 
 
 @dataclass
@@ -371,23 +379,73 @@ def select_language_set(
     hint = (language_hint or "").lower().strip()
     name = os.path.basename(filename).lower()
 
-    if hint:
-        if any(token in hint for token in ("de", "deu", "ger", "german", "deutsch")):
-            return config.default_lang_german
-        if any(token in hint for token in ("en", "eng", "english")):
-            return config.default_lang_english
-        return hint
+    # import langcodes
 
-    if re.search(r"(\bde\b|_de\b|-de\b|deu|german|deutsch)", name):
-        return config.default_lang_german
+    def normalize_hint(h: str) -> str:
+        if not h:
+            return ""
+        try:
+            lang = langcodes.find(h)
+            code = lang.to_alpha3()
+            if code == "deu":
+                return config.default_lang_german
+            if code == "eng":
+                return config.default_lang_english
+            if code == "fra":
+                return "fra+eng"  # French + English fallback
+            if code == "pol":
+                return "pol+eng"  # Polish + English fallback
+            # Add more as needed
+            return code
+        except Exception:
+            return h
+
+    if hint:
+        return normalize_hint(hint)
+
+    # Try to infer from filename using langcodes
+    for pattern, lang_code in [
+        (r"(\bde\b|_de\b|-de\b|deu|german|deutsch)", config.default_lang_german),
+        (r"(\bfr\b|_fr\b|-fr\b|fra|french|francais|français)", "fra+eng"),
+        (r"(\bit\b|_it\b|-it\b|ita|italian|italiano)", "ita+eng"),
+        (r"(\bes\b|_es\b|-es\b|spa|spanish|espanol|español)", "spa+eng"),
+        (r"(\bpl\b|_pl\b|-pl\b|pol|polish|polski)", "pol+eng"),
+    ]:
+        if re.search(pattern, name):
+            return lang_code
     return config.default_lang_english
 
 
 def normalize_languages_for_engine(languages: str, engine: str) -> str:
     lang = languages.lower()
     if engine == "paddle":
-        if any(token in lang for token in ("deu", "ger", "de", "german", "deutsch")):
-            return "german"
+        # PaddleOCR expects ISO 639-1 or specific language names (e.g., 'german', 'french', etc.)
+        try:
+            # Use the first language if multiple are given
+            first_lang = lang.split('+')[0].strip()
+            code = langcodes.find(first_lang)
+            paddle_map = {
+                "de": "german",
+                "deu": "german",
+                "fr": "french",
+                "fra": "french",
+                "en": "en",
+                "eng": "en",
+                "it": "italian",
+                "ita": "italian",
+                "es": "spanish",
+                "spa": "spanish",
+                "pl": "polish",
+                "pol": "polish",
+            }
+            alpha2 = code.to_alpha2()
+            alpha3 = code.to_alpha3()
+            if alpha2 in paddle_map:
+                return paddle_map[alpha2]
+            if alpha3 in paddle_map:
+                return paddle_map[alpha3]
+        except Exception:
+            return "en"
         return "en"
     return languages
 
@@ -493,10 +551,318 @@ def prepare_dictionary_words(config: DoclingProcessingConfig) -> Sequence[str]:
     return words
 
 
-def apply_dictionary_correction(text: str, wordlist: Sequence[str]) -> str:
+def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages: str):
+    """
+    Build a cross-platform spellchecker adapter with a .spell(word) method.
+    Tries:
+      1) hunspell (C binding) if available
+      2) spylls (pure Python) if available
+    Returns an object with .spell(str)->bool, or None if unavailable.
+    """
+    if not config.enable_hunspell:
+        return None
+
+    # Resolve aff/dic paths (explicit or auto in tools/hunspell)
+    def resolve_paths() -> List[Tuple[str, str]]:
+        pairs: List[Tuple[str, str]] = []
+        aff = config.hunspell_aff_path
+        dic = config.hunspell_dic_path
+        if aff and dic and os.path.isfile(aff) and os.path.isfile(dic):
+            pairs.append((aff, dic))
+            return pairs
+        base_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        lang = (languages or "").lower()
+        try_codes: List[str] = []
+        if any(t in lang for t in ("de", "deu", "german", "deutsch")):
+            try_codes += ["de_DE", "de_AT", "de_CH"]
+        if any(t in lang for t in ("en", "eng", "english")):
+            try_codes += ["en_US", "en_GB"]
+        if not try_codes:
+            try_codes = ["en_US"]
+        # Exact matches first
+        for code in try_codes:
+            aff_path = os.path.join(base_dir, f"{code}.aff")
+            dic_path = os.path.join(base_dir, f"{code}.dic")
+            if os.path.isfile(aff_path) and os.path.isfile(dic_path):
+                pairs.append((aff_path, dic_path))
+        if pairs:
+            return pairs
+
+        # Flexible matching: accept stems like de_DE_frami.* or en_US-large.* when both files share the same stem
+        try:
+            names = os.listdir(base_dir)
+        except Exception:
+            names = []
+        stems_with_aff = {n[:-4] for n in names if n.endswith(".aff")}
+        stems_with_dic = {n[:-4] for n in names if n.endswith(".dic")}
+        common_stems = list(stems_with_aff & stems_with_dic)
+
+        def stem_priority(stem: str, code: str) -> int:
+            # Higher number = higher priority
+            if stem == code:
+                return 3
+            if stem.startswith(code + "_"):
+                return 2
+            if code in stem:
+                return 1
+            return 0
+
+        for code in try_codes:
+            candidates = sorted(
+                [s for s in common_stems if stem_priority(s, code) > 0],
+                key=lambda s: stem_priority(s, code),
+                reverse=True,
+            )
+            for stem in candidates:
+                aff_path = os.path.join(base_dir, f"{stem}.aff")
+                dic_path = os.path.join(base_dir, f"{stem}.dic")
+                if os.path.isfile(aff_path) and os.path.isfile(dic_path):
+                    pairs.append((aff_path, dic_path))
+                    break
+        return pairs
+
+
+    pairs = resolve_paths()
+    # If no pairs found, try to download on demand
+    if not pairs:
+        # Map special cases for repo structure
+        repo_map = {
+            "de_DE": ("de", "de_DE_frami"),
+            "de_AT": ("de", "de_AT"),
+            "de_CH": ("de", "de_CH"),
+            "en_US": ("en", "en_US"),
+            "en_GB": ("en", "en_GB"),
+            "fr_FR": ("fr_FR", "fr"),
+        }
+        lang_code = None
+        lang = (languages or "").lower()
+        if any(t in lang for t in ("de", "deu", "german", "deutsch")):
+            lang_code = "de_DE"
+        elif any(t in lang for t in ("en", "eng", "english")):
+            lang_code = "en_US"
+        elif any(t in lang for t in ("fr", "fra", "french", "francais")):
+            lang_code = "fr_FR"
+        if not lang_code:
+            lang_code = "en_US"
+        folder, prefix = repo_map.get(lang_code, (lang_code, lang_code))
+        base_url = f"https://raw.githubusercontent.com/LibreOffice/dictionaries/master/{folder}/"
+        aff_name = f"{prefix}.aff"
+        dic_name = f"{prefix}.dic"
+        aff_url = base_url + aff_name
+        dic_url = base_url + dic_name
+        out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        os.makedirs(out_dir, exist_ok=True)
+        aff_path = os.path.join(out_dir, f"{lang_code}.aff")
+        dic_path = os.path.join(out_dir, f"{lang_code}.dic")
+        def download(url, out_path):
+            try:
+                import urllib.request
+                print(f"Downloading {url} -> {out_path}")
+                urllib.request.urlretrieve(url, out_path)
+                return True
+            except Exception as exc:
+                print(f"Failed to download {url}: {exc}")
+                return False
+        ok_aff = download(aff_url, aff_path)
+        ok_dic = download(dic_url, dic_path)
+        if ok_aff and ok_dic:
+            print(f"Successfully downloaded Hunspell dictionary for {lang_code} to {out_dir}")
+        # Try to resolve again
+        pairs = resolve_paths()
+
+    # Attempt hunspell binding first
+    try:
+        import hunspell  # type: ignore
+
+        for aff_path, dic_path in pairs:
+            try:
+                hs = hunspell.HunSpell(dic_path, aff_path)
+                LOGGER.info(
+                    "Spellchecker: using hunspell binding (%s, %s)",
+                    os.path.basename(dic_path),
+                    os.path.basename(aff_path),
+                )
+                try:
+                    # Record details for external visibility
+                    LAST_SPELLCHECKER_INFO.update({
+                        "backend": "hunspell",
+                        "dic": dic_path,
+                        "aff": aff_path,
+                    })
+                except Exception:
+                    pass
+                return hs
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Attempt spylls fallback (pure Python)
+    try:
+        from spylls.hunspell import Dictionary as SpyllsDictionary  # type: ignore
+
+        class SpyllsWrapper:
+            def __init__(self, d):
+                self.d = d
+
+            def spell(self, word: str) -> bool:
+                # Try common case variants to recognize lowercased nouns etc.
+                variants = [word, word.lower(), word.capitalize(), word.title(), word.upper()]
+                seen = set()
+                for v in variants:
+                    if v in seen:
+                        continue
+                    seen.add(v)
+                    try:
+                        if hasattr(self.d, "lookup") and self.d.lookup(v):
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        sugg = self.d.suggest(v)
+                        if isinstance(sugg, (list, tuple)) and v in sugg:
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+        for aff_path, dic_path in pairs:
+            try:
+                d = None
+                errors: List[str] = []
+                # Variant A: (aff, dic)
+                try:
+                    d = SpyllsDictionary.from_files(aff_path, dic_path)
+                except Exception as eA:
+                    errors.append(f"A(aff,dic): {eA}")
+                # Variant B: directory containing both
+                if d is None:
+                    try:
+                        d = SpyllsDictionary.from_files(os.path.dirname(dic_path))
+                    except Exception as eB:
+                        errors.append(f"B(dir): {eB}")
+                # Variant C: stem without extension
+                if d is None:
+                    try:
+                        stem = os.path.splitext(dic_path)[0]
+                        d = SpyllsDictionary.from_files(stem)
+                    except Exception as eC:
+                        errors.append(f"C(stem): {eC}")
+                # Variant D: single-path dic
+                if d is None:
+                    try:
+                        d = SpyllsDictionary.from_files(dic_path)
+                    except Exception as eD:
+                        errors.append(f"D(dic): {eD}")
+                # Variant E: single-path aff
+                if d is None:
+                    try:
+                        d = SpyllsDictionary.from_files(aff_path)
+                    except Exception as eE:
+                        errors.append(f"E(aff): {eE}")
+
+                if d is None:
+                    raise RuntimeError("spylls load failed: " + "; ".join(errors))
+
+                LOGGER.info(
+                    "Spellchecker: using spylls fallback (%s, %s)",
+                    os.path.basename(dic_path),
+                    os.path.basename(aff_path),
+                )
+                try:
+                    LAST_SPELLCHECKER_INFO.update({
+                        "backend": "spylls",
+                        "dic": dic_path,
+                        "aff": aff_path,
+                    })
+                except Exception:
+                    pass
+                return SpyllsWrapper(d)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Naive .dic fallback (no affix rules) when hunspell/spylls are unavailable
+    try:
+        class NaiveDicWrapper:
+            def __init__(self, words: Sequence[str]):
+                self.words = set(w.lower() for w in words if w)
+
+            def spell(self, word: str) -> bool:
+                variants = [word, word.lower(), word.capitalize(), word.title(), word.upper()]
+                for v in variants:
+                    if v.lower() in self.words:
+                        return True
+                return False
+
+        def load_naive_dic(path: str) -> Optional[NaiveDicWrapper]:
+            try:
+                entries: List[str] = []
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    first = True
+                    for raw in fh:
+                        line = raw.strip().lstrip("\ufeff")
+                        if not line:
+                            continue
+                        if first and line.isdigit():
+                            first = False
+                            continue
+                        first = False
+                        base = line.split("/")[0].strip()
+                        if base:
+                            entries.append(base)
+                if entries:
+                    LOGGER.info("Spellchecker: using naive .dic (%s) entries=%d", os.path.basename(path), len(entries))
+                    return NaiveDicWrapper(entries)
+            except Exception as exc:
+                LOGGER.warning("Naive .dic load failed for %s: %s", path, exc)
+            return None
+
+        # Prefer .dic paths discovered via resolve_paths(); otherwise scan tools/hunspell
+        dic_paths: List[str] = []
+        for _aff, _dic in pairs:
+            if os.path.isfile(_dic):
+                dic_paths.append(_dic)
+        if not dic_paths:
+            base_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+            try:
+                candidates = [os.path.join(base_dir, name) for name in os.listdir(base_dir) if name.endswith(".dic")]
+            except Exception:
+                candidates = []
+            lang = (languages or "").lower()
+            filtered: List[str] = []
+            for p in candidates:
+                name = os.path.basename(p).lower()
+                if ("en" in lang or "eng" in lang) and (name.startswith("en_") or name.startswith("en")):
+                    filtered.append(p)
+                if ("de" in lang or "deu" in lang or "german" in lang or "deutsch" in lang) and (name.startswith("de_") or name.startswith("de")):
+                    filtered.append(p)
+            dic_paths = filtered or candidates
+
+        for dic_path in dic_paths:
+            wrapper = load_naive_dic(dic_path)
+            if wrapper is not None:
+                return wrapper
+    except Exception:
+        pass
+
+    LOGGER.info("Spellchecker: no hunspell/spylls dictionary available")
+    try:
+        LAST_SPELLCHECKER_INFO.update({"backend": "none"})
+    except Exception:
+        pass
+    return None
+
+
+def apply_dictionary_correction(text: str, wordlist: Sequence[str], hs=None) -> str:
     if not wordlist:
-        return text
-    dictionary = {word.lower() for word in wordlist}
+        # If Hunspell available, do a minimal pass using it only
+        if hs is None:
+            return text
+        dictionary = set()
+    else:
+        dictionary = {word.lower() for word in wordlist}
     token_re = re.compile(r"[A-Za-z0-9]+")
 
     def match_case(candidate: str, original: str) -> str:
@@ -519,49 +885,224 @@ def apply_dictionary_correction(text: str, wordlist: Sequence[str]) -> str:
     def replace_token(match: re.Match) -> str:
         token = match.group(0)
         lower = token.lower()
-        if lower in dictionary:
+        if lower in dictionary or (hs is not None and hs.spell(token)):
             return token
         for candidate in generate_candidates(token):
-            if candidate.lower() in dictionary:
-                return match_case(candidate, token)
+            cand_lower = candidate.lower()
+            if cand_lower in dictionary or (hs is not None and hs.spell(candidate)):
+                replaced = match_case(candidate, token)
+                try:
+                    LOGGER.info("Dict correction: %s -> %s", token, replaced)
+                except Exception:
+                    pass
+                return replaced
         return token
 
     return token_re.sub(replace_token, text)
 
 
-def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str]) -> str:
-    lang = languages.lower()
+def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str], hs=None) -> str:
+    """
+    Convert ASCII digraphs ae/oe/ue to German umlauts ä/ö/ü more comprehensively.
+
+    Strategy:
+    - If a dictionary is provided, prefer candidates that appear in it.
+    - Otherwise, use word frequency (wordfreq.zipf_frequency) for German to
+      select candidates whose frequency noticeably exceeds the original.
+    - Preserve original casing (UPPER, Title, lower).
+    - Only operate when language is German.
+    - Keep conservative: if no strong signal, leave token unchanged.
+    """
+    lang = (languages or "").lower()
     if not any(token in lang for token in ("de", "deu", "german", "deutsch")):
         return text
 
-    dictionary = {word.lower() for word in wordlist}
-    replacements = {
-        "ueber": "\u00fcber",
-        "fuer": "f\u00fcr",
-        "koennen": "k\u00f6nnen",
-        "muessen": "m\u00fcssen",
-        "haeufig": "h\u00e4ufig",
-    }
+    dictionary = {word.lower() for word in (wordlist or [])}
 
-    def replace_match(match: re.Match) -> str:
-        token = match.group(0)
+    try:
+        from wordfreq import zipf_frequency as _zipf
+    except Exception:
+        _zipf = None  # wordfreq optional
+
+    ascii_to_umlaut = (("ae", "\u00e4"), ("oe", "\u00f6"), ("ue", "\u00fc"))
+
+    def case_match(candidate: str, original: str) -> str:
+        if original.isupper():
+            return candidate.upper()
+        if original[:1].isupper() and original[1:].islower():
+            return candidate.capitalize()
+        return candidate
+
+    def generate_variants(token_lower: str) -> List[str]:
+        # Generate all unique variants by replacing any subset of ae/oe/ue occurrences
+        indices: List[Tuple[int, str, str]] = []
+        for ascii_seq, uml in ascii_to_umlaut:
+            start = 0
+            while True:
+                idx = token_lower.find(ascii_seq, start)
+                if idx == -1:
+                    break
+                # Heuristic: avoid replacing "ue" when preceded by 'e' (e.g., "neue", "Treue")
+                if ascii_seq == "ue" and idx > 0 and token_lower[idx - 1] == "e":
+                    pass
+                else:
+                    indices.append((idx, ascii_seq, uml))
+                start = idx + 1 if idx != -1 else start
+
+        if not indices:
+            return []
+
+        # Build combinations
+        variants = {token_lower}
+        for idx, ascii_seq, uml in indices:
+            new_set = set()
+            for base in variants:
+                # Replace at the same position if still matching
+                if base[idx:idx + len(ascii_seq)] == ascii_seq:
+                    new_set.add(base[:idx] + uml + base[idx + len(ascii_seq):])
+                new_set.add(base)
+            variants = new_set
+        return [v for v in variants if v != token_lower]
+
+    def pick_best(token: str) -> str:
         lower = token.lower()
-        if lower in replacements:
-            replacement = replacements[lower]
-            if token.isupper():
-                return replacement.upper()
-            if token[:1].isupper():
-                return replacement.capitalize()
-            return replacement
-        if dictionary:
-            for ascii_seq, umlaut in (("ae", "\u00e4"), ("oe", "\u00f6"), ("ue", "\u00fc")):
-                if ascii_seq in lower:
-                    candidate = lower.replace(ascii_seq, umlaut)
-                    if candidate in dictionary:
-                        return candidate
-        return token
+        # Quick path: if already contains umlaut, skip
+        if any(ch in lower for ch in ("ä", "ö", "ü")):
+            return token
 
-    return re.sub(r"[A-Za-z]{4,}", replace_match, text)
+        # Generate candidate variants
+        candidates = generate_variants(lower)
+        if not candidates:
+            return token
+
+        # Score candidates
+        best = None
+        best_score = float("-inf")
+        # Base frequency for original
+        base_freq = _zipf(lower, "de") if _zipf else 0.0
+        for cand in candidates:
+            score = 0.0
+            if cand in dictionary or (hs is not None and hs.spell(cand)):
+                score += 10.0  # strong signal from dictionary
+            if _zipf:
+                freq = _zipf(cand, "de")
+                # Prefer if notably more frequent than original
+                score += (freq - base_freq)
+            # Prefer shorter (umlaut variant shortens by 1 char per replacement)
+            score += (len(lower) - len(cand)) * 0.05
+            if score > best_score:
+                best = cand
+                best_score = score
+
+        # Acceptance threshold: either in dictionary or frequency improved by >= 0.5
+        accept = False
+        if best is not None:
+            if best in dictionary or (hs is not None and hs.spell(best)):
+                accept = True
+            elif _zipf:
+                if (_zipf(best, "de") - base_freq) >= 0.5:
+                    accept = True
+
+        if not accept or not best:
+            return token
+        replaced = case_match(best, token)
+        try:
+            LOGGER.info("Umlaut correction: %s -> %s", token, replaced)
+        except Exception:
+            pass
+        return replaced
+
+    # Replace word tokens conservatively (length >= 4 to avoid short codes)
+    return re.sub(r"[A-Za-zÄÖÜäöüß]{4,}", lambda m: pick_best(m.group(0)), text)
+
+
+def restore_missing_spaces(text: str, languages: str, hs=None) -> str:
+    """
+    Conservatively insert spaces inside overlong tokens when a split yields two
+    valid words (by Hunspell/Splylls or by wordfreq Zipf >= 3.0 for target langs).
+
+    Heuristics:
+    - Consider tokens of length >= 12 with only letters (incl. German chars).
+    - Prefer camelCase boundaries (a…zA…Z) when both sides are valid.
+    - Otherwise, try a single split; accept only if BOTH parts look valid.
+    - Log accepted splits.
+    """
+    try:
+        from wordfreq import zipf_frequency as _zipf
+    except Exception:
+        _zipf = None
+
+    lang_codes = select_wordfreq_languages(languages)
+
+    def score_word(w: str) -> Tuple[float, bool]:
+        spelled = False
+        try:
+            if hs is not None and hs.spell(w):
+                spelled = True
+        except Exception:
+            pass
+        if spelled:
+            return 4.0, True
+        if _zipf is None:
+            return 0.0, False
+        try:
+            z = max(_zipf(w.lower(), lc) for lc in lang_codes)
+        except Exception:
+            z = 0.0
+        return float(z), False
+
+    token_re = re.compile(r"[A-Za-zÄÖÜäöüß]{12,}")
+
+    def consider_split(tok: str) -> str:
+        best = None  # type: Optional[Tuple[str, float, bool, str, float, bool]]
+
+        # Try camelCase boundary first: a…zA…Z
+        for m in re.finditer(r"([a-zäöüß])([A-ZÄÖÜ])", tok):
+            i = m.start(2)
+            left, right = tok[:i], tok[i:]
+            if len(left) < 3 or len(right) < 3:
+                continue
+            s1, d1 = score_word(left)
+            s2, d2 = score_word(right)
+            if (d1 or s1 >= 3.0) and (d2 or s2 >= 3.0):
+                combined = s1 + s2
+                best = (left, s1, d1, right, s2, d2)
+                break
+
+        # Otherwise, try single split positions
+        if best is None:
+            n = len(tok)
+            for i in range(3, n - 2):
+                left, right = tok[:i], tok[i:]
+                if len(left) < 3 or len(right) < 3:
+                    continue
+                s1, d1 = score_word(left)
+                s2, d2 = score_word(right)
+                if (d1 or s1 >= 3.0) and (d2 or s2 >= 3.0):
+                    combined = s1 + s2
+                    if best is None or combined > (best[1] + best[4]):
+                        best = (left, s1, d1, right, s2, d2)
+
+        if best is None:
+            return tok
+
+        left, s1, d1, right, s2, d2 = best
+        replacement = f"{left} {right}"
+        try:
+            LOGGER.info(
+                "Inserted space: %s -> %s (scores=%.2f/%.2f, dict=%s/%s)",
+                tok,
+                replacement,
+                s1,
+                s2,
+                d1,
+                d2,
+            )
+        except Exception:
+            pass
+        return replacement
+
+    return token_re.sub(lambda m: consider_split(m.group(0)), text)
 
 
 def should_apply_llm_correction(text: str, config: DoclingProcessingConfig) -> bool:
@@ -637,9 +1178,18 @@ def postprocess_text(
     cleaned = dehyphenate_text(text)
     cleaned = replace_ligatures(cleaned)
     cleaned = normalize_whitespace(cleaned)
-    if config.enable_dictionary_correction:
-        cleaned = apply_dictionary_correction(cleaned, wordlist)
-    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist)
+    hs = build_spellchecker_for_languages(config, languages) if config.enable_hunspell else None
+    # Attempt to restore missing spaces before word-level corrections
+    try:
+        restored = restore_missing_spaces(cleaned, languages, hs)
+        if restored != cleaned:
+            LOGGER.info("Applied missing-space restoration pass")
+        cleaned = restored
+    except Exception as exc:
+        LOGGER.warning("Missing-space restoration failed: %s", exc)
+    if config.enable_dictionary_correction or hs is not None:
+        cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
+    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
     if should_apply_llm_correction(cleaned, config) and config.llm_correct:
         cleaned = config.llm_correct(cleaned)
     return cleaned
@@ -1407,6 +1957,16 @@ def convert_pdf_with_docling(
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
+    # Attach spellchecker backend info if available
+    if LAST_SPELLCHECKER_INFO:
+        try:
+            metadata.update({
+                "spellchecker_backend": LAST_SPELLCHECKER_INFO.get("backend"),
+                "spellchecker_dic": LAST_SPELLCHECKER_INFO.get("dic"),
+                "spellchecker_aff": LAST_SPELLCHECKER_INFO.get("aff"),
+            })
+        except Exception:
+            pass
     metadata.update(ocr_stats)
     emit(100, "done", "Extraction complete")
     return DoclingConversionResult(markdown=markdown, pages=pages, metadata=metadata)
@@ -1490,10 +2050,13 @@ def build_chunks_section(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Extract PDF content with Docling and produce chunks.")
-    parser.add_argument("--pdf", required=True, help="Path to PDF")
+    parser.add_argument("--download-hunspell", metavar="LANG_CODE", type=str, help="Download Hunspell dictionary for given language code (e.g. de_DE, en_US, fr_FR)")
+    parser.add_argument("--pdf", required=False, help="Path to PDF")
     parser.add_argument("--doc-id", help="Document identifier")
     parser.add_argument("--out-json", help="Output JSON path")
     parser.add_argument("--out-md", help="Output markdown path")
+    parser.add_argument("--log-file", help="Optional path to write a detailed log file")
+    parser.add_argument("--spellchecker-info-out", help="Optional path to write spellchecker backend info JSON")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
@@ -1531,9 +2094,74 @@ def main() -> int:
     parser.add_argument("--llm-cleanup-max-chars", type=int, help="Max chars per chunk for LLM cleanup")
     parser.add_argument("--llm-cleanup-min-quality", type=float, help="Min quality threshold for LLM cleanup")
     parser.add_argument("--progress", action="store_true", help="Emit JSON progress events to stdout")
-    args = parser.parse_args()
+    parser.add_argument("--enable-dictionary-correction", action="store_true", help="Enable dictionary-based OCR corrections")
+    parser.add_argument("--dictionary-path", help="Path to dictionary wordlist (one word per line)")
+    parser.add_argument("--enable-hunspell", action="store_true", help="Enable Hunspell dictionary support if available")
+    parser.add_argument("--hunspell-aff", help="Path to Hunspell .aff file")
+    parser.add_argument("--hunspell-dic", help="Path to Hunspell .dic file")
+
+    # Parse only known args to allow --download-hunspell to work standalone
+    args, _ = parser.parse_known_args()
+
+    if args.download_hunspell:
+        lang_code = args.download_hunspell
+        # Map special cases for repo structure
+        repo_map = {
+            "de_DE": ("de", "de_DE_frami"),
+            "de_AT": ("de", "de_AT"),
+            "de_CH": ("de", "de_CH"),
+            "en_US": ("en", "en_US"),
+            "en_GB": ("en", "en_GB"),
+            "fr_FR": ("fr_FR", "fr"),
+        }
+        # Default: folder and file prefix are lang_code
+        folder, prefix = repo_map.get(lang_code, (lang_code, lang_code))
+        base_url = f"https://raw.githubusercontent.com/LibreOffice/dictionaries/master/{folder}/"
+        aff_name = f"{prefix}.aff"
+        dic_name = f"{prefix}.dic"
+        aff_url = base_url + aff_name
+        dic_url = base_url + dic_name
+        out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        os.makedirs(out_dir, exist_ok=True)
+        aff_path = os.path.join(out_dir, f"{lang_code}.aff")
+        dic_path = os.path.join(out_dir, f"{lang_code}.dic")
+        def download(url, out_path):
+            try:
+                import urllib.request
+                urllib.request.urlretrieve(url, out_path)
+                return True
+            except Exception as exc:
+                print(f"Failed to download {url}: {exc}")
+                return False
+        print(f"Downloading {aff_url} -> {aff_path}")
+        ok_aff = download(aff_url, aff_path)
+        print(f"Downloading {dic_url} -> {dic_path}")
+        ok_dic = download(dic_url, dic_path)
+        if ok_aff and ok_dic:
+            print(f"Successfully downloaded Hunspell dictionary for {lang_code} to {out_dir}")
+            return 0
+        else:
+            print(f"Failed to download Hunspell dictionary for {lang_code}. Check the language code or try manually.")
+            return 1
+
+    # Require --pdf for normal operation
+    if not args.pdf:
+        parser.print_help()
+        return 2
 
     logging.basicConfig(level=logging.INFO)
+    # If a log file was requested, add a file handler
+    if args.log_file:
+        try:
+            fh = logging.FileHandler(args.log_file, encoding="utf-8")
+            fh.setLevel(logging.INFO)
+            formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            fh.setFormatter(formatter)
+            logging.getLogger().addHandler(fh)
+            LOGGER.info("Logging to file: %s", args.log_file)
+        except Exception as exc:
+            eprint(f"Failed to set up log file {args.log_file}: {exc}")
+
 
     if not os.path.isfile(args.pdf):
         eprint(f"PDF not found: {args.pdf}")
@@ -1579,6 +2207,16 @@ def main() -> int:
         config.cleanup_remove_image_tags = False
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
+    if args.enable_dictionary_correction:
+        config.enable_dictionary_correction = True
+    if args.dictionary_path:
+        config.dictionary_path = args.dictionary_path
+    if args.enable_hunspell:
+        config.enable_hunspell = True
+    if args.hunspell_aff:
+        config.hunspell_aff_path = args.hunspell_aff
+    if args.hunspell_dic:
+        config.hunspell_dic_path = args.hunspell_dic
     if args.llm_cleanup_base_url:
         config.llm_cleanup_base_url = args.llm_cleanup_base_url
     if args.llm_cleanup_api_key:
@@ -1593,6 +2231,28 @@ def main() -> int:
         config.llm_correction_min_quality = args.llm_cleanup_min_quality
 
     config.llm_correct = build_llm_cleanup_callback(config)
+
+    # Proactively build spellchecker once to record backend info; will be reused lazily later
+    spell_langs = select_language_set(config.language_hint, args.pdf, config)
+    if config.enable_hunspell:
+        try:
+            _ = build_spellchecker_for_languages(config, spell_langs)
+        except Exception:
+            pass
+
+    # Optionally write spellchecker backend info to a file
+    if args.spellchecker_info_out:
+        try:
+            info = dict(LAST_SPELLCHECKER_INFO)
+            info["languages"] = spell_langs
+            out_dir = os.path.dirname(args.spellchecker_info_out)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(args.spellchecker_info_out, "w", encoding="utf-8") as fh:
+                json.dump(info, fh, indent=2)
+            LOGGER.info("Wrote spellchecker info to %s", args.spellchecker_info_out)
+        except Exception as exc:
+            LOGGER.warning("Failed to write spellchecker info file: %s", exc)
 
     progress_cb = make_progress_emitter(bool(args.progress))
 

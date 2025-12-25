@@ -8,3 +8,8 @@ requests
 pyzotero
 tqdm
 wordfreq
+
+# Optional for language normalization and spellchecking
+langcodes
+# hunspell  # Disabled: fails to build on macOS/Python 3.13, use spylls fallback
+spylls

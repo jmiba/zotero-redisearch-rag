@@ -11,7 +11,7 @@ import {
   normalizePath,
 } from "obsidian";
 import { spawn } from "child_process";
-import { promises as fs } from "fs";
+import { promises as fs, existsSync } from "fs";
 import http from "http";
 import https from "https";
 import path from "path";
@@ -432,6 +432,19 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.ensureFolder(this.settings.outputNoteDir);
       if (this.settings.copyPdfToVault) {
         await this.ensureFolder(this.settings.outputPdfDir);
+      }
+      if (this.settings.enableFileLogging) {
+        const logRel = this.getLogFileRelativePath();
+        const logDir = normalizePath(path.dirname(logRel));
+        if (logDir) {
+          await this.ensureFolder(logDir);
+        }
+        // Also ensure spellchecker info dir (same as logs)
+        const spellInfoRel = this.getSpellcheckerInfoRelativePath();
+        const spellDir = normalizePath(path.dirname(spellInfoRel));
+        if (spellDir) {
+          await this.ensureFolder(spellDir);
+        }
       }
     } catch (error) {
       new Notice("Failed to create output folders.");
@@ -2943,6 +2956,18 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       await this.ensureFolder(this.settings.outputNoteDir);
+      if (this.settings.enableFileLogging) {
+        const logRel = this.getLogFileRelativePath();
+        const logDir = normalizePath(path.dirname(logRel));
+        if (logDir) {
+          await this.ensureFolder(logDir);
+        }
+        const spellInfoRel = this.getSpellcheckerInfoRelativePath();
+        const spellDir = normalizePath(path.dirname(spellInfoRel));
+        if (spellDir) {
+          await this.ensureFolder(spellDir);
+        }
+      }
     } catch (error) {
       if (showNotices) {
         new Notice("Failed to create notes folder.");
@@ -3339,6 +3364,24 @@ export default class ZoteroRagPlugin extends Plugin {
       args.push("--llm-cleanup-max-chars", String(this.settings.llmCleanupMaxChars));
     }
 
+    // Auto-enable dictionary-based correction if a bundled wordlist exists
+    const pluginDir = this.getPluginDir();
+    const wordlistPath = path.join(pluginDir, "tools", "ocr_wordlist.txt");
+    if (existsSync(wordlistPath)) {
+      args.push("--enable-dictionary-correction", "--dictionary-path", wordlistPath);
+    }
+
+    if (this.settings.enableFileLogging) {
+      const logAbs = this.getLogFileAbsolutePath();
+      if (logAbs) {
+        args.push("--log-file", logAbs);
+      }
+      const spellInfoAbs = this.getAbsoluteVaultPath(this.getSpellcheckerInfoRelativePath());
+      if (spellInfoAbs) {
+        args.push("--spellchecker-info-out", spellInfoAbs);
+      }
+    }
+
     return args;
   }
 
@@ -3518,6 +3561,56 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       });
     });
+  }
+
+  // Logging helpers
+  private getLogsDirRelative(): string {
+    return normalizePath(`${CACHE_ROOT}/logs`);
+  }
+
+  private getLogFileRelativePath(): string {
+    const configured = (this.settings.logFilePath || "").trim();
+    return normalizePath(configured || `${this.getLogsDirRelative()}/docling_extract.log`);
+  }
+
+  private getLogFileAbsolutePath(): string {
+    return this.getAbsoluteVaultPath(this.getLogFileRelativePath());
+  }
+
+  private getSpellcheckerInfoRelativePath(): string {
+    return normalizePath(`${this.getLogsDirRelative()}/spellchecker_info.json`);
+  }
+
+  public async openLogFile(): Promise<void> {
+    const rel = this.getLogFileRelativePath();
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(rel))) {
+      new Notice("Log file not found.");
+      return;
+    }
+    try {
+      const content = await adapter.read(rel);
+      new OutputModal(this.app, "Docling log", content || "(empty)").open();
+    } catch (error) {
+      new Notice("Failed to open log file.");
+      console.error(error);
+    }
+  }
+
+  public async clearLogFile(): Promise<void> {
+    const rel = this.getLogFileRelativePath();
+    const adapter = this.app.vault.adapter;
+    try {
+      const dir = normalizePath(path.dirname(rel));
+      if (dir) {
+        await this.ensureFolder(dir);
+      }
+      await adapter.write(rel, "");
+      new Notice("Log file cleared.");
+    } catch (error) {
+      new Notice("Failed to clear log file.");
+      console.error(error);
+    }
   }
 
   private runPythonWithOutput(scriptPath: string, args: string[]): Promise<string> {
