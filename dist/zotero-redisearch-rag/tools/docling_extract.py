@@ -9,6 +9,19 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import langcodes
+import warnings
+
+# Reduce noisy warnings and route them to logging
+logging.captureWarnings(True)
+try:
+    from PIL import Image as _PILImage  # type: ignore
+    # Disable DecompressionBomb warnings (we control DPI); still safe for local PDFs
+    _PILImage.MAX_IMAGE_PIXELS = None  # type: ignore[attr-defined]
+    if hasattr(_PILImage, "DecompressionBombWarning"):
+        warnings.filterwarnings("ignore", category=_PILImage.DecompressionBombWarning)  # type: ignore[attr-defined]
+except Exception:
+    pass
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 LOGGER = logging.getLogger("docling_extract")
@@ -16,6 +29,7 @@ LOGGER = logging.getLogger("docling_extract")
 # Stores details about the last spellchecker built (backend and dictionary files)
 # Example: {"backend": "spylls", "aff": "/path/en_GB.aff", "dic": "/path/en_GB.dic"}
 LAST_SPELLCHECKER_INFO: Dict[str, Any] = {}
+SPELLCHECKER_CACHE: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
@@ -74,12 +88,6 @@ class DoclingProcessingConfig:
     column_detect_min_gap_ratio: float = 0.03
     column_detect_min_pages_ratio: float = 0.4
     column_detect_smooth_window: int = 5
-    # When columns are detected, optionally prefer doing external OCR per column
-    column_split_ocr: bool = False
-    column_split_margin_px: int = 8
-    # Optionally rasterize (render pages to images) and then run per-column OCR,
-    # guaranteeing the original text layer is ignored
-    column_split_after_rasterize: bool = False
     page_range_sample_tokens: int = 200
     page_range_min_overlap: float = 0.02
     page_range_min_hits: int = 5
@@ -110,16 +118,6 @@ class DoclingProcessingConfig:
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
-    # Tesseract tuning
-    tesseract_psm: int = 6  # Assume a uniform block of text
-    tesseract_oem: int = 1  # LSTM only
-    # Optional Hunspell integration
-    enable_hunspell: bool = True
-    hunspell_aff_path: Optional[str] = None
-    hunspell_dic_path: Optional[str] = None
-    # Tesseract tuning
-    tesseract_psm: int = 6  # Assume a uniform block of text
-    tesseract_oem: int = 1  # LSTM only
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -144,6 +142,7 @@ class TextQuality:
     suspicious_token_ratio: float
     confidence_proxy: float
     dictionary_hit_ratio: Optional[float] = None
+    spellchecker_hit_ratio: Optional[float] = None
 
 @dataclass
 class ColumnLayoutDetection:
@@ -307,6 +306,34 @@ def compute_dictionary_hit_ratio(
     return hits / total
 
 
+def compute_spellchecker_hit_ratio(
+    tokens: Sequence[str],
+    languages: str,
+    config: Optional[DoclingProcessingConfig],
+) -> Optional[float]:
+    if not config or not config.enable_hunspell or not languages:
+        return None
+    hs = build_spellchecker_for_languages(config, languages)
+    if hs is None:
+        return None
+    hits = 0
+    total = 0
+    for token in tokens:
+        if len(token) < 2:
+            continue
+        if not any(char.isalpha() for char in token):
+            continue
+        total += 1
+        try:
+            if hs.spell(token):
+                hits += 1
+        except Exception:
+            continue
+    if not total:
+        return None
+    return hits / total
+
+
 def estimate_text_quality(
     pages: Sequence[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
@@ -330,17 +357,27 @@ def estimate_text_quality(
 
     avg_chars = total_chars / max(1, len(pages))
     dictionary_hit_ratio = None
+    spellchecker_hit_ratio = None
     if config and config.quality_use_wordfreq and languages:
         dictionary_hit_ratio = compute_dictionary_hit_ratio(
             tokens,
             languages,
             config.quality_wordfreq_min_zipf,
         )
+    if config and languages:
+        spellchecker_hit_ratio = compute_spellchecker_hit_ratio(tokens, languages, config)
+    lexicon_ratio = None
+    if dictionary_hit_ratio is not None and spellchecker_hit_ratio is not None:
+        lexicon_ratio = max(dictionary_hit_ratio, spellchecker_hit_ratio)
+    elif dictionary_hit_ratio is not None:
+        lexicon_ratio = dictionary_hit_ratio
+    elif spellchecker_hit_ratio is not None:
+        lexicon_ratio = spellchecker_hit_ratio
     confidence = alpha_ratio * (1.0 - suspicious_ratio)
-    if dictionary_hit_ratio is not None:
-        confidence *= 0.4 + (0.6 * dictionary_hit_ratio)
+    if lexicon_ratio is not None:
+        confidence *= 0.4 + (0.6 * lexicon_ratio)
     confidence = max(0.0, min(1.0, confidence))
-    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, dictionary_hit_ratio)
+    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, lexicon_ratio, spellchecker_hit_ratio)
 
 
 def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: DoclingProcessingConfig) -> bool:
@@ -529,11 +566,6 @@ def detect_available_ocr_engines() -> List[str]:
     available: List[str] = []
     try:
         import paddleocr  # noqa: F401
-        try:
-            import paddle  # type: ignore  # paddlepaddle runtime required by PaddleOCR
-            _ = paddle  # silence linter
-        except Exception:
-            raise
         from pdf2image import convert_from_path  # noqa: F401
         available.append("paddle")
     except Exception:
@@ -582,6 +614,9 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
     """
     if not config.enable_hunspell:
         return None
+    cache_key = f"{languages}|{config.hunspell_aff_path or ''}|{config.hunspell_dic_path or ''}"
+    if cache_key in SPELLCHECKER_CACHE:
+        return SPELLCHECKER_CACHE[cache_key]
 
     # Resolve aff/dic paths (explicit or auto in tools/hunspell)
     def resolve_paths() -> List[Tuple[str, str]]:
@@ -712,6 +747,7 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
                     })
                 except Exception:
                     pass
+                SPELLCHECKER_CACHE[cache_key] = hs
                 return hs
             except Exception:
                 continue
@@ -798,7 +834,9 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
                     })
                 except Exception:
                     pass
-                return SpyllsWrapper(d)
+                wrapper = SpyllsWrapper(d)
+                SPELLCHECKER_CACHE[cache_key] = wrapper
+                return wrapper
             except Exception:
                 continue
     except Exception:
@@ -864,6 +902,7 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         for dic_path in dic_paths:
             wrapper = load_naive_dic(dic_path)
             if wrapper is not None:
+                SPELLCHECKER_CACHE[cache_key] = wrapper
                 return wrapper
     except Exception:
         pass
@@ -1557,16 +1596,7 @@ def find_poppler_path() -> Optional[str]:
     return None
 
 
-def find_tesseract_cmd() -> Optional[str]:
-    # Try PATH first
-    path = shutil.which("tesseract")
-    if path:
-        return path
-    # Common macOS/Linux locations
-    for candidate in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"):
-        if os.path.isfile(candidate) or shutil.which(candidate):
-            return candidate
-    return None
+POPPLER_LOGGED_ONCE = False
 
 
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
@@ -1574,8 +1604,10 @@ def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
 
     poppler_path = find_poppler_path()
     if poppler_path:
-        if shutil.which("pdftoppm") is None:
+        global POPPLER_LOGGED_ONCE
+        if shutil.which("pdftoppm") is None and not POPPLER_LOGGED_ONCE:
             LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+            POPPLER_LOGGED_ONCE = True
         return convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
     return convert_from_path(pdf_path, dpi=dpi)
 
@@ -1588,10 +1620,61 @@ def render_pdf_pages_sample(pdf_path: str, dpi: int, max_pages: int) -> List[Any
     poppler_path = find_poppler_path()
     kwargs = {"dpi": dpi, "first_page": 1, "last_page": max_pages}
     if poppler_path:
-        if shutil.which("pdftoppm") is None:
+        global POPPLER_LOGGED_ONCE
+        if shutil.which("pdftoppm") is None and not POPPLER_LOGGED_ONCE:
             LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+            POPPLER_LOGGED_ONCE = True
         kwargs["poppler_path"] = poppler_path
     return convert_from_path(pdf_path, **kwargs)
+
+
+def get_pdf_page_count(pdf_path: str) -> int:
+    """Return total number of pages using pypdf (fast and light)."""
+    try:
+        from pypdf import PdfReader  # type: ignore
+        reader = PdfReader(pdf_path)
+        return int(len(reader.pages))
+    except Exception:
+        return 0
+
+
+def select_column_sample_indices(total_pages: int, max_pages: int) -> List[int]:
+    """Pick up to max_pages page indices spread across the document (1-based)."""
+    if total_pages <= 0:
+        return []
+    k = max(1, max_pages)
+    k = min(k, total_pages)
+    if k == 1:
+        return [max(1, (total_pages + 1) // 2)]
+    if k == 2:
+        return [1, total_pages]
+    # Spread evenly including first and last
+    step = (total_pages - 1) / (k - 1)
+    return [int(round(1 + i * step)) for i in range(k)]
+
+
+def render_pdf_pages_at_indices(pdf_path: str, dpi: int, indices: Sequence[int]) -> List[Any]:
+    """Render specific 1-based page indices to images. May call pdf2image multiple times."""
+    from pdf2image import convert_from_path
+    images: List[Any] = []
+    if not indices:
+        return images
+    poppler_path = find_poppler_path()
+    for idx in indices:
+        kwargs = {"dpi": dpi, "first_page": int(idx), "last_page": int(idx)}
+        if poppler_path:
+            global POPPLER_LOGGED_ONCE
+            if shutil.which("pdftoppm") is None and not POPPLER_LOGGED_ONCE:
+                LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+                POPPLER_LOGGED_ONCE = True
+            kwargs["poppler_path"] = poppler_path
+        try:
+            imgs = convert_from_path(pdf_path, **kwargs)
+            if imgs:
+                images.append(imgs[0])
+        except Exception:
+            continue
+    return images
 
 
 def compute_column_density(
@@ -1636,12 +1719,49 @@ def compute_column_density(
     arr = np.asarray(gray)
     if arr.size == 0:
         return []
+    # Build a robust binarization threshold: combine median-std rule with Otsu
     median = float(np.median(arr))
     std = float(arr.std())
-    threshold = median - (std * config.column_detect_threshold_std_mult)
-    threshold = min(threshold, config.column_detect_threshold_max)
-    threshold = max(threshold, config.column_detect_threshold_min)
+    thr_a = median - (std * config.column_detect_threshold_std_mult)
+    thr_a = min(thr_a, float(config.column_detect_threshold_max))
+    thr_a = max(thr_a, float(config.column_detect_threshold_min))
+
+    # Otsu threshold (fast implementation without external deps)
+    try:
+        hist, _ = np.histogram(arr, bins=256, range=(0, 255))
+        hist = hist.astype(np.float64)
+        total = hist.sum()
+        if total > 0:
+            prob = hist / total
+            omega = np.cumsum(prob)
+            mu = np.cumsum(prob * np.arange(256))
+            mu_t = mu[-1]
+            sigma_b2 = (mu_t * omega - mu) ** 2 / np.maximum(omega * (1.0 - omega), 1e-9)
+            k = int(np.nanargmax(sigma_b2))
+            thr_b = float(k)
+        else:
+            thr_b = thr_a
+    except Exception:
+        thr_b = thr_a
+
+    threshold = 0.5 * (thr_a + thr_b)
     mask = arr < threshold
+
+    # Focus on the vertical band with the most text-like pixels to avoid full-width pictures at top
+    h = mask.shape[0]
+    band_h = max(1, int(h * 0.6))  # use central 60% by default (adaptive below)
+    if band_h < h:
+        step = max(1, int(h * 0.04))
+        best_y = 0
+        best_score = -1.0
+        # Slide a window to find the densest text band
+        for y in range(0, h - band_h + 1, step):
+            score = mask[y : y + band_h, :].mean()
+            if score > best_score:
+                best_score = score
+                best_y = y
+        mask = mask[best_y : best_y + band_h, :]
+
     return mask.mean(axis=0).tolist()
 
 
@@ -1723,97 +1843,6 @@ def detect_multicolumn_layout(
     return ColumnLayoutDetection(detected, ratio, reason)
 
 
-def _find_column_gutters_from_density(
-    density: Sequence[float],
-    config: DoclingProcessingConfig,
-) -> List[int]:
-    """
-    Return x-index positions (relative to density array) for vertical gutters.
-    Uses same thresholds as count_column_gaps but returns midpoints of long gaps.
-    """
-    if not density:
-        return []
-    total = len(density)
-    margin = max(1, int(total * 0.05))
-    start = margin
-    end = max(start + 1, total - margin)
-    core = density[start:end]
-    if not core:
-        return []
-    text_level = density_percentile(core, config.column_detect_text_percentile)
-    if text_level < config.column_detect_min_text_density:
-        return []
-    threshold = max(config.column_detect_min_gap_density, text_level * config.column_detect_gap_threshold_ratio)
-    min_gap = max(1, int(len(core) * config.column_detect_min_gap_ratio))
-
-    gutters: List[int] = []
-    idx = 0
-    while idx < len(core):
-        if core[idx] < threshold:
-            gap_start = idx
-            while idx < len(core) and core[idx] < threshold:
-                idx += 1
-            gap_end = idx
-            if gap_end - gap_start >= min_gap:
-                gutters.append(start + (gap_start + gap_end) // 2)
-        else:
-            idx += 1
-    # Return up to 2 strongest (center-most) gutters for typical 2-3 columns
-    if len(gutters) > 2:
-        center = total / 2.0
-        gutters = sorted(gutters, key=lambda x: abs(x - center))[:2]
-        gutters.sort()
-    return sorted(gutters)
-
-
-def _find_column_splits(image: Any, config: DoclingProcessingConfig) -> List[Tuple[int, int]]:
-    """
-    Compute x-intervals for columns using density gutters. Returns a list of
-    (x0, x1) pixel bounds covering the page width split into columns.
-    """
-    density = compute_column_density(image, config)
-    density = smooth_density(density, config.column_detect_smooth_window)
-    gutters = _find_column_gutters_from_density(density, config)
-    width = image.size[0]
-    if not gutters:
-        return [(0, width)]
-    xs = [0] + gutters + [width]
-    splits: List[Tuple[int, int]] = []
-    for i in range(len(xs) - 1):
-        x0 = xs[i]
-        x1 = xs[i + 1]
-        # Expand slightly away from gutter to avoid cutting characters
-        if i > 0:
-            x0 += config.column_split_margin_px
-        if i < len(xs) - 2:
-            x1 -= config.column_split_margin_px
-        x0 = max(0, min(x0, width))
-        x1 = max(0, min(x1, width))
-        if x1 - x0 > max(10, int(width * 0.1)):
-            splits.append((x0, x1))
-    return splits or [(0, width)]
-
-
-def _fixed_column_splits(image: Any, ncols: int, margin_px: int) -> List[Tuple[int, int]]:
-    width = image.size[0]
-    if ncols <= 1:
-        return [(0, width)]
-    col_w = width / float(ncols)
-    splits: List[Tuple[int, int]] = []
-    for i in range(ncols):
-        x0 = int(round(i * col_w))
-        x1 = int(round((i + 1) * col_w))
-        if i > 0:
-            x0 += margin_px
-        if i < ncols - 1:
-            x1 -= margin_px
-        x0 = max(0, min(x0, width))
-        x1 = max(0, min(x1, width))
-        if x1 - x0 > max(10, int(width * 0.1)):
-            splits.append((x0, x1))
-    return splits or [(0, width)]
-
-
 def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
     from tempfile import NamedTemporaryFile
 
@@ -1843,27 +1872,148 @@ def ocr_pages_with_paddle(
     except Exception as exc:
         raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
 
-    ocr = PaddleOCR(use_angle_cls=True, lang=languages)
+    # Newer PaddleOCR prefers use_textline_orientation; older uses use_angle_cls
+    try:
+        ocr = PaddleOCR(use_textline_orientation=True, lang=languages)
+    except TypeError:
+        ocr = PaddleOCR(use_angle_cls=True, lang=languages)
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
+    def _bbox_from_quad(quad: Sequence[Sequence[float]]) -> Tuple[float, float, float, float, float]:
+        xs = [p[0] for p in quad]
+        ys = [p[1] for p in quad]
+        x0, y0, x1, y1 = float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))
+        xc = 0.5 * (x0 + x1)
+        return x0, y0, x1, y1, xc
+
+    def _order_blocks_into_columns(blocks: List[Dict[str, Any]]) -> str:
+        if not blocks:
+            return ""
+        # Robust grouping by x-center: find one or two big gaps -> 2 or 3 columns
+        xs = sorted(b["xc"] for b in blocks)
+        x_min, x_max = xs[0], xs[-1]
+        span = max(1.0, x_max - x_min)
+        widths = sorted((b["x1"] - b["x0"]) for b in blocks)
+        w_med = widths[len(widths)//2] if widths else 1.0
+        # Lower threshold than before: helps separate three narrow columns
+        gap_thr = max(0.06 * span, 0.5 * w_med)
+
+        # Compute gaps between consecutive x-centers
+        diffs: List[Tuple[float, int]] = []
+        for i in range(1, len(xs)):
+            diffs.append((xs[i] - xs[i-1], i))  # (gap, split_index)
+        # Candidate split positions are those with large gaps
+        candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
+
+        # Build columns by splitting at up to two largest valid gaps ensuring min size per group
+        min_lines = max(3, len(blocks) // 20 or 1)
+        columns: List[List[Dict[str, Any]]] = []
+        blocks_sorted = sorted(blocks, key=lambda b: b["xc"])  # align with xs order
+        used_splits: List[int] = []
+        if candidates:
+            # Prefer two-gap (3-column) split if possible
+            cands_sorted = sorted(((xs[i-1], xs[i], i) for i in candidates), key=lambda t: t[1]-t[0], reverse=True)
+            # Try all pairs of split indices to form 3 groups
+            tried = False
+            for _a in range(min(5, len(cands_sorted))):
+                for _b in range(_a+1, min(6, len(cands_sorted))):
+                    i1 = cands_sorted[_a][2]
+                    i2 = cands_sorted[_b][2]
+                    a, b = sorted([i1, i2])
+                    if a < min_lines or (b - a) < min_lines or (len(blocks) - b) < min_lines:
+                        continue
+                    used_splits = [a, b]
+                    tried = True
+                    break
+                if tried:
+                    break
+            if not used_splits:
+                # Fall back to single split (2 columns)
+                # pick the largest valid gap that yields two groups of minimum size
+                for _, _, i in cands_sorted:
+                    if i >= min_lines and (len(blocks) - i) >= min_lines:
+                        used_splits = [i]
+                        break
+
+        if used_splits:
+            used_splits = sorted(set(used_splits))
+            start = 0
+            for s in used_splits:
+                columns.append(blocks_sorted[start:s])
+                start = s
+            columns.append(blocks_sorted[start:])
+        else:
+            # Fallback threshold grouping
+            cur: List[Dict[str, Any]] = []
+            prev_xc: Optional[float] = None
+            for b in blocks_sorted:
+                if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
+                    cur.append(b)
+                else:
+                    if cur:
+                        columns.append(cur)
+                    cur = [b]
+                prev_xc = b["xc"]
+            if cur:
+                columns.append(cur)
+
+        # Sort columns left-to-right by median x center
+        def col_key(col: List[Dict[str, Any]]) -> float:
+            centers = sorted(b["xc"] for b in col)
+            return centers[len(centers)//2]
+        columns = [col for col in columns if col]
+        columns.sort(key=col_key)
+        try:
+            LOGGER.info("Paddle column grouping: k=%d (gap_thr=%.2f, span=%.1f)", len(columns), gap_thr, span)
+        except Exception:
+            pass
+        # Within each column, sort top-down and join
+        col_texts: List[str] = []
+        for col in columns:
+            col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
+            col_texts.append("\n".join(b["text"] for b in col_sorted if b["text"]))
+        # Read columns left to right
+        return "\n\n".join(t for t in col_texts if t)
+
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
-        result = ocr.ocr(np.array(image), cls=True)
-        lines: List[str] = []
+        # Prefer new API: predict(); fall back to ocr() with/without cls
+        try:
+            result = ocr.predict(np.array(image))  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                result = ocr.ocr(np.array(image), cls=True)
+            except TypeError:
+                result = ocr.ocr(np.array(image))
+        blocks: List[Dict[str, Any]] = []
         if result:
-            for entry in result[0] if isinstance(result, list) else result:
-                if not entry:
+            entries = result[0] if isinstance(result, list) else result
+            for entry in entries:
+                if not entry or not isinstance(entry, (list, tuple)):
                     continue
-                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                    text_part = entry[1]
-                    if isinstance(text_part, (list, tuple)) and text_part:
-                        lines.append(str(text_part[0]))
-                        if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
-                            confidences.append(float(text_part[1]))
-                    else:
-                        lines.append(str(text_part))
-        pages.append({"page_num": idx, "text": "\n".join(lines)})
+                quad = entry[0] if len(entry) > 0 else None
+                text_part = entry[1] if len(entry) > 1 else None
+                if quad is None or text_part is None:
+                    continue
+                try:
+                    x0, y0, x1, y1, xc = _bbox_from_quad(quad)
+                except Exception:
+                    continue
+                text_val = ""
+                conf_val = None
+                if isinstance(text_part, (list, tuple)) and text_part:
+                    text_val = str(text_part[0] or "").strip()
+                    if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
+                        conf_val = float(text_part[1])
+                else:
+                    text_val = str(text_part or "").strip()
+                if conf_val is not None:
+                    confidences.append(conf_val)
+                if text_val:
+                    blocks.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "xc": xc, "text": text_val})
+        ordered_text = _order_blocks_into_columns(blocks)
+        pages.append({"page_num": idx, "text": ordered_text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
             progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
@@ -1880,25 +2030,11 @@ def ocr_pages_with_tesseract(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     import pytesseract
-    # Ensure the tesseract binary is set explicitly (macOS PATH issues)
-    try:
-        cmd = find_tesseract_cmd()
-        if cmd:
-            pytesseract.pytesseract.tesseract_cmd = cmd
-            LOGGER.info("Using tesseract binary: %s", cmd)
-    except Exception:
-        pass
 
     pages: List[Dict[str, Any]] = []
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
-        try:
-            # Default to a sensible page segmentation and engine mode
-            cfg = f"--psm {DoclingProcessingConfig.tesseract_psm} --oem {DoclingProcessingConfig.tesseract_oem}"
-            text = pytesseract.image_to_string(image, lang=languages, config=cfg)
-        except Exception as exc:
-            LOGGER.warning("Tesseract image_to_string failed: %s", exc)
-            text = ""
+        text = pytesseract.image_to_string(image, lang=languages)
         pages.append({"page_num": idx, "text": text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
@@ -1916,146 +2052,23 @@ def run_external_ocr_pages(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     images = render_pdf_pages(pdf_path, config.ocr_dpi)
-    try:
-        LOGGER.info("External OCR: rendered %d page images at %ddpi", len(images), config.ocr_dpi)
-    except Exception:
-        pass
-
-    norm_lang = normalize_languages_for_engine(languages, engine)
-
-    # Fast path: no column splitting requested
-    if not config.column_split_ocr:
-        if engine == "paddle":
-            return ocr_pages_with_paddle(
-                images,
-                norm_lang,
-                progress_cb,
-                progress_base,
-                progress_span,
-            )
-        if engine == "tesseract":
-            return ocr_pages_with_tesseract(
-                images,
-                norm_lang,
-                progress_cb,
-                progress_base,
-                progress_span,
-            )
-        return [], {}
-
-    # Per-column OCR: split each image into columns and OCR left->right
-    try:
-        LOGGER.info("Using external OCR with per-column splitting (engine=%s, lang=%s)", engine, norm_lang)
-    except Exception:
-        pass
-    pages: List[Dict[str, Any]] = []
-    confidences: List[float] = []
-    total = max(1, len(images))
-
-    # Prepare engine instance (Paddle is heavy to init)
-    paddle_ocr = None
     if engine == "paddle":
-        try:
-            from paddleocr import PaddleOCR  # type: ignore
-            import numpy as np  # noqa: F401
-            paddle_ocr = PaddleOCR(use_angle_cls=True, lang=norm_lang)
-        except Exception as exc:
-            LOGGER.warning("Paddle init failed for per-column OCR: %s", exc)
-            # Fallback to Tesseract if available
-            try:
-                import pytesseract  # noqa: F401
-                LOGGER.info("Falling back to Tesseract for per-column OCR")
-                engine = "tesseract"
-            except Exception:
-                return [], {}
-
-    for idx, image in enumerate(images, start=1):
-        # Determine columns for this page
-        splits = _find_column_splits(image, config)
-
-        # OCR helper over a list of crops
-        def ocr_column_crops(crops: List[Tuple[int, int]]) -> Tuple[List[str], float]:
-            texts: List[str] = []
-            total_len = 0.0
-            try:
-                import numpy as np
-            except Exception:
-                np = None  # type: ignore
-            for (x0, x1) in crops:
-                crop = image.crop((x0, 0, x1, image.size[1]))
-                text_part = ""
-                if engine == "paddle" and paddle_ocr is not None and np is not None:
-                    try:
-                        result = paddle_ocr.ocr(np.array(crop), cls=True)
-                    except Exception:
-                        result = None
-                    lines: List[str] = []
-                    if result:
-                        for entry in result[0] if isinstance(result, list) else result:
-                            if not entry:
-                                continue
-                            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                                txt = entry[1]
-                                if isinstance(txt, (list, tuple)) and txt:
-                                    lines.append(str(txt[0]))
-                                    if len(txt) > 1 and isinstance(txt[1], (float, int)):
-                                        confidences.append(float(txt[1]))
-                                else:
-                                    lines.append(str(txt))
-                    text_part = "\n".join(lines)
-                elif engine == "tesseract":
-                    try:
-                        import pytesseract
-                        cfg = f"--psm {DoclingProcessingConfig.tesseract_psm} --oem {DoclingProcessingConfig.tesseract_oem}"
-                        text_part = pytesseract.image_to_string(crop, lang=norm_lang, config=cfg)
-                    except Exception as exc:
-                        LOGGER.warning("Tesseract OCR failed on column crop: %s", exc)
-                        text_part = ""
-                else:
-                    text_part = ""
-                text_part = text_part.strip()
-                texts.append(text_part)
-                total_len += float(len(text_part))
-            return texts, total_len
-
-        col_texts, score = ocr_column_crops(splits)
-
-        # If detection failed or content is very low, try fixed 2/3-column grids and pick best
-        if score < 50.0 or len(splits) <= 1:
-            best_texts = col_texts
-            best_score = score
-            best_n = 0
-            for n in (2, 3):
-                fixed = _fixed_column_splits(image, n, config.column_split_margin_px)
-                texts_n, score_n = ocr_column_crops(fixed)
-                try:
-                    LOGGER.info("Per-column fallback: %d-col grid score=%.0f vs %.0f", n, score_n, best_score)
-                except Exception:
-                    pass
-                if score_n > best_score:
-                    best_texts, best_score, best_n = texts_n, score_n, n
-            if best_n:
-                col_texts = best_texts
-                try:
-                    LOGGER.info("Per-column fallback chosen: %d columns", best_n)
-                except Exception:
-                    pass
-
-        # Concatenate columns left->right, keep separation
-        page_text = "\n\n".join([t for t in col_texts if t])
-        if not page_text:
-            page_text = ""  # ensure string
-        pages.append({"page_num": idx, "text": page_text})
-
-        if progress_cb and progress_span > 0:
-            percent = progress_base + int(idx / total * progress_span)
-            progress_cb(percent, "ocr", f"Per-column OCR page {idx}/{total}")
-
-    stats: Dict[str, Any] = {}
-    if confidences:
-        stats["ocr_confidence_avg"] = sum(confidences) / len(confidences)
-    LOGGER.info("Applied per-column external OCR on %d pages (engine=%s)", len(pages), engine)
-    return pages, stats
+        return ocr_pages_with_paddle(
+            images,
+            normalize_languages_for_engine(languages, engine),
+            progress_cb,
+            progress_base,
+            progress_span,
+        )
+    if engine == "tesseract":
+        return ocr_pages_with_tesseract(
+            images,
+            normalize_languages_for_engine(languages, engine),
+            progress_cb,
+            progress_base,
+            progress_span,
+        )
+    return [], {}
 
 
 def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict[str, Any]:
@@ -2076,6 +2089,7 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
+        "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
     }
 
 
@@ -2084,16 +2098,6 @@ def convert_pdf_with_docling(
     config: DoclingProcessingConfig,
     progress_cb: Optional[ProgressCallback] = None,
 ) -> DoclingConversionResult:
-    try:
-        LOGGER.info(
-            "convert:start | per_column=%s, ocr=%s, prefer=%s, fallback=%s",
-            getattr(config, "column_split_ocr", False),
-            getattr(config, "ocr_mode", "auto"),
-            getattr(config, "prefer_ocr_engine", "paddle"),
-            getattr(config, "fallback_ocr_engine", "tesseract"),
-        )
-    except Exception:
-        pass
     emit = progress_cb or (lambda _p, _s, _m: None)
     emit(5, "analysis", "Analyzing text layer")
     analysis_pages = extract_pages_from_pdf(
@@ -2108,108 +2112,64 @@ def convert_pdf_with_docling(
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
     emit(15, "route", "Selecting OCR route")
-    # Hard override: if per-column OCR is requested, ensure we plan external per-page OCR
-    if getattr(config, "column_split_ocr", False):
-        try:
-            # Force external OCR path; choose prefer engine, else fallback, else keep prefer
-            # (run_external_ocr_pages will auto-fallback to Tesseract if Paddle init fails)
-            decision.ocr_engine = (
-                config.prefer_ocr_engine
-                if config.prefer_ocr_engine in ("paddle", "tesseract")
-                else "tesseract"
-            )
-            if decision.ocr_engine == "paddle" and ("paddle" not in available_engines) and ("tesseract" in available_engines):
-                decision.ocr_engine = "tesseract"
-            decision.use_external_ocr = True
-            decision.ocr_used = True
-            decision.per_page_ocr = True
-            decision.per_page_reason = "Per-column OCR requested by config"
-            LOGGER.info("Per-column OCR override engaged (engine=%s)", decision.ocr_engine)
-        except Exception:
-            pass
     rasterized_source = False
     rasterized_pdf_path = ""
     rasterize_error: Optional[str] = None
     column_layout: Optional[ColumnLayoutDetection] = None
     if should_rasterize_text_layer(has_text_layer, low_quality, config):
-        # If we intend to use external OCR with per-column splitting directly from the PDF,
-        # skip rasterization. If 'after_rasterize' is requested, we still rasterize here.
-        if config.column_split_ocr and not getattr(config, "column_split_after_rasterize", False) and decision.use_external_ocr and decision.per_page_ocr:
-            LOGGER.info("Skipping rasterization to allow external per-column OCR (engine=%s)", decision.ocr_engine)
-        else:
-            try:
-                rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
-                rasterized_source = True
-                emit(25, "rasterize", "Rasterized PDF for OCR")
-                LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
-            except Exception as exc:
-                rasterize_error = str(exc)
-                LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
+        try:
+            rasterized_pdf_path = rasterize_pdf_to_temp(pdf_path, config.ocr_dpi)
+            rasterized_source = True
+            emit(25, "rasterize", "Rasterized PDF for OCR")
+            LOGGER.info("Rasterized low-quality text layer for Docling OCR.")
+        except Exception as exc:
+            rasterize_error = str(exc)
+            LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
     if rasterized_source:
         decision.per_page_ocr = False
         decision.per_page_reason = "Rasterized PDF for Docling OCR"
 
-    if config.column_detect_enable and ( (decision.ocr_used and (rasterized_source or not has_text_layer)) or config.column_split_ocr ):
+    if config.column_detect_enable and decision.ocr_used and (rasterized_source or not has_text_layer):
         try:
-            sample_images = render_pdf_pages_sample(
-                pdf_path,
-                config.column_detect_dpi,
-                config.column_detect_max_pages,
-            )
+            # Spread sampling across document to avoid false negatives on front-matter
+            total_pages = get_pdf_page_count(pdf_path)
+            sample_indices = select_column_sample_indices(total_pages, config.column_detect_max_pages)
+            if not sample_indices:
+                sample_indices = list(range(1, min(3, total_pages or 3) + 1))
+            LOGGER.info("Column layout sample pages: %s", sample_indices)
+
+            sample_images = render_pdf_pages_at_indices(pdf_path, config.column_detect_dpi, sample_indices)
             column_layout = detect_multicolumn_layout(sample_images, config)
+            # If not detected, retry at a higher DPI once
+            if not column_layout.detected and config.column_detect_dpi < 220:
+                hi_dpi = 300
+                hi_images = render_pdf_pages_at_indices(pdf_path, hi_dpi, sample_indices)
+                hi_layout = detect_multicolumn_layout(hi_images, config)
+                if hi_layout.detected:
+                    column_layout = hi_layout
+                    LOGGER.info("Column layout detection (hi-dpi %d): %s (%s)", hi_dpi, column_layout.detected, column_layout.reason)
             LOGGER.info(
                 "Column layout detection: %s (%s)",
                 column_layout.detected,
                 column_layout.reason,
             )
             emit(30, "layout", "Checked column layout")
-            if column_layout.detected:
-                if config.column_split_ocr:
-                    # Enforce per-column external OCR
-                    available_engines = detect_available_ocr_engines()
-                    if not decision.use_external_ocr:
-                        if config.prefer_ocr_engine in available_engines:
-                            decision.ocr_engine = config.prefer_ocr_engine
-                            decision.use_external_ocr = True
-                            decision.ocr_used = True
-                        elif config.fallback_ocr_engine in available_engines:
-                            decision.ocr_engine = config.fallback_ocr_engine
-                            decision.use_external_ocr = True
-                            decision.ocr_used = True
-                    decision.per_page_ocr = True
-                    decision.per_page_reason = "Columns detected; using per-column external OCR"
-                    LOGGER.info("Per-column OCR will be used due to column layout (engine=%s)", decision.ocr_engine)
-                elif decision.use_external_ocr and decision.per_page_ocr:
-                    # Without per-column OCR, Docling layout tends to be better
-                    decision.per_page_ocr = False
-                    decision.per_page_reason = "Columns detected; keep Docling layout"
-            else:
-                # If detection fails but per-column OCR is requested, try anyway with split heuristics.
-                if config.column_split_ocr:
-                    available_engines = detect_available_ocr_engines()
-                    if not decision.use_external_ocr:
-                        if config.prefer_ocr_engine in available_engines:
-                            decision.ocr_engine = config.prefer_ocr_engine
-                            decision.use_external_ocr = True
-                            decision.ocr_used = True
-                        elif config.fallback_ocr_engine in available_engines:
-                            decision.ocr_engine = config.fallback_ocr_engine
-                            decision.use_external_ocr = True
-                            decision.ocr_used = True
-                    decision.per_page_ocr = True
-                    decision.per_page_reason = "Column gutters not found; attempting heuristic per-column OCR"
-                    LOGGER.info("Per-column OCR will be attempted heuristically (no gutters detected)")
+            if column_layout.detected and decision.use_external_ocr and decision.per_page_ocr:
+                decision.per_page_ocr = False
+                decision.per_page_reason = "Columns detected; keep Docling layout"
         except Exception as exc:
             LOGGER.warning("Column layout detection failed: %s", exc)
 
     dict_ratio = "n/a" if quality.dictionary_hit_ratio is None else f"{quality.dictionary_hit_ratio:.2f}"
+    spell_ratio = "n/a" if quality.spellchecker_hit_ratio is None else f"{quality.spellchecker_hit_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
         quality.suspicious_token_ratio,
         dict_ratio,
+        spell_ratio,
     )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
@@ -2240,19 +2200,9 @@ def convert_pdf_with_docling(
     emit(70, "docling", "Docling conversion complete")
 
     ocr_stats: Dict[str, Any] = {}
-    try:
-        LOGGER.info(
-            "External OCR gate: used=%s external=%s per_page=%s rasterized=%s column_split=%s after_rasterize=%s",
-            decision.ocr_used,
-            decision.use_external_ocr,
-            decision.per_page_ocr,
-            rasterized_source,
-            config.column_split_ocr,
-            config.column_split_after_rasterize,
-        )
-    except Exception:
-        pass
-    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and (not rasterized_source or config.column_split_ocr or config.column_split_after_rasterize):
+    # Always allow external OCR if selected, even when the PDF was rasterized for Docling,
+    # so we can prefer column-aware ordering from Paddle/Tesseract when desired.
+    if decision.ocr_used and decision.use_external_ocr:
         try:
             ocr_pages, ocr_stats = run_external_ocr_pages(
                 pdf_path,
@@ -2269,8 +2219,6 @@ def convert_pdf_with_docling(
                     markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
         except Exception as exc:
             LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
-    elif decision.ocr_used and config.column_split_ocr and not decision.use_external_ocr:
-        LOGGER.info("Per-column OCR requested, but no external engine available; falling back to Docling OCR")
     if rasterized_source and rasterized_pdf_path:
         try:
             os.unlink(rasterized_pdf_path)
@@ -2297,10 +2245,9 @@ def convert_pdf_with_docling(
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
+        "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
-    if column_layout and config.column_split_ocr and decision.use_external_ocr and decision.per_page_ocr:
-        metadata["per_column_ocr"] = True
     # Attach spellchecker backend info if available
     if LAST_SPELLCHECKER_INFO:
         try:
@@ -2443,26 +2390,6 @@ def main() -> int:
     parser.add_argument("--enable-hunspell", action="store_true", help="Enable Hunspell dictionary support if available")
     parser.add_argument("--hunspell-aff", help="Path to Hunspell .aff file")
     parser.add_argument("--hunspell-dic", help="Path to Hunspell .dic file")
-    parser.add_argument(
-        "--prefer-per-column-ocr",
-        action="store_true",
-        help="If a multi-column layout is detected, force external OCR with per-column splitting",
-    )
-    parser.add_argument(
-        "--column-split-margin",
-        type=int,
-        help="Pixel margin to keep away from detected gutters when splitting columns",
-    )
-    parser.add_argument(
-        "--column-split-after-rasterize",
-        action="store_true",
-        help="Render pages to images and then run per-column OCR, ignoring the PDF text layer",
-    )
-    parser.add_argument(
-        "--external-ocr-only",
-        action="store_true",
-        help="Bypass Docling conversion; render pages to images and run external OCR (respects per-column flags)",
-    )
 
     # Parse only known args to allow --download-hunspell to work standalone
     args, _ = parser.parse_known_args()
@@ -2532,17 +2459,6 @@ def main() -> int:
         return 2
 
     if args.quality_only:
-        try:
-            LOGGER.info(
-                "Mode=quality-only | ocr=%s, prefer=%s, fallback=%s, column_split_ocr=%s, lang_hint=%s",
-                args.ocr,
-                DoclingProcessingConfig().prefer_ocr_engine,
-                DoclingProcessingConfig().fallback_ocr_engine,
-                False,
-                args.language_hint or "",
-            )
-        except Exception:
-            pass
         config = DoclingProcessingConfig(ocr_mode=args.ocr)
         if args.force_ocr_low_quality:
             config.force_ocr_on_low_quality_text = True
@@ -2605,33 +2521,7 @@ def main() -> int:
     if args.llm_cleanup_min_quality is not None:
         config.llm_correction_min_quality = args.llm_cleanup_min_quality
 
-    # Column OCR preferences
-    if args.prefer_per_column_ocr:
-        config.column_split_ocr = True
-    if args.column_split_margin is not None:
-        config.column_split_margin_px = max(0, int(args.column_split_margin))
-    if args.column_split_after_rasterize:
-        config.column_split_after_rasterize = True
-
     config.llm_correct = build_llm_cleanup_callback(config)
-
-    # Log a concise run configuration summary
-    try:
-        LOGGER.info(
-            "Mode=full | ocr=%s, prefer=%s, fallback=%s, force_low_q=%s, column_split_ocr=%s, split_margin=%spx, after_rasterize=%s, keep_img=%s, dict_correction=%s, lang_hint=%s",
-            config.ocr_mode,
-            config.prefer_ocr_engine,
-            config.fallback_ocr_engine,
-            config.force_ocr_on_low_quality_text,
-            config.column_split_ocr,
-            config.column_split_margin_px,
-            getattr(config, "column_split_after_rasterize", False),
-            not config.cleanup_remove_image_tags,
-            config.enable_dictionary_correction,
-            config.language_hint or "",
-        )
-    except Exception:
-        pass
 
     # Proactively build spellchecker once to record backend info; will be reused lazily later
     spell_langs = select_language_set(config.language_hint, args.pdf, config)
@@ -2654,124 +2544,6 @@ def main() -> int:
             LOGGER.info("Wrote spellchecker info to %s", args.spellchecker_info_out)
         except Exception as exc:
             LOGGER.warning("Failed to write spellchecker info file: %s", exc)
-
-    # External OCR only mode
-    if args.external_ocr_only:
-        try:
-            LOGGER.info("Mode=external-ocr-only | per_column=%s, after_rasterize=%s", config.column_split_ocr, config.column_split_after_rasterize)
-        except Exception:
-            pass
-        # Choose engine
-        engines = detect_available_ocr_engines()
-        engine = config.prefer_ocr_engine if config.prefer_ocr_engine in engines else (
-            config.fallback_ocr_engine if config.fallback_ocr_engine in engines else (engines[0] if engines else "tesseract")
-        )
-        languages = select_language_set(config.language_hint, args.pdf, config)
-        ocr_pages, ocr_stats = run_external_ocr_pages(
-            args.pdf,
-            engine,
-            languages,
-            config,
-        )
-        pages = ocr_pages
-        total_chars = sum(len(p.get("text", "")) for p in pages)
-        try:
-            LOGGER.info("External OCR produced %d pages, total_chars=%d (engine=%s)", len(pages), total_chars, engine)
-        except Exception:
-            pass
-        # Fallbacks: if empty text, retry with whole-page OCR and/or Tesseract
-        if total_chars == 0:
-            try:
-                LOGGER.warning("External OCR produced no text; retrying with whole-page OCR")
-                cfg2 = DoclingProcessingConfig(ocr_mode="force")
-                cfg2.ocr_dpi = config.ocr_dpi
-                cfg2.column_split_ocr = False
-                retry_engine = engine
-                if engine != "tesseract":
-                    retry_engine = "tesseract"
-                pages2, stats2 = run_external_ocr_pages(
-                    args.pdf,
-                    retry_engine,
-                    languages,
-                    cfg2,
-                )
-                t2 = sum(len(p.get("text", "")) for p in pages2)
-                LOGGER.info("Retry external OCR whole-page total_chars=%d (engine=%s)", t2, retry_engine)
-                if t2 > total_chars:
-                    pages, ocr_stats, total_chars, engine = pages2, stats2, t2, retry_engine
-            except Exception as exc:
-                LOGGER.warning("Retry OCR failed: %s", exc)
-
-        # Final fallback: use Docling OCR (ocrmac) so we never return empty
-        if total_chars == 0:
-            try:
-                LOGGER.warning("External OCR still empty; falling back to Docling OCR pipeline")
-                cfg3 = DoclingProcessingConfig(ocr_mode="force")
-                cfg3.force_ocr_on_low_quality_text = True
-                result = convert_pdf_with_docling(args.pdf, cfg3)
-                pages = result.pages
-                languages = result.metadata.get("languages", languages)
-                engine = result.metadata.get("ocr_engine", "docling")
-                total_chars = sum(len(str(p.get("text", ""))) for p in pages)
-                LOGGER.info("Docling OCR fallback produced %d pages, total_chars=%d", len(pages), total_chars)
-            except Exception as exc:
-                LOGGER.warning("Docling OCR fallback failed: %s", exc)
-        markdown = "\n\n".join(p.get("text", "") for p in pages)
-        payload = {
-            "doc_id": args.doc_id or "doc",
-            "source_pdf": args.pdf,
-            "chunks": build_chunks_page(args.doc_id or "doc", pages, config=config),
-            "metadata": {
-                "ocr_used": True,
-                "ocr_engine": engine,
-                "languages": languages,
-                "per_column_ocr": bool(config.column_split_ocr),
-                **ocr_stats,
-            },
-        }
-        # Optional post-correction (spellchecker/dictionary/umlauts)
-        try:
-            post_pages = []
-            if config.enable_post_correction:
-                wordlist = prepare_dictionary_words(config)
-                for p in pages:
-                    txt = str(p.get("text", ""))
-                    if not txt:
-                        post_pages.append(p)
-                        continue
-                    fixed = postprocess_text(txt, config, languages, wordlist)
-                    post_pages.append({"page_num": p.get("page_num", 0), "text": fixed})
-                pages = post_pages
-                total_chars = sum(len(p.get("text", "")) for p in pages)
-                LOGGER.info("Post-correction applied; total_chars now %d", total_chars)
-        except Exception as exc:
-            LOGGER.warning("Post-correction failed: %s", exc)
-
-        # Build markdown and chunks
-        markdown = "\n\n".join(p.get("text", "") for p in pages)
-        postprocess_fn: Optional[Callable[[str], str]] = None
-        if config.enable_post_correction:
-            wordlist = prepare_dictionary_words(config)
-            postprocess_fn = lambda text: postprocess_text(text, config, languages, wordlist)
-
-        chunks = build_chunks_page(args.doc_id or "doc", pages, config=config, postprocess=postprocess_fn)
-
-        # Write outputs if requested
-        try:
-            if args.out_md:
-                with open(args.out_md, "w", encoding="utf-8") as handle:
-                    handle.write(markdown)
-        except Exception as exc:
-            eprint(f"Failed to write markdown: {exc}")
-            return 2
-        try:
-            if args.out_json:
-                with open(args.out_json, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, indent=2)
-        except Exception as exc:
-            eprint(f"Failed to write JSON: {exc}")
-            return 2
-        return 0
 
     progress_cb = make_progress_emitter(bool(args.progress))
 

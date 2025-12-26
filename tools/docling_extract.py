@@ -29,6 +29,7 @@ LOGGER = logging.getLogger("docling_extract")
 # Stores details about the last spellchecker built (backend and dictionary files)
 # Example: {"backend": "spylls", "aff": "/path/en_GB.aff", "dic": "/path/en_GB.dic"}
 LAST_SPELLCHECKER_INFO: Dict[str, Any] = {}
+SPELLCHECKER_CACHE: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
@@ -141,6 +142,7 @@ class TextQuality:
     suspicious_token_ratio: float
     confidence_proxy: float
     dictionary_hit_ratio: Optional[float] = None
+    spellchecker_hit_ratio: Optional[float] = None
 
 @dataclass
 class ColumnLayoutDetection:
@@ -304,6 +306,34 @@ def compute_dictionary_hit_ratio(
     return hits / total
 
 
+def compute_spellchecker_hit_ratio(
+    tokens: Sequence[str],
+    languages: str,
+    config: Optional[DoclingProcessingConfig],
+) -> Optional[float]:
+    if not config or not config.enable_hunspell or not languages:
+        return None
+    hs = build_spellchecker_for_languages(config, languages)
+    if hs is None:
+        return None
+    hits = 0
+    total = 0
+    for token in tokens:
+        if len(token) < 2:
+            continue
+        if not any(char.isalpha() for char in token):
+            continue
+        total += 1
+        try:
+            if hs.spell(token):
+                hits += 1
+        except Exception:
+            continue
+    if not total:
+        return None
+    return hits / total
+
+
 def estimate_text_quality(
     pages: Sequence[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
@@ -327,17 +357,27 @@ def estimate_text_quality(
 
     avg_chars = total_chars / max(1, len(pages))
     dictionary_hit_ratio = None
+    spellchecker_hit_ratio = None
     if config and config.quality_use_wordfreq and languages:
         dictionary_hit_ratio = compute_dictionary_hit_ratio(
             tokens,
             languages,
             config.quality_wordfreq_min_zipf,
         )
+    if config and languages:
+        spellchecker_hit_ratio = compute_spellchecker_hit_ratio(tokens, languages, config)
+    lexicon_ratio = None
+    if dictionary_hit_ratio is not None and spellchecker_hit_ratio is not None:
+        lexicon_ratio = max(dictionary_hit_ratio, spellchecker_hit_ratio)
+    elif dictionary_hit_ratio is not None:
+        lexicon_ratio = dictionary_hit_ratio
+    elif spellchecker_hit_ratio is not None:
+        lexicon_ratio = spellchecker_hit_ratio
     confidence = alpha_ratio * (1.0 - suspicious_ratio)
-    if dictionary_hit_ratio is not None:
-        confidence *= 0.4 + (0.6 * dictionary_hit_ratio)
+    if lexicon_ratio is not None:
+        confidence *= 0.4 + (0.6 * lexicon_ratio)
     confidence = max(0.0, min(1.0, confidence))
-    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, dictionary_hit_ratio)
+    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, lexicon_ratio, spellchecker_hit_ratio)
 
 
 def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: DoclingProcessingConfig) -> bool:
@@ -574,6 +614,9 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
     """
     if not config.enable_hunspell:
         return None
+    cache_key = f"{languages}|{config.hunspell_aff_path or ''}|{config.hunspell_dic_path or ''}"
+    if cache_key in SPELLCHECKER_CACHE:
+        return SPELLCHECKER_CACHE[cache_key]
 
     # Resolve aff/dic paths (explicit or auto in tools/hunspell)
     def resolve_paths() -> List[Tuple[str, str]]:
@@ -704,6 +747,7 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
                     })
                 except Exception:
                     pass
+                SPELLCHECKER_CACHE[cache_key] = hs
                 return hs
             except Exception:
                 continue
@@ -790,7 +834,9 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
                     })
                 except Exception:
                     pass
-                return SpyllsWrapper(d)
+                wrapper = SpyllsWrapper(d)
+                SPELLCHECKER_CACHE[cache_key] = wrapper
+                return wrapper
             except Exception:
                 continue
     except Exception:
@@ -856,6 +902,7 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         for dic_path in dic_paths:
             wrapper = load_naive_dic(dic_path)
             if wrapper is not None:
+                SPELLCHECKER_CACHE[cache_key] = wrapper
                 return wrapper
     except Exception:
         pass
@@ -2042,6 +2089,7 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
+        "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
     }
 
 
@@ -2113,13 +2161,15 @@ def convert_pdf_with_docling(
             LOGGER.warning("Column layout detection failed: %s", exc)
 
     dict_ratio = "n/a" if quality.dictionary_hit_ratio is None else f"{quality.dictionary_hit_ratio:.2f}"
+    spell_ratio = "n/a" if quality.spellchecker_hit_ratio is None else f"{quality.spellchecker_hit_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
         quality.suspicious_token_ratio,
         dict_ratio,
+        spell_ratio,
     )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
@@ -2195,6 +2245,7 @@ def convert_pdf_with_docling(
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
+        "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
     # Attach spellchecker backend info if available
