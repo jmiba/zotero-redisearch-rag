@@ -252,6 +252,27 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Create OCR-layered PDF copy")
+      .setDesc(
+        "When OCR is used, replace the vault PDF with a Tesseract text layer (requires Copy PDFs into vault)."
+      )
+      .addToggle((toggle) => {
+        const enabled = this.plugin.settings.copyPdfToVault;
+        toggle
+          .setValue(enabled ? this.plugin.settings.createOcrLayeredPdf : false)
+          .setDisabled(!enabled)
+          .onChange(async (value) => {
+            if (!this.plugin.settings.copyPdfToVault) {
+              this.plugin.settings.createOcrLayeredPdf = false;
+              await this.plugin.saveSettings();
+              return;
+            }
+            this.plugin.settings.createOcrLayeredPdf = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Frontmatter template")
       .setDesc(
         "Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}, {{item_json}}"
@@ -585,27 +606,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
-
-    new Setting(containerEl)
-      .setName("Create OCR-layered PDF copy")
-      .setDesc(
-        "When OCR is used, replace the vault PDF with a Tesseract text layer (requires Copy PDFs into vault)."
-      )
-      .addToggle((toggle) => {
-        const enabled = this.plugin.settings.copyPdfToVault;
-        toggle
-          .setValue(enabled ? this.plugin.settings.createOcrLayeredPdf : false)
-          .setDisabled(!enabled)
-          .onChange(async (value) => {
-            if (!this.plugin.settings.copyPdfToVault) {
-              this.plugin.settings.createOcrLayeredPdf = false;
-              await this.plugin.saveSettings();
-              return;
-            }
-            this.plugin.settings.createOcrLayeredPdf = value;
-            await this.plugin.saveSettings();
-          });
-      });
 
     containerEl.createEl("h4", { text: "OCR cleanup (optional)" });
 
