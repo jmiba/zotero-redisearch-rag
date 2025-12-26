@@ -49,6 +49,9 @@ export interface ZoteroRagSettings {
   llmCleanupMaxChars: number;
   enableFileLogging: boolean;
   logFilePath: string;
+  createOcrLayeredPdf: boolean;
+  ocrLayeredPdfSuffix: string;
+  preferVaultPdfForCitations: boolean;
 }
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
@@ -101,6 +104,9 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   llmCleanupMaxChars: 2000,
   enableFileLogging: false,
   logFilePath: `${CACHE_ROOT}/logs/docling_extract.log`,
+  createOcrLayeredPdf: false,
+  ocrLayeredPdfSuffix: "-ocr",
+  preferVaultPdfForCitations: false,
 };
 
 export class ZoteroRagSettingTab extends PluginSettingTab {
@@ -308,6 +314,16 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.chatOutputDir = value.trim() || "zotero/chats";
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Prefer vault PDF for citations")
+      .setDesc("Use vault PDFs for citation links when available instead of Zotero deep links.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.preferVaultPdfForCitations).onChange(async (value) => {
+          this.plugin.settings.preferVaultPdfForCitations = value;
+          await this.plugin.saveSettings();
+        })
       );
 
     containerEl.createEl("h3", { text: "Redis Stack" });
@@ -566,6 +582,31 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.removeImagePlaceholders = value;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Create OCR-layered PDF copy")
+      .setDesc(
+        "When OCR is used, generate a new PDF with a text layer (Tesseract) in the PDF folder and link notes to it."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.createOcrLayeredPdf).onChange(async (value) => {
+          this.plugin.settings.createOcrLayeredPdf = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("OCR PDF suffix")
+      .setDesc("Suffix appended to OCR-layered PDF filenames.")
+      .addText((text) =>
+        text
+          .setPlaceholder("-ocr")
+          .setValue(this.plugin.settings.ocrLayeredPdfSuffix)
+          .onChange(async (value) => {
+            this.plugin.settings.ocrLayeredPdfSuffix = value.trim() || "-ocr";
+            await this.plugin.saveSettings();
+          })
       );
 
     containerEl.createEl("h4", { text: "OCR cleanup (optional)" });

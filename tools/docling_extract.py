@@ -415,7 +415,7 @@ def estimate_text_quality(
         alpha_ratio,
         suspicious_ratio,
         confidence,
-        lexicon_ratio,
+        dictionary_hit_ratio,
         spellchecker_hit_ratio,
         image_heavy_ratio,
     )
@@ -614,7 +614,8 @@ def detect_available_ocr_engines() -> List[str]:
     try:
         import pytesseract  # noqa: F401
         from pdf2image import convert_from_path  # noqa: F401
-        available.append("tesseract")
+        if find_tesseract_path():
+            available.append("tesseract")
     except Exception:
         pass
     return available
@@ -1653,6 +1654,20 @@ def find_poppler_path() -> Optional[str]:
 
 
 POPPLER_LOGGED_ONCE = False
+TESSERACT_LOGGED_ONCE = False
+
+
+def find_tesseract_path() -> Optional[str]:
+    env_cmd = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
+    if env_cmd and os.path.isfile(env_cmd):
+        return env_cmd
+    tesseract_cmd = shutil.which("tesseract")
+    if tesseract_cmd:
+        return tesseract_cmd
+    for candidate in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
@@ -2086,6 +2101,15 @@ def ocr_pages_with_tesseract(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     import pytesseract
+    tesseract_cmd = find_tesseract_path()
+    if tesseract_cmd:
+        global TESSERACT_LOGGED_ONCE
+        if shutil.which("tesseract") is None and not TESSERACT_LOGGED_ONCE:
+            LOGGER.info("Tesseract not on PATH; using %s", tesseract_cmd)
+            TESSERACT_LOGGED_ONCE = True
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    else:
+        raise RuntimeError("Tesseract not found on PATH; set TESSERACT_CMD or install tesseract.")
 
     pages: List[Dict[str, Any]] = []
     total = max(1, len(images))

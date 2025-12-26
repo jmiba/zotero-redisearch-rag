@@ -430,7 +430,7 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.ensureFolder(ITEM_CACHE_DIR);
       await this.ensureFolder(CHUNK_CACHE_DIR);
       await this.ensureFolder(this.settings.outputNoteDir);
-      if (this.settings.copyPdfToVault) {
+      if (this.settings.copyPdfToVault || this.settings.createOcrLayeredPdf) {
         await this.ensureFolder(this.settings.outputPdfDir);
       }
       if (this.settings.enableFileLogging) {
@@ -493,6 +493,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
     let qualityLabel: string | null = null;
+    let layeredPdfPath: string | null = null;
 
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath, doclingLanguageHint);
@@ -512,6 +513,19 @@ export default class ZoteroRagPlugin extends Plugin {
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
       await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachment.key);
+
+      const metadata = await this.readDoclingMetadata(chunkPath);
+      const layeredPath = await this.maybeCreateOcrLayeredPdf(
+        pdfSourcePath,
+        finalBaseName,
+        metadata,
+        doclingLanguageHint
+      );
+      if (layeredPath) {
+        pdfSourcePath = layeredPath;
+        pdfLink = this.buildPdfLinkFromSourcePath(layeredPath);
+        await this.updateChunkJsonSourcePdf(chunkPath, layeredPath);
+      }
     } catch (error) {
       new Notice("Docling extraction failed. See console for details.");
       console.error(error);
@@ -1131,9 +1145,12 @@ export default class ZoteroRagPlugin extends Plugin {
     const pdfPath = entry?.pdf_path || citation.source_pdf || "";
     const attachmentKey = citation.attachment_key || entry?.attachment_key;
     const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
-    const zoteroUrl = citation.doc_id
+    let zoteroUrl = citation.doc_id
       ? this.buildZoteroDeepLink(citation.doc_id, attachmentKey, pageStart, annotationKey)
       : undefined;
+    if (this.settings.preferVaultPdfForCitations && pdfPath && this.toVaultRelativePath(pdfPath)) {
+      zoteroUrl = undefined;
+    }
     return {
       noteTitle,
       pageLabel,
@@ -1241,8 +1258,13 @@ export default class ZoteroRagPlugin extends Plugin {
       }
 
       const display = await this.resolveCitationDisplay(citation);
-      if (display.zoteroUrl) {
-        const label = `${display.noteTitle} p. ${display.pageLabel}`;
+      const label = `${display.noteTitle} p. ${display.pageLabel}`;
+      const vaultLink = this.settings.preferVaultPdfForCitations
+        ? this.buildVaultPdfCitationLink(display.pdfPath || "", display.pageStart, label)
+        : "";
+      if (vaultLink) {
+        replacements.set(token, vaultLink);
+      } else if (display.zoteroUrl) {
         replacements.set(token, `[${label}](${display.zoteroUrl})`);
       } else {
         const fallbackLabel = display.pageLabel
@@ -1755,6 +1777,20 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     } catch (error) {
       console.warn("Failed to read Docling quality metadata", error);
+    }
+    return null;
+  }
+
+  private async readDoclingMetadata(chunkPath: string): Promise<Record<string, any> | null> {
+    try {
+      const content = await this.app.vault.adapter.read(chunkPath);
+      const payload = JSON.parse(content);
+      const metadata = payload?.metadata;
+      if (metadata && typeof metadata === "object") {
+        return metadata;
+      }
+    } catch (error) {
+      console.warn("Failed to read Docling metadata", error);
     }
     return null;
   }
@@ -2502,6 +2538,23 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async updateChunkJsonSourcePdf(chunkPath: string, sourcePdf: string): Promise<void> {
+    if (!sourcePdf) {
+      return;
+    }
+    try {
+      const raw = await this.app.vault.adapter.read(chunkPath);
+      const payload = JSON.parse(raw);
+      if (!payload || typeof payload !== "object") {
+        return;
+      }
+      payload.source_pdf = sourcePdf;
+      await this.app.vault.adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+    } catch (error) {
+      console.warn("Failed to update chunks JSON source_pdf", error);
+    }
+  }
+
   public buildPdfLinkFromSourcePath(sourcePdf: string): string {
     if (!sourcePdf) {
       return "";
@@ -2538,6 +2591,85 @@ export default class ZoteroRagPlugin extends Plugin {
       return `[PDF](${zoteroLink})`;
     }
     return this.buildPdfLinkFromSourcePath(sourcePdf);
+  }
+
+  private buildVaultPdfCitationLink(
+    sourcePdf: string,
+    pageStart?: string,
+    label?: string
+  ): string {
+    if (!sourcePdf) {
+      return "";
+    }
+    const relative = this.toVaultRelativePath(sourcePdf);
+    if (!relative) {
+      return "";
+    }
+    const pageSuffix = pageStart ? `#page=${pageStart}` : "";
+    const safeLabel = label || relative;
+    return `[[${relative}${pageSuffix}|${safeLabel}]]`;
+  }
+
+  private getOcrLayeredPdfPath(baseName: string): string {
+    const suffix = (this.settings.ocrLayeredPdfSuffix || "-ocr").trim() || "-ocr";
+    return normalizePath(`${this.settings.outputPdfDir}/${baseName}${suffix}.pdf`);
+  }
+
+  private async maybeCreateOcrLayeredPdf(
+    sourcePdfPath: string,
+    baseName: string,
+    metadata: Record<string, any> | null,
+    languageHint?: string | null
+  ): Promise<string | null> {
+    if (!this.settings.createOcrLayeredPdf) {
+      return null;
+    }
+    if (!sourcePdfPath) {
+      return null;
+    }
+    const ocrUsed = metadata?.ocr_used === true;
+    if (!ocrUsed) {
+      return null;
+    }
+    try {
+      await this.ensureFolder(this.settings.outputPdfDir);
+    } catch (error) {
+      console.warn("Failed to create OCR PDF output folder", error);
+      return null;
+    }
+
+    const outputRel = this.getOcrLayeredPdfPath(baseName);
+    const outputAbs = this.getAbsoluteVaultPath(outputRel);
+    const language = (languageHint || metadata?.languages || "eng").toString();
+    const pluginDir = this.getPluginDir();
+    const script = path.join(pluginDir, "tools", "ocr_layered_pdf.py");
+
+    try {
+      this.showStatusProgress("Creating OCR PDF...", 0);
+      await this.runPythonStreaming(
+        script,
+        [
+          "--pdf",
+          sourcePdfPath,
+          "--out-pdf",
+          outputAbs,
+          "--language",
+          language,
+          "--progress",
+        ],
+        (payload) => {
+          if (payload?.type === "progress" && payload.total) {
+            const percent = Math.round((payload.current / payload.total) * 100);
+            this.showStatusProgress(`Creating OCR PDF ${payload.current}/${payload.total}`, percent);
+          }
+        },
+        () => undefined
+      );
+      return outputAbs;
+    } catch (error) {
+      console.warn("OCR layered PDF creation failed", error);
+      return null;
+    }
   }
 
   private getMainLeaf(): WorkspaceLeaf {
@@ -2670,6 +2802,13 @@ export default class ZoteroRagPlugin extends Plugin {
       : this.sanitizeFileName(noteTitle) || noteTitle;
     const noteLink =
       noteTarget && noteTarget !== noteTitle ? `[[${noteTarget}|${noteTitle}]]` : `[[${noteTitle}]]`;
+    if (this.settings.preferVaultPdfForCitations) {
+      const pdfPath = entry?.pdf_path || citation.source_pdf || "";
+      const vaultLink = this.buildVaultPdfCitationLink(pdfPath, pageStart, pageLabel);
+      if (vaultLink) {
+        return `- ${noteLink}, p. ${vaultLink}`;
+      }
+    }
     if (attachmentKey) {
       const zoteroUrl = this.buildZoteroDeepLink(docId, attachmentKey, pageStart, annotationKey);
       return `- ${noteLink}, p. [${pageLabel}](${zoteroUrl})`;
@@ -2911,7 +3050,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
 
-    const sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
+    let sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
     if (!sourcePdf) {
       if (showNotices) {
         new Notice("Cached chunk JSON is missing source_pdf.");
@@ -2956,6 +3095,9 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       await this.ensureFolder(this.settings.outputNoteDir);
+      if (this.settings.copyPdfToVault || this.settings.createOcrLayeredPdf) {
+        await this.ensureFolder(this.settings.outputPdfDir);
+      }
       if (this.settings.enableFileLogging) {
         const logRel = this.getLogFileRelativePath();
         const logDir = normalizePath(path.dirname(logRel));
@@ -2981,6 +3123,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
     let qualityLabel: string | null = null;
+    let layeredPdfPath: string | null = null;
 
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf, doclingLanguageHint);
@@ -3001,6 +3144,19 @@ export default class ZoteroRagPlugin extends Plugin {
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
       if (attachmentKey) {
         await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachmentKey);
+      }
+
+      const metadata = await this.readDoclingMetadata(chunkPath);
+      const layeredPath = await this.maybeCreateOcrLayeredPdf(
+        sourcePdf,
+        path.basename(notePath, ".md"),
+        metadata,
+        doclingLanguageHint
+      );
+      if (layeredPath) {
+        sourcePdf = layeredPath;
+        layeredPdfPath = layeredPath;
+        await this.updateChunkJsonSourcePdf(chunkPath, layeredPath);
       }
     } catch (error) {
       if (showNotices) {
@@ -3054,7 +3210,9 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
 
-    const pdfLink = this.buildPdfLinkForNote(sourcePdf, existingEntry?.attachment_key, docId);
+    const pdfLink = layeredPdfPath
+      ? this.buildPdfLinkFromSourcePath(layeredPdfPath)
+      : this.buildPdfLinkForNote(sourcePdf, existingEntry?.attachment_key, docId);
 
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);

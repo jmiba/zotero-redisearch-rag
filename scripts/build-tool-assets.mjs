@@ -4,6 +4,7 @@ import { join } from "path";
 const tools = [
   { name: "docling_extract.py", path: "tools/docling_extract.py" },
   { name: "index_redisearch.py", path: "tools/index_redisearch.py" },
+  { name: "ocr_layered_pdf.py", path: "tools/ocr_layered_pdf.py" },
   { name: "rag_query_redisearch.py", path: "tools/rag_query_redisearch.py" },
   { name: "batch_index_pyzotero.py", path: "tools/batch_index_pyzotero.py" },
   { name: "utils_embedding.py", path: "tools/utils_embedding.py" }, // <-- Add this line
