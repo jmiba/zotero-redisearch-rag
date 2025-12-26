@@ -1561,6 +1561,53 @@ def render_pdf_pages_sample(pdf_path: str, dpi: int, max_pages: int) -> List[Any
     return convert_from_path(pdf_path, **kwargs)
 
 
+def get_pdf_page_count(pdf_path: str) -> int:
+    """Return total number of pages using pypdf (fast and light)."""
+    try:
+        from pypdf import PdfReader  # type: ignore
+        reader = PdfReader(pdf_path)
+        return int(len(reader.pages))
+    except Exception:
+        return 0
+
+
+def select_column_sample_indices(total_pages: int, max_pages: int) -> List[int]:
+    """Pick up to max_pages page indices spread across the document (1-based)."""
+    if total_pages <= 0:
+        return []
+    k = max(1, max_pages)
+    k = min(k, total_pages)
+    if k == 1:
+        return [max(1, (total_pages + 1) // 2)]
+    if k == 2:
+        return [1, total_pages]
+    # Spread evenly including first and last
+    step = (total_pages - 1) / (k - 1)
+    return [int(round(1 + i * step)) for i in range(k)]
+
+
+def render_pdf_pages_at_indices(pdf_path: str, dpi: int, indices: Sequence[int]) -> List[Any]:
+    """Render specific 1-based page indices to images. May call pdf2image multiple times."""
+    from pdf2image import convert_from_path
+    images: List[Any] = []
+    if not indices:
+        return images
+    poppler_path = find_poppler_path()
+    for idx in indices:
+        kwargs = {"dpi": dpi, "first_page": int(idx), "last_page": int(idx)}
+        if poppler_path:
+            if shutil.which("pdftoppm") is None:
+                LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+            kwargs["poppler_path"] = poppler_path
+        try:
+            imgs = convert_from_path(pdf_path, **kwargs)
+            if imgs:
+                images.append(imgs[0])
+        except Exception:
+            continue
+    return images
+
+
 def compute_column_density(
     image: Any,
     config: DoclingProcessingConfig,
@@ -1603,12 +1650,49 @@ def compute_column_density(
     arr = np.asarray(gray)
     if arr.size == 0:
         return []
+    # Build a robust binarization threshold: combine median-std rule with Otsu
     median = float(np.median(arr))
     std = float(arr.std())
-    threshold = median - (std * config.column_detect_threshold_std_mult)
-    threshold = min(threshold, config.column_detect_threshold_max)
-    threshold = max(threshold, config.column_detect_threshold_min)
+    thr_a = median - (std * config.column_detect_threshold_std_mult)
+    thr_a = min(thr_a, float(config.column_detect_threshold_max))
+    thr_a = max(thr_a, float(config.column_detect_threshold_min))
+
+    # Otsu threshold (fast implementation without external deps)
+    try:
+        hist, _ = np.histogram(arr, bins=256, range=(0, 255))
+        hist = hist.astype(np.float64)
+        total = hist.sum()
+        if total > 0:
+            prob = hist / total
+            omega = np.cumsum(prob)
+            mu = np.cumsum(prob * np.arange(256))
+            mu_t = mu[-1]
+            sigma_b2 = (mu_t * omega - mu) ** 2 / np.maximum(omega * (1.0 - omega), 1e-9)
+            k = int(np.nanargmax(sigma_b2))
+            thr_b = float(k)
+        else:
+            thr_b = thr_a
+    except Exception:
+        thr_b = thr_a
+
+    threshold = 0.5 * (thr_a + thr_b)
     mask = arr < threshold
+
+    # Focus on the vertical band with the most text-like pixels to avoid full-width pictures at top
+    h = mask.shape[0]
+    band_h = max(1, int(h * 0.6))  # use central 60% by default (adaptive below)
+    if band_h < h:
+        step = max(1, int(h * 0.04))
+        best_y = 0
+        best_score = -1.0
+        # Slide a window to find the densest text band
+        for y in range(0, h - band_h + 1, step):
+            score = mask[y : y + band_h, :].mean()
+            if score > best_score:
+                best_score = score
+                best_y = y
+        mask = mask[best_y : best_y + band_h, :]
+
     return mask.mean(axis=0).tolist()
 
 
@@ -1723,23 +1807,143 @@ def ocr_pages_with_paddle(
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
+    def _bbox_from_quad(quad: Sequence[Sequence[float]]) -> Tuple[float, float, float, float, float]:
+        xs = [p[0] for p in quad]
+        ys = [p[1] for p in quad]
+        x0, y0, x1, y1 = float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))
+        xc = 0.5 * (x0 + x1)
+        return x0, y0, x1, y1, xc
+
+    def _order_blocks_into_columns(blocks: List[Dict[str, Any]]) -> str:
+        if not blocks:
+            return ""
+        # Robust grouping by x-center: find one or two big gaps -> 2 or 3 columns
+        xs = sorted(b["xc"] for b in blocks)
+        x_min, x_max = xs[0], xs[-1]
+        span = max(1.0, x_max - x_min)
+        widths = sorted((b["x1"] - b["x0"]) for b in blocks)
+        w_med = widths[len(widths)//2] if widths else 1.0
+        # Lower threshold than before: helps separate three narrow columns
+        gap_thr = max(0.06 * span, 0.5 * w_med)
+
+        # Compute gaps between consecutive x-centers
+        diffs: List[Tuple[float, int]] = []
+        for i in range(1, len(xs)):
+            diffs.append((xs[i] - xs[i-1], i))  # (gap, split_index)
+        # Candidate split positions are those with large gaps
+        candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
+
+        # Build columns by splitting at up to two largest valid gaps ensuring min size per group
+        min_lines = max(3, len(blocks) // 20 or 1)
+        columns: List[List[Dict[str, Any]]] = []
+        blocks_sorted = sorted(blocks, key=lambda b: b["xc"])  # align with xs order
+        used_splits: List[int] = []
+        if candidates:
+            # Prefer two-gap (3-column) split if possible
+            cands_sorted = sorted(((xs[i-1], xs[i], i) for i in candidates), key=lambda t: t[1]-t[0], reverse=True)
+            # Try all pairs of split indices to form 3 groups
+            tried = False
+            for _a in range(min(5, len(cands_sorted))):
+                for _b in range(_a+1, min(6, len(cands_sorted))):
+                    i1 = cands_sorted[_a][2]
+                    i2 = cands_sorted[_b][2]
+                    a, b = sorted([i1, i2])
+                    if a < min_lines or (b - a) < min_lines or (len(blocks) - b) < min_lines:
+                        continue
+                    used_splits = [a, b]
+                    tried = True
+                    break
+                if tried:
+                    break
+            if not used_splits:
+                # Fall back to single split (2 columns)
+                # pick the largest valid gap that yields two groups of minimum size
+                for _, _, i in cands_sorted:
+                    if i >= min_lines and (len(blocks) - i) >= min_lines:
+                        used_splits = [i]
+                        break
+
+        if used_splits:
+            used_splits = sorted(set(used_splits))
+            start = 0
+            for s in used_splits:
+                columns.append(blocks_sorted[start:s])
+                start = s
+            columns.append(blocks_sorted[start:])
+        else:
+            # Fallback threshold grouping
+            cur: List[Dict[str, Any]] = []
+            prev_xc: Optional[float] = None
+            for b in blocks_sorted:
+                if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
+                    cur.append(b)
+                else:
+                    if cur:
+                        columns.append(cur)
+                    cur = [b]
+                prev_xc = b["xc"]
+            if cur:
+                columns.append(cur)
+
+        # Sort columns left-to-right by median x center
+        def col_key(col: List[Dict[str, Any]]) -> float:
+            centers = sorted(b["xc"] for b in col)
+            return centers[len(centers)//2]
+        columns = [col for col in columns if col]
+        columns.sort(key=col_key)
+        try:
+            LOGGER.info("Paddle column grouping: k=%d (gap_thr=%.2f, span=%.1f)", len(columns), gap_thr, span)
+        except Exception:
+            pass
+        # Within each column, sort top-down and join
+        col_texts: List[str] = []
+        for col in columns:
+            col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
+            col_texts.append("\n".join(b["text"] for b in col_sorted if b["text"]))
+        # Read columns left to right
+        return "\n\n".join(t for t in col_texts if t)
+
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
-        result = ocr.ocr(np.array(image), cls=True)
-        lines: List[str] = []
+        # Some PaddleOCR versions don't accept 'cls' kwarg; try with cls then without.
+        try:
+            result = ocr.ocr(np.array(image), cls=True)
+        except TypeError as _e:
+            result = ocr.ocr(np.array(image))
+        except Exception as _e:
+            # Fallback if signature mismatch occurs in predict() implementation
+            if "unexpected keyword argument 'cls'" in str(_e):
+                result = ocr.ocr(np.array(image))
+            else:
+                raise
+        blocks: List[Dict[str, Any]] = []
         if result:
-            for entry in result[0] if isinstance(result, list) else result:
-                if not entry:
+            entries = result[0] if isinstance(result, list) else result
+            for entry in entries:
+                if not entry or not isinstance(entry, (list, tuple)):
                     continue
-                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
-                    text_part = entry[1]
-                    if isinstance(text_part, (list, tuple)) and text_part:
-                        lines.append(str(text_part[0]))
-                        if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
-                            confidences.append(float(text_part[1]))
-                    else:
-                        lines.append(str(text_part))
-        pages.append({"page_num": idx, "text": "\n".join(lines)})
+                quad = entry[0] if len(entry) > 0 else None
+                text_part = entry[1] if len(entry) > 1 else None
+                if quad is None or text_part is None:
+                    continue
+                try:
+                    x0, y0, x1, y1, xc = _bbox_from_quad(quad)
+                except Exception:
+                    continue
+                text_val = ""
+                conf_val = None
+                if isinstance(text_part, (list, tuple)) and text_part:
+                    text_val = str(text_part[0] or "").strip()
+                    if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
+                        conf_val = float(text_part[1])
+                else:
+                    text_val = str(text_part or "").strip()
+                if conf_val is not None:
+                    confidences.append(conf_val)
+                if text_val:
+                    blocks.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "xc": xc, "text": text_val})
+        ordered_text = _order_blocks_into_columns(blocks)
+        pages.append({"page_num": idx, "text": ordered_text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
             progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
@@ -1856,12 +2060,23 @@ def convert_pdf_with_docling(
 
     if config.column_detect_enable and decision.ocr_used and (rasterized_source or not has_text_layer):
         try:
-            sample_images = render_pdf_pages_sample(
-                pdf_path,
-                config.column_detect_dpi,
-                config.column_detect_max_pages,
-            )
+            # Spread sampling across document to avoid false negatives on front-matter
+            total_pages = get_pdf_page_count(pdf_path)
+            sample_indices = select_column_sample_indices(total_pages, config.column_detect_max_pages)
+            if not sample_indices:
+                sample_indices = list(range(1, min(3, total_pages or 3) + 1))
+            LOGGER.info("Column layout sample pages: %s", sample_indices)
+
+            sample_images = render_pdf_pages_at_indices(pdf_path, config.column_detect_dpi, sample_indices)
             column_layout = detect_multicolumn_layout(sample_images, config)
+            # If not detected, retry at a higher DPI once
+            if not column_layout.detected and config.column_detect_dpi < 220:
+                hi_dpi = 300
+                hi_images = render_pdf_pages_at_indices(pdf_path, hi_dpi, sample_indices)
+                hi_layout = detect_multicolumn_layout(hi_images, config)
+                if hi_layout.detected:
+                    column_layout = hi_layout
+                    LOGGER.info("Column layout detection (hi-dpi %d): %s (%s)", hi_dpi, column_layout.detected, column_layout.reason)
             LOGGER.info(
                 "Column layout detection: %s (%s)",
                 column_layout.detected,
@@ -1912,7 +2127,9 @@ def convert_pdf_with_docling(
     emit(70, "docling", "Docling conversion complete")
 
     ocr_stats: Dict[str, Any] = {}
-    if decision.ocr_used and decision.use_external_ocr and decision.per_page_ocr and not rasterized_source:
+    # Always allow external OCR if selected, even when the PDF was rasterized for Docling,
+    # so we can prefer column-aware ordering from Paddle/Tesseract when desired.
+    if decision.ocr_used and decision.use_external_ocr:
         try:
             ocr_pages, ocr_stats = run_external_ocr_pages(
                 pdf_path,
