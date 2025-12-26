@@ -430,7 +430,7 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.ensureFolder(ITEM_CACHE_DIR);
       await this.ensureFolder(CHUNK_CACHE_DIR);
       await this.ensureFolder(this.settings.outputNoteDir);
-      if (this.settings.copyPdfToVault || this.settings.createOcrLayeredPdf) {
+      if (this.settings.copyPdfToVault) {
         await this.ensureFolder(this.settings.outputPdfDir);
       }
       if (this.settings.enableFileLogging) {
@@ -493,7 +493,6 @@ export default class ZoteroRagPlugin extends Plugin {
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
     let qualityLabel: string | null = null;
-    let layeredPdfPath: string | null = null;
 
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath, doclingLanguageHint);
@@ -517,7 +516,6 @@ export default class ZoteroRagPlugin extends Plugin {
       const metadata = await this.readDoclingMetadata(chunkPath);
       const layeredPath = await this.maybeCreateOcrLayeredPdf(
         pdfSourcePath,
-        finalBaseName,
         metadata,
         doclingLanguageHint
       );
@@ -2610,18 +2608,15 @@ export default class ZoteroRagPlugin extends Plugin {
     return `[[${relative}${pageSuffix}|${safeLabel}]]`;
   }
 
-  private getOcrLayeredPdfPath(baseName: string): string {
-    const suffix = (this.settings.ocrLayeredPdfSuffix || "-ocr").trim() || "-ocr";
-    return normalizePath(`${this.settings.outputPdfDir}/${baseName}${suffix}.pdf`);
-  }
-
   private async maybeCreateOcrLayeredPdf(
     sourcePdfPath: string,
-    baseName: string,
     metadata: Record<string, any> | null,
     languageHint?: string | null
   ): Promise<string | null> {
     if (!this.settings.createOcrLayeredPdf) {
+      return null;
+    }
+    if (!this.settings.copyPdfToVault) {
       return null;
     }
     if (!sourcePdfPath) {
@@ -2631,6 +2626,10 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!ocrUsed) {
       return null;
     }
+    if (!this.toVaultRelativePath(sourcePdfPath)) {
+      console.warn("OCR layered PDF requires a vault-local PDF");
+      return null;
+    }
     try {
       await this.ensureFolder(this.settings.outputPdfDir);
     } catch (error) {
@@ -2638,8 +2637,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return null;
     }
 
-    const outputRel = this.getOcrLayeredPdfPath(baseName);
-    const outputAbs = this.getAbsoluteVaultPath(outputRel);
+    const outputAbs = `${sourcePdfPath}.ocr.tmp`;
     const language = (languageHint || metadata?.languages || "eng").toString();
     const pluginDir = this.getPluginDir();
     const script = path.join(pluginDir, "tools", "ocr_layered_pdf.py");
@@ -2665,7 +2663,8 @@ export default class ZoteroRagPlugin extends Plugin {
         },
         () => undefined
       );
-      return outputAbs;
+      await fs.rename(outputAbs, sourcePdfPath);
+      return sourcePdfPath;
     } catch (error) {
       console.warn("OCR layered PDF creation failed", error);
       return null;
@@ -3095,7 +3094,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       await this.ensureFolder(this.settings.outputNoteDir);
-      if (this.settings.copyPdfToVault || this.settings.createOcrLayeredPdf) {
+      if (this.settings.copyPdfToVault) {
         await this.ensureFolder(this.settings.outputPdfDir);
       }
       if (this.settings.enableFileLogging) {
@@ -3149,7 +3148,6 @@ export default class ZoteroRagPlugin extends Plugin {
       const metadata = await this.readDoclingMetadata(chunkPath);
       const layeredPath = await this.maybeCreateOcrLayeredPdf(
         sourcePdf,
-        path.basename(notePath, ".md"),
         metadata,
         doclingLanguageHint
       );

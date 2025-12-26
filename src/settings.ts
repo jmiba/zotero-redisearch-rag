@@ -50,7 +50,6 @@ export interface ZoteroRagSettings {
   enableFileLogging: boolean;
   logFilePath: string;
   createOcrLayeredPdf: boolean;
-  ocrLayeredPdfSuffix: string;
   preferVaultPdfForCitations: boolean;
 }
 
@@ -105,7 +104,6 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   enableFileLogging: false,
   logFilePath: `${CACHE_ROOT}/logs/docling_extract.log`,
   createOcrLayeredPdf: false,
-  ocrLayeredPdfSuffix: "-ocr",
   preferVaultPdfForCitations: false,
 };
 
@@ -245,7 +243,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.copyPdfToVault).onChange(async (value) => {
           this.plugin.settings.copyPdfToVault = value;
+          if (!value && this.plugin.settings.createOcrLayeredPdf) {
+            this.plugin.settings.createOcrLayeredPdf = false;
+          }
           await this.plugin.saveSettings();
+          this.display();
         })
       );
 
@@ -587,27 +589,23 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Create OCR-layered PDF copy")
       .setDesc(
-        "When OCR is used, generate a new PDF with a text layer (Tesseract) in the PDF folder and link notes to it."
+        "When OCR is used, replace the vault PDF with a Tesseract text layer (requires Copy PDFs into vault)."
       )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.createOcrLayeredPdf).onChange(async (value) => {
-          this.plugin.settings.createOcrLayeredPdf = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("OCR PDF suffix")
-      .setDesc("Suffix appended to OCR-layered PDF filenames.")
-      .addText((text) =>
-        text
-          .setPlaceholder("-ocr")
-          .setValue(this.plugin.settings.ocrLayeredPdfSuffix)
+      .addToggle((toggle) => {
+        const enabled = this.plugin.settings.copyPdfToVault;
+        toggle
+          .setValue(enabled ? this.plugin.settings.createOcrLayeredPdf : false)
+          .setDisabled(!enabled)
           .onChange(async (value) => {
-            this.plugin.settings.ocrLayeredPdfSuffix = value.trim() || "-ocr";
+            if (!this.plugin.settings.copyPdfToVault) {
+              this.plugin.settings.createOcrLayeredPdf = false;
+              await this.plugin.saveSettings();
+              return;
+            }
+            this.plugin.settings.createOcrLayeredPdf = value;
             await this.plugin.saveSettings();
-          })
-      );
+          });
+      });
 
     containerEl.createEl("h4", { text: "OCR cleanup (optional)" });
 
