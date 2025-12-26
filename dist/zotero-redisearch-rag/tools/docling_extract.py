@@ -73,6 +73,10 @@ class DoclingProcessingConfig:
     quality_confidence_threshold: float = 0.5
     quality_use_wordfreq: bool = True
     quality_wordfreq_min_zipf: float = 3.0
+    quality_image_heavy_text_chars: int = 200
+    quality_image_heavy_min_images: int = 2
+    quality_image_heavy_ratio_threshold: float = 0.6
+    quality_image_heavy_penalty: float = 0.3
     column_detect_enable: bool = True
     column_detect_dpi: int = 150
     column_detect_max_pages: int = 3
@@ -143,6 +147,7 @@ class TextQuality:
     confidence_proxy: float
     dictionary_hit_ratio: Optional[float] = None
     spellchecker_hit_ratio: Optional[float] = None
+    image_heavy_ratio: Optional[float] = None
 
 @dataclass
 class ColumnLayoutDetection:
@@ -334,6 +339,25 @@ def compute_spellchecker_hit_ratio(
     return hits / total
 
 
+def compute_image_heavy_ratio(
+    pages: Sequence[Dict[str, Any]],
+    config: DoclingProcessingConfig,
+) -> Optional[float]:
+    if not pages:
+        return None
+    heavy = 0
+    total = 0
+    for page in pages:
+        total += 1
+        text = str(page.get("text", ""))
+        image_count = int(page.get("image_count") or 0)
+        if len(text) < config.quality_image_heavy_text_chars and image_count >= config.quality_image_heavy_min_images:
+            heavy += 1
+    if not total:
+        return None
+    return heavy / total
+
+
 def estimate_text_quality(
     pages: Sequence[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
@@ -358,6 +382,7 @@ def estimate_text_quality(
     avg_chars = total_chars / max(1, len(pages))
     dictionary_hit_ratio = None
     spellchecker_hit_ratio = None
+    image_heavy_ratio = None
     if config and config.quality_use_wordfreq and languages:
         dictionary_hit_ratio = compute_dictionary_hit_ratio(
             tokens,
@@ -366,6 +391,7 @@ def estimate_text_quality(
         )
     if config and languages:
         spellchecker_hit_ratio = compute_spellchecker_hit_ratio(tokens, languages, config)
+        image_heavy_ratio = compute_image_heavy_ratio(pages, config)
     lexicon_ratio = None
     if dictionary_hit_ratio is not None and spellchecker_hit_ratio is not None:
         lexicon_ratio = max(dictionary_hit_ratio, spellchecker_hit_ratio)
@@ -376,8 +402,23 @@ def estimate_text_quality(
     confidence = alpha_ratio * (1.0 - suspicious_ratio)
     if lexicon_ratio is not None:
         confidence *= 0.4 + (0.6 * lexicon_ratio)
+    if (
+        image_heavy_ratio is not None
+        and config
+        and image_heavy_ratio >= config.quality_image_heavy_ratio_threshold
+    ):
+        penalty = 1.0 - (config.quality_image_heavy_penalty * image_heavy_ratio)
+        confidence *= max(0.0, penalty)
     confidence = max(0.0, min(1.0, confidence))
-    return TextQuality(avg_chars, alpha_ratio, suspicious_ratio, confidence, lexicon_ratio, spellchecker_hit_ratio)
+    return TextQuality(
+        avg_chars,
+        alpha_ratio,
+        suspicious_ratio,
+        confidence,
+        dictionary_hit_ratio,
+        spellchecker_hit_ratio,
+        image_heavy_ratio,
+    )
 
 
 def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: DoclingProcessingConfig) -> bool:
@@ -573,7 +614,8 @@ def detect_available_ocr_engines() -> List[str]:
     try:
         import pytesseract  # noqa: F401
         from pdf2image import convert_from_path  # noqa: F401
-        available.append("tesseract")
+        if find_tesseract_path():
+            available.append("tesseract")
     except Exception:
         pass
     return available
@@ -1343,7 +1385,22 @@ def extract_pages_from_pdf(
                 text = page.extract_text() or ""
             except Exception:
                 text = ""
-            pages.append({"page_num": idx, "text": text})
+            image_count = 0
+            try:
+                resources = page.get("/Resources") or {}
+                x_objects = resources.get("/XObject")
+                if x_objects:
+                    x_objects = x_objects.get_object() if hasattr(x_objects, "get_object") else x_objects
+                    for obj in x_objects.values():
+                        try:
+                            resolved = obj.get_object() if hasattr(obj, "get_object") else obj
+                            if resolved.get("/Subtype") == "/Image":
+                                image_count += 1
+                        except Exception:
+                            continue
+            except Exception:
+                image_count = 0
+            pages.append({"page_num": idx, "text": text, "image_count": image_count})
     except Exception as exc:
         eprint(f"Failed to extract pages with pypdf: {exc}")
         return []
@@ -1597,6 +1654,20 @@ def find_poppler_path() -> Optional[str]:
 
 
 POPPLER_LOGGED_ONCE = False
+TESSERACT_LOGGED_ONCE = False
+
+
+def find_tesseract_path() -> Optional[str]:
+    env_cmd = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
+    if env_cmd and os.path.isfile(env_cmd):
+        return env_cmd
+    tesseract_cmd = shutil.which("tesseract")
+    if tesseract_cmd:
+        return tesseract_cmd
+    for candidate in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
@@ -2030,6 +2101,15 @@ def ocr_pages_with_tesseract(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     import pytesseract
+    tesseract_cmd = find_tesseract_path()
+    if tesseract_cmd:
+        global TESSERACT_LOGGED_ONCE
+        if shutil.which("tesseract") is None and not TESSERACT_LOGGED_ONCE:
+            LOGGER.info("Tesseract not on PATH; using %s", tesseract_cmd)
+            TESSERACT_LOGGED_ONCE = True
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+    else:
+        raise RuntimeError("Tesseract not found on PATH; set TESSERACT_CMD or install tesseract.")
 
     pages: List[Dict[str, Any]] = []
     total = max(1, len(images))
@@ -2090,6 +2170,7 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
         "confidence_proxy": quality.confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
+        "image_heavy_ratio": quality.image_heavy_ratio,
     }
 
 
@@ -2162,14 +2243,16 @@ def convert_pdf_with_docling(
 
     dict_ratio = "n/a" if quality.dictionary_hit_ratio is None else f"{quality.dictionary_hit_ratio:.2f}"
     spell_ratio = "n/a" if quality.spellchecker_hit_ratio is None else f"{quality.spellchecker_hit_ratio:.2f}"
+    img_ratio = "n/a" if quality.image_heavy_ratio is None else f"{quality.image_heavy_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s, img=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
         quality.suspicious_token_ratio,
         dict_ratio,
         spell_ratio,
+        img_ratio,
     )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
@@ -2246,6 +2329,7 @@ def convert_pdf_with_docling(
         "confidence_proxy": quality.confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
+        "image_heavy_ratio": quality.image_heavy_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
     # Attach spellchecker backend info if available
