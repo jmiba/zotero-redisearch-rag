@@ -541,9 +541,9 @@ export default class ZoteroRagPlugin extends Plugin {
           "--redis-url",
           this.settings.redisUrl,
           "--index",
-          this.settings.redisIndex,
+          this.getRedisIndexName(),
           "--prefix",
-          this.settings.redisPrefix,
+          this.getRedisKeyPrefix(),
           "--embed-base-url",
           this.settings.embedBaseUrl,
           "--embed-api-key",
@@ -1038,9 +1038,9 @@ export default class ZoteroRagPlugin extends Plugin {
       "--redis-url",
       this.settings.redisUrl,
       "--index",
-      this.settings.redisIndex,
+      this.getRedisIndexName(),
       "--prefix",
-      this.settings.redisPrefix,
+      this.getRedisKeyPrefix(),
       "--embed-base-url",
       this.settings.embedBaseUrl,
       "--embed-api-key",
@@ -1592,9 +1592,9 @@ export default class ZoteroRagPlugin extends Plugin {
           "--redis-url",
           this.settings.redisUrl,
           "--index",
-          this.settings.redisIndex,
+          this.getRedisIndexName(),
           "--prefix",
-          this.settings.redisPrefix,
+          this.getRedisKeyPrefix(),
           "--embed-base-url",
           this.settings.embedBaseUrl,
           "--embed-api-key",
@@ -3175,9 +3175,9 @@ export default class ZoteroRagPlugin extends Plugin {
           "--redis-url",
           this.settings.redisUrl,
           "--index",
-          this.settings.redisIndex,
+          this.getRedisIndexName(),
           "--prefix",
-          this.settings.redisPrefix,
+          this.getRedisKeyPrefix(),
           "--embed-base-url",
           this.settings.embedBaseUrl,
           "--embed-api-key",
@@ -3572,6 +3572,29 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private getRedisNamespace(): string {
+    const vaultPath = this.getVaultBasePath();
+    const vaultName = path
+      .basename(vaultPath)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 24);
+    const hash = createHash("sha1").update(vaultPath).digest("hex").slice(0, 8);
+    return `${vaultName || "vault"}-${hash}`;
+  }
+
+  private getRedisIndexName(): string {
+    const base = (this.settings.redisIndex || "idx:zotero").trim() || "idx:zotero";
+    return `${base}:${this.getRedisNamespace()}`;
+  }
+
+  private getRedisKeyPrefix(): string {
+    const base = (this.settings.redisPrefix || "zotero:chunk:").trim() || "zotero:chunk:";
+    const prefix = base.endsWith(":") ? base : `${base}:`;
+    return `${prefix}${this.getRedisNamespace()}:`;
+  }
+
   async startRedisStack(silent?: boolean): Promise<void> {
     try {
       await this.ensureBundledTools();
@@ -3607,6 +3630,92 @@ export default class ZoteroRagPlugin extends Plugin {
       }
       console.error("Failed to start Redis Stack", error);
     }
+  }
+
+  async setupPythonEnv(): Promise<void> {
+    const pluginDir = this.getPluginDir();
+    const venvDir = this.getPythonVenvDir();
+    const venvPython = this.getVenvPythonPath(venvDir);
+    await this.ensureBundledTools();
+    const requirementsPath = this.resolveRequirementsPath(pluginDir);
+    if (!requirementsPath) {
+      throw new Error(`requirements.txt not found in ${pluginDir}`);
+    }
+
+    try {
+      new Notice("Setting up Python environment...");
+
+      if (!existsSync(venvPython)) {
+        const bootstrap = await this.resolveBootstrapPython();
+        await this.runCommand(bootstrap.command, [...bootstrap.args, "-m", "venv", venvDir], {
+          cwd: pluginDir,
+        });
+      }
+
+      await this.runCommand(venvPython, ["-m", "pip", "install", "-r", requirementsPath], {
+        cwd: pluginDir,
+      });
+
+      this.settings.pythonPath = venvPython;
+      await this.saveSettings();
+      new Notice("Python environment ready.");
+    } catch (error) {
+      new Notice("Failed to set up Python environment. See console for details.");
+      console.error("Python env setup failed", error);
+    }
+  }
+
+  private getPythonVenvDir(): string {
+    return path.join(this.getPluginDir(), ".venv");
+  }
+
+  private getVenvPythonPath(venvDir: string): string {
+    if (process.platform === "win32") {
+      return path.join(venvDir, "Scripts", "python.exe");
+    }
+    return path.join(venvDir, "bin", "python");
+  }
+
+  private resolveRequirementsPath(pluginDir: string): string | null {
+    const candidates = [
+      path.join(pluginDir, "requirements.txt"),
+      path.join(pluginDir, "tools", "requirements.txt"),
+    ];
+    return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  }
+
+  private async resolveBootstrapPython(): Promise<{ command: string; args: string[] }> {
+    const configured = (this.settings.pythonPath || "").trim();
+    if (configured && (await this.canRunCommand(configured, []))) {
+      return { command: configured, args: [] };
+    }
+
+    const candidates =
+      process.platform === "win32"
+        ? [
+            { command: "py", args: ["-3"] },
+            { command: "python", args: [] },
+          ]
+        : [
+            { command: "python3", args: [] },
+            { command: "python", args: [] },
+          ];
+
+    for (const candidate of candidates) {
+      if (await this.canRunCommand(candidate.command, candidate.args)) {
+        return candidate;
+      }
+    }
+
+    throw new Error("No usable Python interpreter found on PATH.");
+  }
+
+  private async canRunCommand(command: string, args: string[]): Promise<boolean> {
+    return new Promise((resolve) => {
+      const child = spawn(command, [...args, "--version"]);
+      child.on("error", () => resolve(false));
+      child.on("close", (code) => resolve(code === 0));
+    });
   }
 
   private runPython(scriptPath: string, args: string[]): Promise<void> {

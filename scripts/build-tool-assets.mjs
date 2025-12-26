@@ -9,6 +9,7 @@ const tools = [
   { name: "batch_index_pyzotero.py", path: "tools/batch_index_pyzotero.py" },
   { name: "utils_embedding.py", path: "tools/utils_embedding.py" }, // <-- Add this line
   { name: "ocr_wordlist.txt", path: "tools/ocr_wordlist.txt" },
+  { name: "requirements.txt", path: "requirements.txt" },
   { name: "docker-compose.yml", path: "docker-compose.yml" },
   { name: "redis-stack.conf", path: "redis-stack.conf" },
 ];

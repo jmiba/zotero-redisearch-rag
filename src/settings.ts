@@ -112,6 +112,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     settings: ZoteroRagSettings;
     saveSettings: () => Promise<void>;
     startRedisStack: (silent?: boolean) => Promise<void>;
+    setupPythonEnv: () => Promise<void>;
     reindexRedisFromCache: () => Promise<void>;
     recreateMissingNotesFromCache: () => Promise<void>;
     deleteChatSession?: (sessionId: string) => Promise<void>;
@@ -125,6 +126,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       settings: ZoteroRagSettings;
       saveSettings: () => Promise<void>;
       startRedisStack: (silent?: boolean) => Promise<void>;
+      setupPythonEnv: () => Promise<void>;
       reindexRedisFromCache: () => Promise<void>;
       recreateMissingNotesFromCache: () => Promise<void>;
       openLogFile: () => Promise<void>;
@@ -222,17 +224,65 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
       );
 
+    containerEl.createEl("h3", { text: "Prerequisites" });
+
     new Setting(containerEl)
-      .setName("Python path")
-      .setDesc("Path to python3")
+      .setName("Python environment")
+      .setDesc("Create or update the plugin's Python env (.venv in the plugin folder).")
+      .addButton((button) => {
+        button.setButtonText("Create/Update").setCta();
+        button.onClick(async () => {
+          button.setDisabled(true);
+          try {
+            await this.plugin.setupPythonEnv();
+          } finally {
+            button.setDisabled(false);
+          }
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("Docker path")
+      .setDesc("CLI path for Docker (used to start Redis Stack).")
       .addText((text) =>
         text
-          .setPlaceholder("python3")
-          .setValue(this.plugin.settings.pythonPath)
+          .setPlaceholder("docker")
+          .setValue(this.plugin.settings.dockerPath)
           .onChange(async (value) => {
-            this.plugin.settings.pythonPath = value.trim() || "python3";
+            this.plugin.settings.dockerPath = value.trim() || "docker";
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Redis URL")
+      .addText((text) =>
+        text
+          .setPlaceholder("redis://127.0.0.1:6379")
+          .setValue(this.plugin.settings.redisUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.redisUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto-start Redis Stack (Docker Compose)")
+      .setDesc("Requires Docker Desktop running and your vault path shared with Docker.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
+          this.plugin.settings.autoStartRedis = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Start Redis Stack now")
+      .setDesc("Restarts Docker Compose with the vault data directory.")
+      .addButton((button) =>
+        button.setButtonText("Start").onClick(async () => {
+          await this.plugin.startRedisStack();
+        })
       );
 
     new Setting(containerEl)
@@ -287,19 +337,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
       });
 
-    new Setting(containerEl)
-      .setName("Docker path")
-      .setDesc("CLI path for Docker (used to start Redis Stack).")
-      .addText((text) =>
-        text
-          .setPlaceholder("docker")
-          .setValue(this.plugin.settings.dockerPath)
-          .onChange(async (value) => {
-            this.plugin.settings.dockerPath = value.trim() || "docker";
-            await this.plugin.saveSettings();
-          })
-      );
-
     containerEl.createEl("h3", { text: "Output folders (vault-relative)" });
 
     new Setting(containerEl)
@@ -349,62 +386,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Redis Stack" });
-
-    new Setting(containerEl)
-      .setName("Redis URL")
-      .addText((text) =>
-        text
-          .setPlaceholder("redis://127.0.0.1:6379")
-          .setValue(this.plugin.settings.redisUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.redisUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Index name")
-      .addText((text) =>
-        text
-          .setPlaceholder("idx:zotero")
-          .setValue(this.plugin.settings.redisIndex)
-          .onChange(async (value) => {
-            this.plugin.settings.redisIndex = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Key prefix")
-      .addText((text) =>
-        text
-          .setPlaceholder("zotero:chunk:")
-          .setValue(this.plugin.settings.redisPrefix)
-          .onChange(async (value) => {
-            this.plugin.settings.redisPrefix = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Auto-start Redis Stack (Docker Compose)")
-      .setDesc("Requires Docker Desktop running and your vault path shared with Docker.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
-          this.plugin.settings.autoStartRedis = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Start Redis Stack now")
-      .setDesc("Restarts Docker Compose with the vault data directory.")
-      .addButton((button) =>
-        button.setButtonText("Start").onClick(async () => {
-          await this.plugin.startRedisStack();
-        })
-      );
 
     containerEl.createEl("h3", { text: "Embeddings (LM Studio)" });
 
