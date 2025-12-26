@@ -9,6 +9,19 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import langcodes
+import warnings
+
+# Reduce noisy warnings and route them to logging
+logging.captureWarnings(True)
+try:
+    from PIL import Image as _PILImage  # type: ignore
+    # Disable DecompressionBomb warnings (we control DPI); still safe for local PDFs
+    _PILImage.MAX_IMAGE_PIXELS = None  # type: ignore[attr-defined]
+    if hasattr(_PILImage, "DecompressionBombWarning"):
+        warnings.filterwarnings("ignore", category=_PILImage.DecompressionBombWarning)  # type: ignore[attr-defined]
+except Exception:
+    pass
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 LOGGER = logging.getLogger("docling_extract")
@@ -1536,13 +1549,18 @@ def find_poppler_path() -> Optional[str]:
     return None
 
 
+POPPLER_LOGGED_ONCE = False
+
+
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
     from pdf2image import convert_from_path
 
     poppler_path = find_poppler_path()
     if poppler_path:
-        if shutil.which("pdftoppm") is None:
+        global POPPLER_LOGGED_ONCE
+        if shutil.which("pdftoppm") is None and not POPPLER_LOGGED_ONCE:
             LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+            POPPLER_LOGGED_ONCE = True
         return convert_from_path(pdf_path, dpi=dpi, poppler_path=poppler_path)
     return convert_from_path(pdf_path, dpi=dpi)
 
@@ -1555,8 +1573,10 @@ def render_pdf_pages_sample(pdf_path: str, dpi: int, max_pages: int) -> List[Any
     poppler_path = find_poppler_path()
     kwargs = {"dpi": dpi, "first_page": 1, "last_page": max_pages}
     if poppler_path:
-        if shutil.which("pdftoppm") is None:
+        global POPPLER_LOGGED_ONCE
+        if shutil.which("pdftoppm") is None and not POPPLER_LOGGED_ONCE:
             LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+            POPPLER_LOGGED_ONCE = True
         kwargs["poppler_path"] = poppler_path
     return convert_from_path(pdf_path, **kwargs)
 
@@ -1596,8 +1616,10 @@ def render_pdf_pages_at_indices(pdf_path: str, dpi: int, indices: Sequence[int])
     for idx in indices:
         kwargs = {"dpi": dpi, "first_page": int(idx), "last_page": int(idx)}
         if poppler_path:
-            if shutil.which("pdftoppm") is None:
+            global POPPLER_LOGGED_ONCE
+            if shutil.which("pdftoppm") is None and not POPPLER_LOGGED_ONCE:
                 LOGGER.info("Poppler not on PATH; using %s", poppler_path)
+                POPPLER_LOGGED_ONCE = True
             kwargs["poppler_path"] = poppler_path
         try:
             imgs = convert_from_path(pdf_path, **kwargs)
@@ -1803,7 +1825,11 @@ def ocr_pages_with_paddle(
     except Exception as exc:
         raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
 
-    ocr = PaddleOCR(use_angle_cls=True, lang=languages)
+    # Newer PaddleOCR prefers use_textline_orientation; older uses use_angle_cls
+    try:
+        ocr = PaddleOCR(use_textline_orientation=True, lang=languages)
+    except TypeError:
+        ocr = PaddleOCR(use_angle_cls=True, lang=languages)
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
@@ -1905,17 +1931,14 @@ def ocr_pages_with_paddle(
 
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
-        # Some PaddleOCR versions don't accept 'cls' kwarg; try with cls then without.
+        # Prefer new API: predict(); fall back to ocr() with/without cls
         try:
-            result = ocr.ocr(np.array(image), cls=True)
-        except TypeError as _e:
-            result = ocr.ocr(np.array(image))
-        except Exception as _e:
-            # Fallback if signature mismatch occurs in predict() implementation
-            if "unexpected keyword argument 'cls'" in str(_e):
+            result = ocr.predict(np.array(image))  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                result = ocr.ocr(np.array(image), cls=True)
+            except TypeError:
                 result = ocr.ocr(np.array(image))
-            else:
-                raise
         blocks: List[Dict[str, Any]] = []
         if result:
             entries = result[0] if isinstance(result, list) else result
