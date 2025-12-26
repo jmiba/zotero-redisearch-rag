@@ -85,6 +85,8 @@ pip install -r requirements.txt
 ```
 Optional (for stronger OCR fallback):
 - Install Poppler and Tesseract on your system.
+Optional (for faster native rebuilds):
+- If you see a Paddle warning about missing `ccache`, install it (macOS: `brew install ccache`).
 
 ### 6) Configure the plugin
 Obsidian -> Settings -> Community plugins -> Zotero Redis RAG

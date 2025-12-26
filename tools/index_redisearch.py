@@ -1,49 +1,16 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import math
 import os
-import struct
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
 import redis
-import requests
 
 
 def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
-
-
-def normalize_vector(values: List[float]) -> List[float]:
-    norm = math.sqrt(sum(v * v for v in values))
-    if norm == 0:
-        return values
-    return [v / norm for v in values]
-
-
-def vector_to_bytes(values: List[float]) -> bytes:
-    return struct.pack("<" + "f" * len(values), *values)
-
-
-def request_embedding(base_url: str, api_key: str, model: str, text: str) -> List[float]:
-    url = base_url.rstrip("/") + "/embeddings"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    response = requests.post(url, json={"input": text, "model": model}, headers=headers, timeout=120)
-    if response.status_code >= 400:
-        raise RuntimeError(f"Embedding request failed: {response.status_code} {response.text}")
-    payload = response.json()
-    data = payload.get("data")
-    if not data:
-        raise RuntimeError("Embedding response missing data field")
-    embedding = data[0].get("embedding")
-    if not embedding:
-        raise RuntimeError("Embedding response missing embedding")
-    return [float(x) for x in embedding]
 
 
 def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
@@ -65,17 +32,31 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         "1",
         prefix,
         "SCHEMA",
-    
-    
-    
+        "doc_id",
         "TAG",
-    
-    
-    
+        "chunk_id",
+        "TAG",
+        "attachment_key",
+        "TAG",
+        "title",
+        "TEXT",
         "authors",
-    
-    
-    
+        "TAG",
+        "SEPARATOR",
+        "|",
+        "tags",
+        "TAG",
+        "SEPARATOR",
+        "|",
+        "year",
+        "NUMERIC",
+        "item_type",
+        "TAG",
+        "SEPARATOR",
+        "|",
+        "source_pdf",
+        "TEXT",
+        "page_start",
         "NUMERIC",
         "page_end",
         "NUMERIC",
@@ -213,16 +194,6 @@ def main() -> int:
         eprint("Invalid chunks JSON schema")
         return 2
 
-    # Delete all existing chunk keys for this doc_id before indexing
-    pattern = f"{args.prefix}{doc_id}:*"
-    try:
-        keys_to_delete = client.keys(pattern)
-        if keys_to_delete:
-            client.delete(*keys_to_delete)
-            eprint(f"Deleted {len(keys_to_delete)} existing chunk keys for doc_id {doc_id}")
-    except Exception as exc:
-        eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
-
     attachment_key = None
     try:
         meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
@@ -233,6 +204,25 @@ def main() -> int:
         attachment_key = None
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
+
+    # Delete all existing chunk keys for this doc_id before indexing
+    pattern = f"{args.prefix}{doc_id}:*"
+    deleted = 0
+    try:
+        batch: List[bytes] = []
+        for key in client.scan_iter(match=pattern, count=500):
+            batch.append(key)
+            if len(batch) >= 500:
+                client.delete(*batch)
+                deleted += len(batch)
+                batch = []
+        if batch:
+            client.delete(*batch)
+            deleted += len(batch)
+        if deleted:
+            eprint(f"Deleted {deleted} existing chunk keys for doc_id {doc_id}")
+    except Exception as exc:
+        eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
 
     try:
         ensure_index(client, args.index, args.prefix)

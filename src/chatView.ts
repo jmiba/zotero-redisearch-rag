@@ -437,12 +437,6 @@ export class ZoteroChatView extends ItemView {
     }
   }
 
-  private async clearChat(): Promise<void> {
-    this.messages = [];
-    await this.saveHistory();
-    await this.renderAll();
-  }
-
   private generateId(): string {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
       return crypto.randomUUID();
