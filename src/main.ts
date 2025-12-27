@@ -560,8 +560,12 @@ export default class ZoteroRagPlugin extends Plugin {
         (payload) => {
           if (payload?.type === "progress" && payload.total) {
             const percent = Math.round((payload.current / payload.total) * 100);
+            const message =
+              typeof payload.message === "string" && payload.message.trim()
+                ? payload.message
+                : `Indexing chunks ${payload.current}/${payload.total}`;
             const label = this.formatStatusLabel(
-              `Indexing chunks ${payload.current}/${payload.total}`,
+              message,
               qualityLabel
             );
             this.showStatusProgress(label, percent);
@@ -3283,8 +3287,12 @@ export default class ZoteroRagPlugin extends Plugin {
         (payload) => {
           if (payload?.type === "progress" && payload.total) {
             const percent = Math.round((payload.current / payload.total) * 100);
+            const message =
+              typeof payload.message === "string" && payload.message.trim()
+                ? payload.message
+                : `Indexing chunks ${payload.current}/${payload.total}`;
             const label = this.formatStatusLabel(
-              `Indexing chunks ${payload.current}/${payload.total}`,
+              message,
               qualityLabel
             );
             this.showStatusProgress(label, percent);

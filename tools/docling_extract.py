@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 import logging
 import os
 import re
 import shutil
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
 
@@ -119,7 +120,11 @@ class DoclingProcessingConfig:
     llm_cleanup_timeout_sec: int = 60
     llm_correction_min_quality: float = 0.35
     llm_correction_max_chars: int = 2000
-    postprocess_markdown: bool = False
+    enable_boilerplate_removal: bool = True
+    boilerplate_min_line_len: int = 8
+    boilerplate_repeat_ratio: float = 0.4
+    boilerplate_min_pages: int = 3
+    postprocess_markdown: bool = True
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
@@ -200,6 +205,122 @@ def replace_ligatures(text: str) -> str:
         .replace("\ufb04", "ffl")
     )
 
+_BOILERPLATE_PATTERNS = [
+    re.compile(r"(?i)^this content downloaded from"),
+    re.compile(r"(?i)^all use subject to"),
+    re.compile(r"(?i)about\s*\.?jstor\.org/terms"),
+    re.compile(r"(?i)^jstor is a not-for-profit"),
+    re.compile(r"(?i)^your use of the jstor archive"),
+    re.compile(r"(?i)^for more information about jstor"),
+    re.compile(r"(?i)^state historical society"),
+]
+_PAGE_NUMBER_RE = re.compile(r"^[ivxlcdm]+$|^\d{1,4}$", re.IGNORECASE)
+
+
+def normalize_boilerplate_line(line: str) -> str:
+    cleaned = line.replace("\u00a0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def is_boilerplate_line(line: str) -> bool:
+    if not line:
+        return False
+    if _PAGE_NUMBER_RE.match(line):
+        return True
+    for pattern in _BOILERPLATE_PATTERNS:
+        if pattern.search(line):
+            return True
+    return False
+
+
+def detect_repeated_lines(
+    pages: Sequence[Dict[str, Any]],
+    config: DoclingProcessingConfig,
+) -> Tuple[Set[str], int]:
+    total_pages = len(pages)
+    if total_pages < config.boilerplate_min_pages:
+        return set(), 0
+    threshold = max(2, int(math.ceil(total_pages * config.boilerplate_repeat_ratio)))
+    counts: Dict[str, int] = {}
+    for page in pages:
+        text = str(page.get("text", ""))
+        seen: Set[str] = set()
+        for line in text.splitlines():
+            normalized = normalize_boilerplate_line(line)
+            if not normalized or len(normalized) < config.boilerplate_min_line_len:
+                continue
+            seen.add(normalized)
+        for normalized in seen:
+            counts[normalized] = counts.get(normalized, 0) + 1
+    repeated = {line for line, count in counts.items() if count >= threshold}
+    return repeated, threshold
+
+
+def remove_boilerplate_from_pages(
+    pages: List[Dict[str, Any]],
+    config: DoclingProcessingConfig,
+) -> Tuple[List[Dict[str, Any]], Set[str], Dict[str, Any]]:
+    if not config.enable_boilerplate_removal or not pages:
+        return pages, set(), {}
+    repeated, threshold = detect_repeated_lines(pages, config)
+    removed_total = 0
+    updated_pages: List[Dict[str, Any]] = []
+    for page in pages:
+        text = str(page.get("text", ""))
+        if not text:
+            updated_pages.append(page)
+            continue
+        kept_lines: List[str] = []
+        removed_page = 0
+        for line in text.splitlines():
+            normalized = normalize_boilerplate_line(line)
+            if not normalized:
+                kept_lines.append("")
+                continue
+            if normalized in repeated or is_boilerplate_line(normalized):
+                removed_page += 1
+                continue
+            kept_lines.append(line)
+        removed_total += removed_page
+        new_page = dict(page)
+        new_page["text"] = "\n".join(kept_lines).strip()
+        updated_pages.append(new_page)
+    if removed_total:
+        LOGGER.info(
+            "Boilerplate removal: removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
+            removed_total,
+            threshold,
+            len(repeated),
+        )
+    return updated_pages, repeated, {
+        "removed_lines": removed_total,
+        "repeat_threshold": threshold,
+        "repeated_lines": len(repeated),
+    }
+
+
+def remove_boilerplate_from_markdown(
+    markdown: str,
+    repeated_lines: Set[str],
+    config: DoclingProcessingConfig,
+) -> str:
+    if not config.enable_boilerplate_removal or not markdown:
+        return markdown
+    kept: List[str] = []
+    removed = 0
+    for line in markdown.splitlines():
+        normalized = normalize_boilerplate_line(line)
+        if not normalized:
+            kept.append(line)
+            continue
+        if normalized in repeated_lines or is_boilerplate_line(normalized):
+            removed += 1
+            continue
+        kept.append(line)
+    if removed:
+        LOGGER.info("Boilerplate removal: stripped %s markdown lines", removed)
+    return "\n".join(kept).strip()
 
 def split_paragraphs(text: str) -> List[str]:
     paragraphs = re.split(r"\n\s*\n", text)
@@ -1300,6 +1421,7 @@ def postprocess_text(
     languages: str,
     wordlist: Sequence[str],
     allow_missing_space: bool = True,
+    progress_cb: Optional[ProgressCallback] = None,
 ) -> str:
     if not text:
         return text
@@ -1374,6 +1496,8 @@ def postprocess_text(
         cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
     cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
     if should_apply_llm_correction(cleaned, config) and config.llm_correct:
+        if progress_cb:
+            progress_cb(100, "llm_cleanup", "LLM cleanup...")
         cleaned = config.llm_correct(cleaned)
     return cleaned
 
@@ -2223,7 +2347,11 @@ def split_blocks_into_columns(
     return columns, gap_thr, span
 
 
-def order_blocks_into_columns(blocks: List[Dict[str, Any]], log_label: str = "OCR") -> str:
+def order_blocks_into_columns(
+    blocks: List[Dict[str, Any]],
+    log_label: str = "OCR",
+    drop_lines: Optional[Set[str]] = None,
+) -> str:
     columns, _, _ = split_blocks_into_columns(blocks, log_label=log_label)
     if not columns:
         return ""
@@ -2231,7 +2359,16 @@ def order_blocks_into_columns(blocks: List[Dict[str, Any]], log_label: str = "OC
     col_texts: List[str] = []
     for col in columns:
         col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
-        col_texts.append("\n".join(b["text"] for b in col_sorted if b["text"]))
+        lines: List[str] = []
+        for block in col_sorted:
+            raw = str(block.get("text", "")).strip()
+            if not raw:
+                continue
+            normalized = normalize_boilerplate_line(raw)
+            if drop_lines and normalized in drop_lines:
+                continue
+            lines.append(raw)
+        col_texts.append("\n".join(lines))
     # Read columns left to right
     return "\n\n".join(t for t in col_texts if t)
 
@@ -2239,6 +2376,7 @@ def order_blocks_into_columns(blocks: List[Dict[str, Any]], log_label: str = "OC
 def ocr_pages_with_paddle(
     images: Sequence[Any],
     languages: str,
+    config: DoclingProcessingConfig,
     progress_cb: Optional[ProgressCallback] = None,
     progress_base: int = 0,
     progress_span: int = 0,
@@ -2266,6 +2404,53 @@ def ocr_pages_with_paddle(
         return x0, y0, x1, y1, xc
 
     total = max(1, len(images))
+    total_pages = len(images)
+    repeat_threshold = max(
+        2,
+        int(math.ceil(total_pages * config.boilerplate_repeat_ratio)),
+        config.boilerplate_min_pages,
+    )
+    text_occurrences: Dict[str, int] = {}
+    page_line_sets: List[Set[str]] = []
+
+    for image in images:
+        page_lines: Set[str] = set()
+        try:
+            result = ocr.predict(np.array(image))  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                result = ocr.ocr(np.array(image), cls=True)
+            except TypeError:
+                result = ocr.ocr(np.array(image))
+        if result:
+            entries = result[0] if isinstance(result, list) else result
+            for entry in entries:
+                if not entry or not isinstance(entry, (list, tuple)):
+                    continue
+                text_part = entry[1] if len(entry) > 1 else None
+                if text_part is None:
+                    continue
+                if isinstance(text_part, (list, tuple)) and text_part:
+                    text_val = str(text_part[0] or "").strip()
+                else:
+                    text_val = str(text_part or "").strip()
+                if not text_val:
+                    continue
+                normalized = normalize_boilerplate_line(text_val)
+                if normalized and len(normalized) >= config.boilerplate_min_line_len:
+                    page_lines.add(normalized)
+        page_line_sets.append(page_lines)
+        for line in page_lines:
+            text_occurrences[line] = text_occurrences.get(line, 0) + 1
+
+    repeated_lines = {
+        line
+        for line, count in text_occurrences.items()
+        if count >= repeat_threshold
+    }
+    drop_lines = repeated_lines
+    removed_total = 0
+
     for idx, image in enumerate(images, start=1):
         # Prefer new API: predict(); fall back to ocr() with/without cls
         try:
@@ -2301,11 +2486,26 @@ def ocr_pages_with_paddle(
                     confidences.append(conf_val)
                 if text_val:
                     blocks.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "xc": xc, "text": text_val})
-        ordered_text = order_blocks_into_columns(blocks, log_label="Paddle")
+        before = len(blocks)
+        if drop_lines:
+            blocks = [
+                b for b in blocks
+                if normalize_boilerplate_line(str(b.get("text", "")).strip()) not in drop_lines
+            ]
+        removed_total += before - len(blocks)
+        ordered_text = order_blocks_into_columns(blocks, log_label="Paddle", drop_lines=drop_lines)
         pages.append({"page_num": idx, "text": ordered_text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
             progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
+
+    if removed_total and config.enable_boilerplate_removal:
+        LOGGER.info(
+            "Boilerplate removal (OCR lines): removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
+            removed_total,
+            repeat_threshold,
+            len(drop_lines),
+        )
 
     avg_conf = sum(confidences) / len(confidences) if confidences else None
     return pages, {"ocr_confidence_avg": avg_conf}
@@ -2362,6 +2562,37 @@ def ocr_pages_with_tesseract(
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
     total = max(1, len(images))
+    repeat_threshold = max(
+        2,
+        int(math.ceil(total * config.boilerplate_repeat_ratio)),
+        config.boilerplate_min_pages,
+    )
+    repeated_lines: Set[str] = set()
+    removed_total = 0
+    if config.enable_boilerplate_removal and total >= config.boilerplate_min_pages:
+        line_counts: Dict[str, int] = {}
+        for image in images:
+            page_lines: Set[str] = set()
+            try:
+                data = pytesseract.image_to_data(
+                    image, lang=languages, output_type=pytesseract.Output.DICT
+                )
+                items = len(data.get("text", []))
+                for i in range(items):
+                    raw_text = str(data["text"][i] or "").strip()
+                    if not raw_text:
+                        continue
+                    normalized = normalize_boilerplate_line(raw_text)
+                    if normalized and len(normalized) >= config.boilerplate_min_line_len:
+                        page_lines.add(normalized)
+            except Exception:
+                page_lines = set()
+            for line in page_lines:
+                line_counts[line] = line_counts.get(line, 0) + 1
+        repeated_lines = {
+            line for line, count in line_counts.items()
+            if count >= repeat_threshold
+        }
     for idx, image in enumerate(images, start=1):
         text = ""
         words: List[Dict[str, Any]] = []
@@ -2380,6 +2611,10 @@ def ocr_pages_with_tesseract(
                 y1 = y0 + _safe_float(data.get("height"), i)
                 xc = 0.5 * (x0 + x1)
                 yc = 0.5 * (y0 + y1)
+                normalized = normalize_boilerplate_line(raw_text)
+                if config.enable_boilerplate_removal and normalized in repeated_lines:
+                    removed_total += 1
+                    continue
                 words.append(
                     {
                         "x0": x0,
@@ -2458,6 +2693,13 @@ def ocr_pages_with_tesseract(
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
             progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
+    if removed_total and config.enable_boilerplate_removal:
+        LOGGER.info(
+            "Boilerplate removal (OCR lines): removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
+            removed_total,
+            repeat_threshold,
+            len(repeated_lines),
+        )
     avg_conf = sum(confidences) / len(confidences) if confidences else None
     return pages, {"ocr_confidence_avg": avg_conf}
 
@@ -2476,6 +2718,7 @@ def run_external_ocr_pages(
         return ocr_pages_with_paddle(
             images,
             normalize_languages_for_engine(languages, engine),
+            config,
             progress_cb,
             progress_base,
             progress_span,
@@ -3040,6 +3283,7 @@ def main() -> int:
                 languages,
                 wordlist,
                 allow_missing_space=allow_missing_space,
+                progress_cb=progress_cb,
             )
 
         if postprocess_fn:
@@ -3052,15 +3296,24 @@ def main() -> int:
         if config.enable_post_correction and config.postprocess_markdown and should_postprocess:
             wordlist = prepare_dictionary_words(config)
             allow_missing_space = ocr_used
+            if progress_cb:
+                progress_cb(100, "postprocess_markdown", "Postprocess markdown...")
             markdown = postprocess_text(
                 markdown,
                 config,
                 languages,
                 wordlist,
                 allow_missing_space=allow_missing_space,
+                progress_cb=progress_cb,
             )
 
-        if conversion.metadata.get("external_ocr_used"):
+        repeated_lines: Set[str] = set()
+        external_ocr_used = bool(conversion.metadata.get("external_ocr_used"))
+        if config.enable_boilerplate_removal and not external_ocr_used:
+            pages, repeated_lines, _ = remove_boilerplate_from_pages(pages, config)
+            markdown = remove_boilerplate_from_markdown(markdown, repeated_lines, config)
+
+        if external_ocr_used:
             markdown = "\n\n".join(page.get("text", "") for page in pages)
 
         try:
