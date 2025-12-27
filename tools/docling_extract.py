@@ -120,7 +120,6 @@ class DoclingProcessingConfig:
     llm_correction_min_quality: float = 0.35
     llm_correction_max_chars: int = 2000
     postprocess_markdown: bool = False
-    postprocess_text_layer: bool = False
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
@@ -2860,11 +2859,6 @@ def main() -> int:
     parser.add_argument("--progress", action="store_true", help="Emit JSON progress events to stdout")
     parser.add_argument("--enable-dictionary-correction", action="store_true", help="Enable dictionary-based OCR corrections")
     parser.add_argument("--dictionary-path", help="Path to dictionary wordlist (one word per line)")
-    parser.add_argument(
-        "--postprocess-text-layer",
-        action="store_true",
-        help="Apply spell correction even when OCR is not run (text layer present).",
-    )
     parser.add_argument("--enable-hunspell", action="store_true", help="Enable Hunspell dictionary support if available")
     parser.add_argument("--hunspell-aff", help="Path to Hunspell .aff file")
     parser.add_argument("--hunspell-dic", help="Path to Hunspell .dic file")
@@ -2980,8 +2974,6 @@ def main() -> int:
         config.enable_dictionary_correction = True
     if args.dictionary_path:
         config.dictionary_path = args.dictionary_path
-    if args.postprocess_text_layer:
-        config.postprocess_text_layer = True
     if args.enable_hunspell:
         config.enable_hunspell = True
     if args.hunspell_aff:
@@ -3038,12 +3030,7 @@ def main() -> int:
         languages = conversion.metadata.get("languages", config.default_lang_english)
         postprocess_fn: Optional[Callable[[str], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        text_layer_overlay = bool(conversion.metadata.get("text_layer_overlay"))
-        text_layer_low_quality = bool(conversion.metadata.get("text_layer_low_quality"))
-        text_layer_should_postprocess = text_layer_overlay or text_layer_low_quality
-        should_postprocess = config.enable_post_correction and (
-            ocr_used or (config.postprocess_text_layer and text_layer_should_postprocess)
-        )
+        should_postprocess = config.enable_post_correction and ocr_used
         if should_postprocess:
             wordlist = prepare_dictionary_words(config)
             allow_missing_space = ocr_used

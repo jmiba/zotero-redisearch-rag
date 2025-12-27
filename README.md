@@ -67,7 +67,9 @@ Notes:
 - Docker Desktop must be running.
 - Your vault folder must be shared in Docker settings.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
-- Multiple vaults: each vault uses its own Docker Compose project + data folder. If you want to run multiple Redis Stacks at the same time, set a different Redis port per vault by changing `Redis URL` (e.g. `redis://127.0.0.1:6380`).
+- Multiple vaults:
+  - If you start Redis Stack from the plugin, each vault gets its own Docker Compose project and data folder.
+  - If you point multiple vaults at the same Redis URL, the plugin namespaces the index and key prefix using a vault-specific hash, so vaults can share a single Redis safely.
 
 ### 4) Start LM Studio
 1) Open LM Studio and start the local server.
@@ -83,6 +85,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+You can also create/update the Python env from the settings panel ("Python environment"):
+- Creates `.venv` inside the plugin folder.
+- Uses the configured Python path if valid; otherwise tries `python3`/`python` (Windows: `py -3`, then `python`).
+- Installs `requirements.txt` into that venv and updates your `Python path` setting.
 Optional (for stronger OCR fallback):
 - Install Poppler and Tesseract on your system.
 Optional (for faster native rebuilds):
@@ -112,6 +118,8 @@ Answers are generated from retrieved text only and include citations.
 - If "Copy PDFs into vault" is ON, the note links to the vault PDF.
 - If it is OFF, the note links to the Zotero attachment (so you can see your Zotero annotations).
 - If the local PDF path is unavailable, the plugin will temporarily copy the PDF into the vault for processing and tell you.
+- "Prefer vault PDF for citations" uses the vault copy when both are available.
+- "Create OCR-layered PDF copy" writes a new, searchable PDF (requires Tesseract + Poppler) and uses it for citations.
 
 ## Web API fallback (optional)
 

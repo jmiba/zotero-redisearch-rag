@@ -47,7 +47,6 @@ export interface ZoteroRagSettings {
   llmCleanupTemperature: number;
   llmCleanupMinQuality: number;
   llmCleanupMaxChars: number;
-  postprocessTextLayer: boolean;
   enableFileLogging: boolean;
   logFilePath: string;
   createOcrLayeredPdf: boolean;
@@ -102,7 +101,6 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   llmCleanupTemperature: 0.0,
   llmCleanupMinQuality: 0.35,
   llmCleanupMaxChars: 2000,
-  postprocessTextLayer: true,
   enableFileLogging: false,
   logFilePath: `${CACHE_ROOT}/logs/docling_extract.log`,
   createOcrLayeredPdf: false,
@@ -586,16 +584,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.removeImagePlaceholders).onChange(async (value) => {
           this.plugin.settings.removeImagePlaceholders = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Spellcheck text layer")
-      .setDesc("Apply OCR-style corrections for scanned PDFs with a text layer; skip born-digital PDFs.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.postprocessTextLayer).onChange(async (value) => {
-          this.plugin.settings.postprocessTextLayer = value;
           await this.plugin.saveSettings();
         })
       );
