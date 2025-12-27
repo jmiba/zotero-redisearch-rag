@@ -5,6 +5,13 @@ Obsidian plugin for Zotero RAG and chat using Redis Stack and LM Studio/OpenAI-c
 > [!CAUTION]
 > This plugin is early and may change. Keep backups of important notes.
 
+## What is new in 0.2.5
+
+- Redis Stack now auto-selects a vault-specific port to avoid collisions across vaults.
+- Docker/Podman auto-detection runs on plugin load and repairs invalid paths.
+- Clear notices when Docker/Podman is installed but not running.
+- Recreate-from-cache can recover missing PDFs by re-downloading attachments.
+
 ## Why this plugin exists
 
 Zotero is your source of truth for references, and Obsidian is where you think. This plugin connects them so you can ask questions over your Zotero PDFs inside Obsidian and get answers with clear, clickable citations. It imports selected items, extracts text (OCR when needed), builds a local vector index in Redis, and keeps the results linked back to your notes and PDFs.
@@ -27,7 +34,7 @@ Zotero is your source of truth for references, and Obsidian is where you think. 
 
 - Obsidian (desktop)
 - Zotero 7 (desktop)
-- Docker Desktop (for Redis Stack)
+- Docker Desktop or Podman (for Redis Stack)
 - LM Studio (for embeddings + chat)
 - Python 3.11+ (for Docling tools)
 
@@ -64,11 +71,12 @@ Recommended: use the plugin command
 - Command palette -> "Start Redis Stack (Docker Compose)"
 
 Notes:
-- Docker Desktop must be running.
+- Docker Desktop or Podman must be running (Podman needs `podman compose` or `podman-compose`).
 - Your vault folder must be shared in Docker settings.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
 - Multiple vaults:
   - If you start Redis Stack from the plugin, each vault gets its own Docker Compose project and data folder.
+  - Auto-assign Redis port picks a free local port per vault and updates the Redis URL when starting a stack.
   - If you point multiple vaults at the same Redis URL, the plugin namespaces the index and key prefix using a vault-specific hash, so vaults can share a single Redis safely.
 
 ### 4) Start LM Studio

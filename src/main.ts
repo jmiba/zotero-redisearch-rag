@@ -14,6 +14,7 @@ import { spawn } from "child_process";
 import { promises as fs, existsSync } from "fs";
 import http from "http";
 import https from "https";
+import net from "net";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createHash } from "crypto";
@@ -268,6 +269,8 @@ export default class ZoteroRagPlugin extends Plugin {
   private statusBarEl?: HTMLElement;
   private statusLabelEl?: HTMLElement;
   private statusBarInnerEl?: HTMLElement;
+  private lastPythonEnvNotice: string | null = null;
+  private lastContainerNotice: string | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -329,9 +332,11 @@ export default class ZoteroRagPlugin extends Plugin {
 
     this.addCommand({
       id: "start-redis-stack",
-      name: "Start Redis Stack (Docker Compose)",
+      name: "Start Redis Stack (Docker/Podman Compose)",
       callback: () => this.startRedisStack(),
     });
+
+    void this.autoDetectContainerCliOnLoad();
 
     if (this.settings.autoStartRedis) {
       void this.startRedisStack(true);
@@ -2580,6 +2585,87 @@ export default class ZoteroRagPlugin extends Plugin {
     return normalizePath(path.relative(vaultBase, normalizedSource));
   }
 
+  private async isFileAccessible(filePath: string): Promise<boolean> {
+    if (!filePath) {
+      return false;
+    }
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private deriveVaultPdfRelativePath(sourcePdf: string, title: string, docId: string): string {
+    const rel = this.toVaultRelativePath(sourcePdf);
+    if (rel && rel.startsWith(normalizePath(this.settings.outputPdfDir))) {
+      return rel;
+    }
+    const baseName = this.sanitizeFileName(title) || docId;
+    return normalizePath(`${this.settings.outputPdfDir}/${baseName}.pdf`);
+  }
+
+  private async recoverMissingPdfFromAttachment(
+    sourcePdf: string,
+    values: ZoteroItemValues,
+    itemKey: string,
+    docId: string,
+    attachmentKey: string | undefined,
+    title: string,
+    showNotices: boolean
+  ): Promise<{ sourcePdf: string; attachmentKey?: string } | null> {
+    let attachment = await this.resolvePdfAttachment(values, itemKey);
+    if (!attachment && attachmentKey) {
+      attachment = { key: attachmentKey };
+    }
+    if (!attachment) {
+      return null;
+    }
+
+    const resolvedAttachmentKey = attachment.key || attachmentKey;
+    const filePath = attachment.filePath;
+
+    if (!this.settings.copyPdfToVault && filePath && (await this.isFileAccessible(filePath))) {
+      return { sourcePdf: filePath, attachmentKey: resolvedAttachmentKey };
+    }
+
+    try {
+      await this.ensureFolder(this.settings.outputPdfDir);
+    } catch (error) {
+      console.error("Failed to create PDF output folder", error);
+      return null;
+    }
+
+    const targetRel = this.deriveVaultPdfRelativePath(sourcePdf, title, docId);
+    let buffer: Buffer;
+    try {
+      if (filePath && (await this.isFileAccessible(filePath))) {
+        buffer = await fs.readFile(filePath);
+      } else if (resolvedAttachmentKey) {
+        buffer = await this.downloadZoteroPdf(resolvedAttachmentKey);
+        if (!this.settings.copyPdfToVault && showNotices) {
+          new Notice("Local PDF path unavailable; copied PDF into vault for processing.");
+        }
+      } else {
+        return null;
+      }
+    } catch (error) {
+      console.error("Failed to read or download PDF attachment", error);
+      return null;
+    }
+
+    try {
+      await this.app.vault.adapter.writeBinary(targetRel, this.bufferToArrayBuffer(buffer));
+    } catch (error) {
+      console.error("Failed to write recovered PDF into vault", error);
+      return null;
+    }
+
+    const targetAbs = this.getAbsoluteVaultPath(targetRel);
+    return { sourcePdf: targetAbs, attachmentKey: resolvedAttachmentKey };
+  }
+
   private buildPdfLinkForNote(sourcePdf: string, attachmentKey?: string, docId?: string): string {
     if (!sourcePdf && !attachmentKey) {
       return "";
@@ -3049,36 +3135,43 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
 
-    let sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
-    if (!sourcePdf) {
-      if (showNotices) {
-        new Notice("Cached chunk JSON is missing source_pdf.");
-      }
-      this.clearStatusProgress();
-      return false;
-    }
-
-    try {
-      await fs.access(sourcePdf);
-    } catch (error) {
-      if (showNotices) {
-        new Notice("Cached source PDF path is not accessible.");
-      }
-      console.error(error);
-      this.clearStatusProgress();
-      return false;
-    }
-
     const values: ZoteroItemValues = item.data ?? item;
     const title = typeof values.title === "string" ? values.title : "";
-    const languageHint = await this.resolveLanguageHint(values, item.key ?? values.key);
-    const doclingLanguageHint = this.buildDoclingLanguageHint(languageHint ?? undefined);
-    let notePath = "";
+    const itemKey = (item.key ?? values.key ?? docId).toString();
     const existingEntry = await this.getDocIndexEntry(docId);
-    const attachmentKey =
+    let attachmentKey =
       typeof chunkPayload?.metadata?.attachment_key === "string"
         ? chunkPayload.metadata.attachment_key
         : existingEntry?.attachment_key;
+
+    let sourcePdf = typeof chunkPayload.source_pdf === "string" ? chunkPayload.source_pdf : "";
+    if (!sourcePdf || !(await this.isFileAccessible(sourcePdf))) {
+      const recovered = await this.recoverMissingPdfFromAttachment(
+        sourcePdf,
+        values,
+        itemKey,
+        docId,
+        attachmentKey,
+        title,
+        showNotices
+      );
+      if (!recovered) {
+        if (showNotices) {
+          new Notice("Cached source PDF is missing and could not be recovered.");
+        }
+        this.clearStatusProgress();
+        return false;
+      }
+      sourcePdf = recovered.sourcePdf;
+      if (recovered.attachmentKey) {
+        attachmentKey = recovered.attachmentKey;
+      }
+      await this.updateChunkJsonSourcePdf(chunkPath, sourcePdf);
+    }
+
+    const languageHint = await this.resolveLanguageHint(values, itemKey);
+    const doclingLanguageHint = this.buildDoclingLanguageHint(languageHint ?? undefined);
+    let notePath = "";
     if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
       notePath = normalizePath(existingEntry.note_path);
     }
@@ -3549,6 +3642,209 @@ export default class ZoteroRagPlugin extends Plugin {
     return path.join(pluginDir, "tools", "docker-compose.yml");
   }
 
+  private async resolveDockerPath(): Promise<string> {
+    const configured = this.settings.dockerPath?.trim();
+    const candidates: string[] = [];
+    if (configured) {
+      candidates.push(configured);
+    }
+    if (
+      !configured ||
+      configured === "docker" ||
+      configured === "podman" ||
+      configured === "podman-compose"
+    ) {
+      candidates.push(
+        "/opt/homebrew/bin/docker",
+        "/usr/local/bin/docker",
+        "/usr/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+        "/opt/homebrew/bin/podman",
+        "/usr/local/bin/podman",
+        "/usr/bin/podman",
+        "/opt/homebrew/bin/podman-compose",
+        "/usr/local/bin/podman-compose",
+        "/usr/bin/podman-compose"
+      );
+    }
+
+    for (const candidate of candidates) {
+      if (!path.isAbsolute(candidate)) {
+        continue;
+      }
+      try {
+        if (await this.isContainerCliAvailable(candidate)) {
+          return candidate;
+        }
+      } catch {
+        // Keep trying candidates.
+      }
+    }
+
+    const pathCandidates = [configured, "docker", "podman", "podman-compose"].filter(
+      (value): value is string => Boolean(value && value.trim())
+    );
+    for (const candidate of pathCandidates) {
+      if (await this.isContainerCliAvailable(candidate)) {
+        return candidate;
+      }
+    }
+
+    return configured || "docker";
+  }
+
+  private async isContainerCliAvailable(cliPath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const child = spawn(cliPath, ["--version"]);
+      child.on("error", () => resolve(false));
+      child.on("close", (code) => resolve(code === 0));
+    });
+  }
+
+  private getContainerCliKind(cliPath: string): "docker" | "podman" | "podman-compose" {
+    const base = path.basename(cliPath);
+    if (base === "podman-compose") {
+      return "podman-compose";
+    }
+    if (base.includes("podman")) {
+      return "podman";
+    }
+    return "docker";
+  }
+
+  private async isContainerDaemonRunning(cliPath: string): Promise<boolean> {
+    const kind = this.getContainerCliKind(cliPath);
+    let command = cliPath;
+    let args = ["info"];
+    if (kind === "podman-compose") {
+      const podmanBin = await this.resolvePodmanBin();
+      if (!podmanBin) {
+        return false;
+      }
+      command = podmanBin;
+    }
+
+    return new Promise((resolve) => {
+      const child = spawn(command, args);
+      let resolved = false;
+      const finish = (ok: boolean): void => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        resolve(ok);
+      };
+      const timeout = setTimeout(() => {
+        child.kill();
+        finish(false);
+      }, 2000);
+      child.on("error", () => {
+        clearTimeout(timeout);
+        finish(false);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        finish(code === 0);
+      });
+    });
+  }
+
+  private getContainerDaemonHint(cliPath: string): string {
+    const kind = this.getContainerCliKind(cliPath);
+    if (kind === "podman" || kind === "podman-compose") {
+      return "Podman machine not running. Run `podman machine start`.";
+    }
+    return "Docker Desktop is not running. Start Docker Desktop.";
+  }
+
+  private async supportsComposeSubcommand(cliPath: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const child = spawn(cliPath, ["compose", "version"]);
+      child.on("error", () => resolve(false));
+      child.on("close", (code) => resolve(code === 0));
+    });
+  }
+
+  private async findPodmanComposePath(): Promise<string | null> {
+    const candidates = [
+      "/opt/homebrew/bin/podman-compose",
+      "/usr/local/bin/podman-compose",
+      "/usr/bin/podman-compose",
+    ];
+    for (const candidate of candidates) {
+      try {
+        await fs.access(candidate);
+        return candidate;
+      } catch {
+        // Keep trying candidates.
+      }
+    }
+    if (await this.isContainerCliAvailable("podman-compose")) {
+      return "podman-compose";
+    }
+    return null;
+  }
+
+  private async resolvePodmanBin(): Promise<string | null> {
+    const candidates = ["/opt/homebrew/bin/podman", "/usr/local/bin/podman", "/usr/bin/podman"];
+    for (const candidate of candidates) {
+      if (await this.isContainerCliAvailable(candidate)) {
+        return candidate;
+      }
+    }
+    if (await this.isContainerCliAvailable("podman")) {
+      return "podman";
+    }
+    return null;
+  }
+
+  private async resolveComposeCommand(
+    cliPath: string
+  ): Promise<{ command: string; argsPrefix: string[] } | null> {
+    const base = path.basename(cliPath);
+    if (base === "podman-compose") {
+      return { command: cliPath, argsPrefix: [] };
+    }
+    if (base === "podman") {
+      const podmanCompose = await this.findPodmanComposePath();
+      if (podmanCompose) {
+        return { command: podmanCompose, argsPrefix: [] };
+      }
+      if (await this.supportsComposeSubcommand(cliPath)) {
+        return { command: cliPath, argsPrefix: ["compose"] };
+      }
+      return null;
+    }
+    if (await this.supportsComposeSubcommand(cliPath)) {
+      return { command: cliPath, argsPrefix: ["compose"] };
+    }
+    return null;
+  }
+
+  private async autoDetectContainerCliOnLoad(): Promise<void> {
+    const resolved = await this.resolveDockerPath();
+    if (!(await this.isContainerCliAvailable(resolved))) {
+      this.notifyContainerOnce(
+        "Docker or Podman not found. Install Docker Desktop or Podman and set Docker/Podman path in settings."
+      );
+      return;
+    }
+    const configured = this.settings.dockerPath?.trim() || "docker";
+    const configuredAvailable = await this.isContainerCliAvailable(configured);
+    const shouldAutoSet =
+      !configuredAvailable ||
+      configured === "docker" ||
+      configured === "podman" ||
+      configured === "podman-compose";
+    if (shouldAutoSet && resolved && resolved !== configured) {
+      this.settings.dockerPath = resolved;
+      await this.saveSettings();
+    }
+    if (!(await this.isContainerDaemonRunning(resolved))) {
+      this.notifyContainerOnce(this.getContainerDaemonHint(resolved));
+    }
+  }
+
   private getDockerProjectName(): string {
     const vaultPath = this.getVaultBasePath();
     const vaultName = path
@@ -3569,6 +3865,101 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch {
       return 6379;
     }
+  }
+
+  private getVaultPreferredRedisPort(): number {
+    const hash = createHash("sha1").update(this.getVaultBasePath()).digest("hex");
+    const offset = Number.parseInt(hash.slice(0, 4), 16) % 2000;
+    return 6400 + offset;
+  }
+
+  private getRedisHostFromUrl(): string {
+    try {
+      const parsed = new URL(this.settings.redisUrl);
+      return parsed.hostname || "127.0.0.1";
+    } catch {
+      return "127.0.0.1";
+    }
+  }
+
+  private isLocalRedisHost(host: string): boolean {
+    const normalized = host.trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+    if (normalized === "localhost" || normalized === "0.0.0.0" || normalized === "::1") {
+      return true;
+    }
+    return normalized.startsWith("127.");
+  }
+
+  private getPortCheckHost(host: string): string {
+    if (!this.isLocalRedisHost(host)) {
+      return host;
+    }
+    return "127.0.0.1";
+  }
+
+  private async isPortFree(host: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => resolve(false));
+      server.once("listening", () => {
+        server.close(() => resolve(true));
+      });
+      server.listen(port, host);
+    });
+  }
+
+  private async findAvailablePort(host: string, startPort: number): Promise<number | null> {
+    const maxAttempts = 25;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const port = startPort + attempt;
+      if (await this.isPortFree(host, port)) {
+        return port;
+      }
+    }
+    return null;
+  }
+
+  private updateRedisUrlPort(redisUrl: string, port: number): string {
+    try {
+      const parsed = new URL(redisUrl);
+      parsed.port = String(port);
+      return parsed.toString();
+    } catch {
+      return `redis://127.0.0.1:${port}`;
+    }
+  }
+
+  private async isRedisReachable(redisUrl: string): Promise<boolean> {
+    let host = "127.0.0.1";
+    let port = 6379;
+    try {
+      const parsed = new URL(redisUrl);
+      host = parsed.hostname || host;
+      port = parsed.port ? Number(parsed.port) : port;
+    } catch {
+      return false;
+    }
+
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      let done = false;
+      const finish = (ok: boolean): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.setTimeout(500);
+      socket.once("connect", () => finish(true));
+      socket.once("timeout", () => finish(false));
+      socket.once("error", () => finish(false));
+      socket.connect(port, host);
+    });
   }
 
   private getRedisNamespace(): string {
@@ -3594,30 +3985,160 @@ export default class ZoteroRagPlugin extends Plugin {
     return `${prefix}${this.getRedisNamespace()}:`;
   }
 
+  private async isComposeProjectRunning(
+    composeCommand: string,
+    composeArgsPrefix: string[],
+    composePath: string,
+    project: string,
+    env?: NodeJS.ProcessEnv
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const child = spawn(
+        composeCommand,
+        [...composeArgsPrefix, "-p", project, "-f", composePath, "ps", "-q"],
+        {
+          cwd: path.dirname(composePath),
+          env,
+        }
+      );
+      let stdout = "";
+      child.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
+      child.on("error", (error) => {
+        console.warn("Redis Stack status check failed", error);
+        resolve(false);
+      });
+      child.on("close", (code) => {
+        if (code !== 0) {
+          resolve(false);
+          return;
+        }
+        resolve(stdout.trim().length > 0);
+      });
+    });
+  }
+
   async startRedisStack(silent?: boolean): Promise<void> {
     try {
       await this.ensureBundledTools();
       const composePath = this.getDockerComposePath();
       const dataDir = this.getRedisDataDir();
       await fs.mkdir(dataDir, { recursive: true });
-      const dockerPath = this.settings.dockerPath?.trim() || "docker";
+      const dockerPath = await this.resolveDockerPath();
+      const configuredDockerPath = this.settings.dockerPath?.trim() || "docker";
+      const shouldAutoSet =
+        !(await this.isContainerCliAvailable(configuredDockerPath)) ||
+        !configuredDockerPath ||
+        configuredDockerPath === "docker" ||
+        configuredDockerPath === "podman" ||
+        configuredDockerPath === "podman-compose";
+      if (shouldAutoSet && dockerPath && dockerPath !== configuredDockerPath) {
+        this.settings.dockerPath = dockerPath;
+        await this.saveSettings();
+        if (!silent) {
+          new Notice(`Docker/Podman path set to ${dockerPath}.`);
+        }
+      }
+      if (!(await this.isContainerCliAvailable(dockerPath))) {
+        if (!silent) {
+          new Notice(
+            'Docker or Podman not found. Install Docker Desktop or Podman and set "Docker/Podman path" in settings.'
+          );
+        }
+        return;
+      }
+      if (!(await this.isContainerDaemonRunning(dockerPath))) {
+        if (!silent) {
+          new Notice(this.getContainerDaemonHint(dockerPath));
+        }
+        return;
+      }
+      const composeCommand = await this.resolveComposeCommand(dockerPath);
+      if (!composeCommand) {
+        if (!silent) {
+          new Notice(
+            "Compose support not found. Install Docker Desktop or Podman with podman-compose."
+          );
+        }
+        return;
+      }
+      const composeEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (path.basename(composeCommand.command) === "podman-compose") {
+        const podmanBin = await this.resolvePodmanBin();
+        if (podmanBin) {
+          composeEnv.PODMAN_BIN = podmanBin;
+          if (path.isAbsolute(podmanBin)) {
+            const podmanDir = path.dirname(podmanBin);
+            const existingPath = composeEnv.PATH || "";
+            if (!existingPath.split(path.delimiter).includes(podmanDir)) {
+              composeEnv.PATH = `${podmanDir}${path.delimiter}${existingPath}`;
+            }
+          }
+        }
+      }
       const project = this.getDockerProjectName();
-      const redisPort = String(this.getRedisPortFromUrl());
+      if (
+        await this.isComposeProjectRunning(
+          composeCommand.command,
+          composeCommand.argsPrefix,
+          composePath,
+          project,
+          composeEnv
+        )
+      ) {
+        if (!silent) {
+          new Notice("Redis Stack already running for this vault.");
+        }
+        return;
+      }
+
+      const requestedPort = this.getRedisPortFromUrl();
+      const redisHost = this.getRedisHostFromUrl();
+      const portCheckHost = this.getPortCheckHost(redisHost);
+      const autoAssign = this.settings.autoAssignRedisPort && this.isLocalRedisHost(redisHost);
+      let redisUrl = this.settings.redisUrl;
+      let redisPort = requestedPort;
+
+      if (autoAssign) {
+        const preferredPort =
+          requestedPort === 6379 ? this.getVaultPreferredRedisPort() : requestedPort;
+        const availablePort = await this.findAvailablePort(portCheckHost, preferredPort);
+        if (!availablePort) {
+          throw new Error(`No available Redis port found starting at ${preferredPort}.`);
+        }
+        if (availablePort !== requestedPort) {
+          redisPort = availablePort;
+          redisUrl = this.updateRedisUrlPort(redisUrl, redisPort);
+          this.settings.redisUrl = redisUrl;
+          await this.saveSettings();
+          if (!silent) {
+            new Notice(`Using Redis port ${redisPort} for this vault.`);
+          }
+        }
+      } else if (await this.isRedisReachable(redisUrl)) {
+        if (!silent) {
+          new Notice(`Redis already running at ${redisUrl}.`);
+        }
+        return;
+      }
+      composeEnv.ZRR_DATA_DIR = dataDir;
+      composeEnv.ZRR_PORT = String(redisPort);
       try {
         await this.runCommand(
-          dockerPath,
-          ["compose", "-p", project, "-f", composePath, "down"],
-          { cwd: path.dirname(composePath) }
+          composeCommand.command,
+          [...composeCommand.argsPrefix, "-p", project, "-f", composePath, "down"],
+          { cwd: path.dirname(composePath), env: composeEnv }
         );
       } catch (error) {
         console.warn("Redis Stack stop before restart failed", error);
       }
       await this.runCommand(
-        dockerPath,
-        ["compose", "-p", project, "-f", composePath, "up", "-d"],
+        composeCommand.command,
+        [...composeCommand.argsPrefix, "-p", project, "-f", composePath, "up", "-d"],
         {
           cwd: path.dirname(composePath),
-          env: { ...process.env, ZRR_DATA_DIR: dataDir, ZRR_PORT: redisPort },
+          env: composeEnv,
         }
       );
       if (!silent) {
@@ -3625,7 +4146,7 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     } catch (error) {
       if (!silent) {
-        new Notice("Failed to start Redis Stack. Check Docker Desktop and File Sharing.");
+        new Notice("Failed to start Redis Stack. Check Docker/Podman and file sharing.");
       }
       console.error("Failed to start Redis Stack", error);
     }
@@ -3643,22 +4164,48 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       new Notice("Setting up Python environment...");
+      this.showStatusProgress("Setting up Python environment...", null);
+      console.log(`Python env: using plugin dir ${pluginDir}`);
+      console.log(`Python env: venv path ${venvDir}`);
 
       if (!existsSync(venvPython)) {
         const bootstrap = await this.resolveBootstrapPython();
+        console.log(`Python env: creating venv with ${bootstrap.command} ${bootstrap.args.join(" ")}`);
         await this.runCommand(bootstrap.command, [...bootstrap.args, "-m", "venv", venvDir], {
           cwd: pluginDir,
         });
       }
 
-      await this.runCommand(venvPython, ["-m", "pip", "install", "-r", requirementsPath], {
-        cwd: pluginDir,
-      });
+      await this.runCommandStreaming(
+        venvPython,
+        ["-m", "pip", "install", "-r", requirementsPath],
+        { cwd: pluginDir },
+        (line) => {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            return;
+          }
+          const collecting = trimmed.match(/^Collecting\s+([^\s]+)/);
+          if (collecting) {
+            this.showStatusProgress(`Installing ${collecting[1]}...`, null);
+            return;
+          }
+          if (trimmed.startsWith("Installing collected packages")) {
+            this.showStatusProgress("Installing packages...", null);
+            return;
+          }
+          if (trimmed.startsWith("Successfully installed")) {
+            this.showStatusProgress("Python environment ready.", 100);
+          }
+        }
+      );
 
       this.settings.pythonPath = venvPython;
       await this.saveSettings();
+      this.clearStatusProgress();
       new Notice("Python environment ready.");
     } catch (error) {
+      this.clearStatusProgress();
       new Notice("Failed to set up Python environment. See console for details.");
       console.error("Python env setup failed", error);
     }
@@ -3728,10 +4275,16 @@ export default class ZoteroRagPlugin extends Plugin {
         stderr += data.toString();
       });
 
+      child.on("error", (error) => {
+        this.handlePythonProcessError(String(error));
+        reject(error);
+      });
+
       child.on("close", (code) => {
         if (code === 0) {
           resolve();
         } else {
+          this.handlePythonProcessError(stderr);
           reject(new Error(stderr || `Process exited with code ${code}`));
         }
       });
@@ -3752,6 +4305,10 @@ export default class ZoteroRagPlugin extends Plugin {
       let stderr = "";
       child.stderr.on("data", (data) => {
         stderr += data.toString();
+      });
+
+      child.on("error", (error) => {
+        reject(error);
       });
 
       child.on("close", (code) => {
@@ -3811,6 +4368,11 @@ export default class ZoteroRagPlugin extends Plugin {
         stderr += data.toString();
       });
 
+      child.on("error", (error) => {
+        this.handlePythonProcessError(String(error));
+        reject(error);
+      });
+
       child.on("close", (code) => {
         if (stdoutBuffer.trim()) {
           handleLine(stdoutBuffer);
@@ -3821,10 +4383,90 @@ export default class ZoteroRagPlugin extends Plugin {
         if (code === 0) {
           resolve();
         } else {
+          this.handlePythonProcessError(stderr);
           reject(new Error(stderr || `Process exited with code ${code}`));
         }
       });
     });
+  }
+
+  private runCommandStreaming(
+    command: string,
+    args: string[],
+    options: { cwd?: string; env?: NodeJS.ProcessEnv },
+    onLine: (line: string) => void
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd: options?.cwd,
+        env: options?.env,
+      });
+
+      const handleChunk = (chunk: Buffer): void => {
+        const text = chunk.toString();
+        text.split(/\r?\n/).forEach((line) => {
+          if (line.trim()) {
+            onLine(line);
+          }
+        });
+      };
+
+      let stderr = "";
+      child.stdout.on("data", handleChunk);
+      child.stderr.on("data", (data) => {
+        stderr += data.toString();
+        handleChunk(data);
+      });
+
+      child.on("error", (error) => {
+        reject(error);
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(stderr || `Process exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  private handlePythonProcessError(raw: string): void {
+    if (!raw) {
+      return;
+    }
+    const missingModule = raw.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/);
+    if (missingModule) {
+      const notice = `Python env missing module '${missingModule[1]}'. Run "Python environment" in settings.`;
+      this.notifyPythonEnvOnce(notice);
+      return;
+    }
+    if (/No module named ['"]/.test(raw)) {
+      const notice = "Python env missing required modules. Run \"Python environment\" in settings.";
+      this.notifyPythonEnvOnce(notice);
+      return;
+    }
+    if (/ENOENT|No such file or directory|not found/.test(raw)) {
+      const notice = "Python not found. Configure Python path or run \"Python environment\" in settings.";
+      this.notifyPythonEnvOnce(notice);
+    }
+  }
+
+  private notifyPythonEnvOnce(message: string): void {
+    if (this.lastPythonEnvNotice === message) {
+      return;
+    }
+    this.lastPythonEnvNotice = message;
+    new Notice(message);
+  }
+
+  private notifyContainerOnce(message: string): void {
+    if (this.lastContainerNotice === message) {
+      return;
+    }
+    this.lastContainerNotice = message;
+    new Notice(message);
   }
 
   // Logging helpers
@@ -3894,10 +4536,16 @@ export default class ZoteroRagPlugin extends Plugin {
         stderr += data.toString();
       });
 
+      child.on("error", (error) => {
+        this.handlePythonProcessError(String(error));
+        reject(error);
+      });
+
       child.on("close", (code) => {
         if (code === 0) {
           resolve(stdout.trim());
         } else {
+          this.handlePythonProcessError(stderr);
           reject(new Error(stderr || `Process exited with code ${code}`));
         }
       });

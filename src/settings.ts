@@ -24,6 +24,7 @@ export interface ZoteroRagSettings {
   chatOutputDir: string;
   chatPaneLocation: "right" | "main";
   redisUrl: string;
+  autoAssignRedisPort: boolean;
   redisIndex: string;
   redisPrefix: string;
   embedBaseUrl: string;
@@ -78,6 +79,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatOutputDir: "zotero/chats",
   chatPaneLocation: "right",
   redisUrl: "redis://127.0.0.1:6379",
+  autoAssignRedisPort: true,
   redisIndex: "idx:zotero",
   redisPrefix: "zotero:chunk:",
   embedBaseUrl: "http://localhost:1234/v1",
@@ -242,8 +244,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Docker path")
-      .setDesc("CLI path for Docker (used to start Redis Stack).")
+      .setName("Docker/Podman path")
+      .setDesc("CLI path for Docker or Podman (used to start Redis Stack).")
       .addText((text) =>
         text
           .setPlaceholder("docker")
@@ -267,7 +269,17 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Auto-start Redis Stack (Docker Compose)")
+      .setName("Auto-assign Redis port")
+      .setDesc("When starting Redis Stack, pick a free local port and update the Redis URL.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoAssignRedisPort).onChange(async (value) => {
+          this.plugin.settings.autoAssignRedisPort = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto-start Redis Stack (Docker/Podman Compose)")
       .setDesc("Requires Docker Desktop running and your vault path shared with Docker.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
@@ -278,7 +290,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Start Redis Stack now")
-      .setDesc("Restarts Docker Compose with the vault data directory.")
+      .setDesc("Restarts Docker/Podman Compose with the vault data directory.")
       .addButton((button) =>
         button.setButtonText("Start").onClick(async () => {
           await this.plugin.startRedisStack();
