@@ -238,6 +238,51 @@ def run_lexical_search(
         return []
     return parse_results(raw)
 
+def rrf_fuse(
+    vector_results: List[Dict[str, Any]],
+    lexical_results: List[Dict[str, Any]],
+    limit: int,
+    rrf_k: int = 60,
+    vector_weight: float = 1.0,
+    lexical_weight: float = 1.0,
+) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    if not lexical_results:
+        return vector_results[:limit]
+    if not vector_results:
+        return lexical_results[:limit]
+
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    def merge_fields(target: Dict[str, Any], source: Dict[str, Any]) -> None:
+        for key, value in source.items():
+            if key not in target or target.get(key) in ("", None):
+                target[key] = value
+
+    def add_results(results: List[Dict[str, Any]], weight: float) -> None:
+        for rank, item in enumerate(results, start=1):
+            chunk_id = item.get("chunk_id")
+            if not chunk_id:
+                continue
+            entry = merged.get(chunk_id)
+            if not entry:
+                entry = dict(item)
+                entry["_rrf_score"] = 0.0
+                merged[chunk_id] = entry
+            else:
+                merge_fields(entry, item)
+            entry["_rrf_score"] += weight / (rrf_k + rank)
+
+    add_results(vector_results, vector_weight)
+    add_results(lexical_results, lexical_weight)
+
+    fused = sorted(merged.values(), key=lambda item: item.get("_rrf_score", 0.0), reverse=True)
+    for item in fused:
+        item["score"] = f"{item.get('_rrf_score', 0.0):.6f}"
+        item.pop("_rrf_score", None)
+    return fused[:limit]
+
 def is_content_chunk(chunk: Dict[str, Any]) -> bool:
     text = chunk.get("text", "")
     if not text:
@@ -285,6 +330,95 @@ def build_context(retrieved: List[Dict[str, Any]]) -> str:
         )
         blocks.append(block)
     return "\n\n".join(blocks)
+
+def rerank_chunks(
+    query: str,
+    chunks: List[Dict[str, Any]],
+    base_url: str,
+    api_key: str,
+    model: str,
+    max_chars: int,
+) -> List[Dict[str, Any]]:
+    if not chunks:
+        return chunks
+    if not base_url or not model:
+        return chunks
+    entries = []
+    for idx, chunk in enumerate(chunks, start=1):
+        text = str(chunk.get("text", "")).strip()
+        text = re.sub(r"\s+", " ", text)
+        if max_chars > 0:
+            text = text[:max_chars]
+        doc_id = str(chunk.get("doc_id", "")).strip()
+        page_start = str(chunk.get("page_start", "")).strip()
+        page_end = str(chunk.get("page_end", "")).strip()
+        pages = f"{page_start}-{page_end}" if page_start or page_end else ""
+        header = f"[doc_id: {doc_id} pages: {pages}]"
+        entries.append(f"{idx}. {header} {text}".strip())
+
+    system_prompt = (
+        "You are a retrieval reranker. Score each passage for relevance to the query on a 0-100 scale "
+        "(100 = directly answers the query). Return ONLY JSON."
+    )
+    user_prompt = (
+        "Query:\n"
+        f"{query}\n\n"
+        "Passages:\n"
+        + "\n".join(entries)
+        + "\n\nReturn a JSON array like "
+        "[{\"id\": 1, \"score\": 92}, {\"id\": 2, \"score\": 12}] sorted by your scores."
+    )
+    try:
+        response = request_chat(
+            base_url,
+            api_key,
+            model,
+            0.0,
+            system_prompt,
+            user_prompt,
+        )
+    except Exception:
+        return chunks
+
+    payload = None
+    try:
+        payload = json.loads(response)
+    except Exception:
+        try:
+            start = response.find("[")
+            end = response.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                payload = json.loads(response[start : end + 1])
+        except Exception:
+            payload = None
+    if not isinstance(payload, list):
+        return chunks
+
+    scores: Dict[int, float] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("id"))
+        except Exception:
+            continue
+        try:
+            score = float(item.get("score"))
+        except Exception:
+            continue
+        scores[idx] = score
+
+    if not scores:
+        return chunks
+
+    reranked: List[Dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        chunk["rrf_score"] = chunk.get("score", "")
+        chunk["score"] = f"{scores.get(idx, 0.0):.2f}"
+        reranked.append(chunk)
+
+    reranked.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return reranked
 
 
 def load_history_messages(path: str) -> List[Dict[str, Any]]:
@@ -372,6 +506,9 @@ def main() -> int:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--history-file", help="Optional JSON file with recent chat history")
+    parser.add_argument("--rerank", action="store_true")
+    parser.add_argument("--rerank-candidates", type=int, default=30)
+    parser.add_argument("--rerank-max-chars", type=int, default=800)
     args = parser.parse_args()
 
     try:
@@ -386,11 +523,12 @@ def main() -> int:
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
 
+    vector_limit = max(args.rerank_candidates, args.k) if args.rerank else max(args.k * 3, 20)
     try:
         raw = client.execute_command(
             "FT.SEARCH",
             args.index,
-            f"*=>[KNN {args.k} @embedding $vec AS score]",
+            f"*=>[KNN {vector_limit} @embedding $vec AS score]",
             "PARAMS",
             "2",
             "vec",
@@ -415,24 +553,24 @@ def main() -> int:
         eprint(f"RedisSearch query failed: {exc}")
         return 2
 
-    retrieved = parse_results(raw)
+    vector_results = parse_results(raw)
 
-    # merge lexical results (unchanged)
     keywords = extract_keywords(args.query)
-    lexical_limit = max(args.k, 5)
+    lexical_limit = max(args.rerank_candidates, args.k) if args.rerank else max(args.k * 3, 20)
     lexical_results = run_lexical_search(client, args.index, keywords, lexical_limit)
-    if lexical_results:
-        seen = {item.get("chunk_id") for item in retrieved if item.get("chunk_id")}
-        for item in lexical_results:
-            chunk_id = item.get("chunk_id")
-            if not chunk_id or chunk_id in seen:
-                continue
-            retrieved.append(item)
-            seen.add(chunk_id)
+    retrieved = rrf_fuse(vector_results, lexical_results, args.k)
 
-        max_total = args.k + lexical_limit
-        if len(retrieved) > max_total:
-            retrieved = retrieved[:max_total]
+    if args.rerank:
+        rerank_limit = max(args.rerank_candidates, args.k)
+        retrieved = retrieved[:rerank_limit]
+        retrieved = rerank_chunks(
+            args.query,
+            retrieved,
+            args.chat_base_url,
+            args.chat_api_key,
+            args.chat_model,
+            args.rerank_max_chars,
+        )
 
     # Strict filter
     filtered = [

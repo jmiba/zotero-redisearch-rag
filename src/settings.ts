@@ -35,6 +35,9 @@ export interface ZoteroRagSettings {
   chatModel: string;
   chatTemperature: number;
   chatHistoryMessages: number;
+  enableLlmRerank: boolean;
+  rerankCandidates: number;
+  rerankMaxChars: number;
   ocrMode: OcrMode;
   chunkingMode: ChunkingMode;
   maxChunkChars: number;
@@ -90,6 +93,9 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
+  enableLlmRerank: false,
+  rerankCandidates: 30,
+  rerankMaxChars: 800,
   ocrMode: "auto",
   chunkingMode: "page",
   maxChunkChars: 4000,
@@ -433,6 +439,46 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.embedModel)
           .onChange(async (value) => {
             this.plugin.settings.embedModel = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("h3", { text: "Retrieval" });
+
+    new Setting(containerEl)
+      .setName("LLM rerank results")
+      .setDesc("Use the chat model to rerank a larger candidate set (slower, higher precision).")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableLlmRerank).onChange(async (value) => {
+          this.plugin.settings.enableLlmRerank = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Rerank candidate count")
+      .setDesc("Number of candidates to pull before reranking.")
+      .addText((text) =>
+        text
+          .setPlaceholder("30")
+          .setValue(String(this.plugin.settings.rerankCandidates))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.rerankCandidates = Number.isFinite(parsed) ? Math.max(5, parsed) : 30;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Rerank max chars per chunk")
+      .setDesc("Trim each candidate chunk to this length for the rerank prompt.")
+      .addText((text) =>
+        text
+          .setPlaceholder("800")
+          .setValue(String(this.plugin.settings.rerankMaxChars))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.rerankMaxChars = Number.isFinite(parsed) ? Math.max(200, parsed) : 800;
             await this.plugin.saveSettings();
           })
       );

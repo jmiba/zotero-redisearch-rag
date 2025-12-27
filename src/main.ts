@@ -1062,6 +1062,15 @@ export default class ZoteroRagPlugin extends Plugin {
       String(this.settings.chatTemperature),
       "--stream",
     ];
+    if (this.settings.enableLlmRerank) {
+      args.push(
+        "--rerank",
+        "--rerank-candidates",
+        String(this.settings.rerankCandidates),
+        "--rerank-max-chars",
+        String(this.settings.rerankMaxChars)
+      );
+    }
 
     const historyPayload = this.buildChatHistoryPayload(historyMessages);
     const historyFile = await this.writeChatHistoryTemp(historyPayload);
