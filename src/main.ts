@@ -3644,28 +3644,40 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async resolveDockerPath(): Promise<string> {
     const configured = this.settings.dockerPath?.trim();
+    const dockerCandidates = [
+      "/opt/homebrew/bin/docker",
+      "/usr/local/bin/docker",
+      "/usr/bin/docker",
+      "/Applications/Docker.app/Contents/Resources/bin/docker",
+    ];
+    const podmanCandidates = ["/opt/homebrew/bin/podman", "/usr/local/bin/podman", "/usr/bin/podman"];
+    const podmanComposeCandidates = [
+      "/opt/homebrew/bin/podman-compose",
+      "/usr/local/bin/podman-compose",
+      "/usr/bin/podman-compose",
+    ];
     const candidates: string[] = [];
     if (configured) {
       candidates.push(configured);
     }
+
+    const preferredKind = configured ? this.getContainerCliKind(configured) : "docker";
+    const orderedGroups =
+      preferredKind === "podman-compose"
+        ? [podmanComposeCandidates, podmanCandidates, dockerCandidates]
+        : preferredKind === "podman"
+          ? [podmanCandidates, podmanComposeCandidates, dockerCandidates]
+          : [dockerCandidates, podmanCandidates, podmanComposeCandidates];
+
     if (
       !configured ||
       configured === "docker" ||
       configured === "podman" ||
       configured === "podman-compose"
     ) {
-      candidates.push(
-        "/opt/homebrew/bin/docker",
-        "/usr/local/bin/docker",
-        "/usr/bin/docker",
-        "/Applications/Docker.app/Contents/Resources/bin/docker",
-        "/opt/homebrew/bin/podman",
-        "/usr/local/bin/podman",
-        "/usr/bin/podman",
-        "/opt/homebrew/bin/podman-compose",
-        "/usr/local/bin/podman-compose",
-        "/usr/bin/podman-compose"
-      );
+      for (const group of orderedGroups) {
+        candidates.push(...group);
+      }
     }
 
     for (const candidate of candidates) {
@@ -3681,9 +3693,12 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
 
-    const pathCandidates = [configured, "docker", "podman", "podman-compose"].filter(
-      (value): value is string => Boolean(value && value.trim())
-    );
+    const pathCandidates = [
+      configured,
+      preferredKind === "podman" ? "podman" : "docker",
+      preferredKind === "podman" ? "docker" : "podman",
+      "podman-compose",
+    ].filter((value): value is string => Boolean(value && value.trim()));
     for (const candidate of pathCandidates) {
       if (await this.isContainerCliAvailable(candidate)) {
         return candidate;

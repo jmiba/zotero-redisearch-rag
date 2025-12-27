@@ -71,7 +71,7 @@ Recommended: use the plugin command
 - Command palette -> "Start Redis Stack (Docker Compose)"
 
 Notes:
-- Docker Desktop or Podman must be running (Podman needs `podman compose` or `podman-compose`).
+- Docker Desktop or Podman machine must be running (Podman uses `podman compose` or `podman-compose`).
 - Your vault folder must be shared in Docker settings.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
 - Multiple vaults:
