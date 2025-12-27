@@ -3519,6 +3519,9 @@ export default class ZoteroRagPlugin extends Plugin {
       args.push("--llm-cleanup-min-quality", String(this.settings.llmCleanupMinQuality));
       args.push("--llm-cleanup-max-chars", String(this.settings.llmCleanupMaxChars));
     }
+    if (this.settings.postprocessTextLayer) {
+      args.push("--postprocess-text-layer");
+    }
 
     // Auto-enable dictionary-based correction if a bundled wordlist exists
     const pluginDir = this.getPluginDir();

@@ -77,6 +77,7 @@ class DoclingProcessingConfig:
     quality_image_heavy_min_images: int = 2
     quality_image_heavy_ratio_threshold: float = 0.6
     quality_image_heavy_penalty: float = 0.3
+    quality_image_page_ratio_threshold: float = 0.7
     column_detect_enable: bool = True
     column_detect_dpi: int = 150
     column_detect_max_pages: int = 3
@@ -119,6 +120,7 @@ class DoclingProcessingConfig:
     llm_correction_min_quality: float = 0.35
     llm_correction_max_chars: int = 2000
     postprocess_markdown: bool = False
+    postprocess_text_layer: bool = False
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
@@ -148,6 +150,7 @@ class TextQuality:
     dictionary_hit_ratio: Optional[float] = None
     spellchecker_hit_ratio: Optional[float] = None
     image_heavy_ratio: Optional[float] = None
+    image_page_ratio: Optional[float] = None
 
 @dataclass
 class ColumnLayoutDetection:
@@ -358,6 +361,21 @@ def compute_image_heavy_ratio(
     return heavy / total
 
 
+def compute_image_page_ratio(pages: Sequence[Dict[str, Any]]) -> Optional[float]:
+    if not pages:
+        return None
+    total = 0
+    with_images = 0
+    for page in pages:
+        total += 1
+        image_count = int(page.get("image_count") or 0)
+        if image_count > 0:
+            with_images += 1
+    if not total:
+        return None
+    return with_images / total
+
+
 def estimate_text_quality(
     pages: Sequence[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
@@ -383,6 +401,7 @@ def estimate_text_quality(
     dictionary_hit_ratio = None
     spellchecker_hit_ratio = None
     image_heavy_ratio = None
+    image_page_ratio = None
     if config and config.quality_use_wordfreq and languages:
         dictionary_hit_ratio = compute_dictionary_hit_ratio(
             tokens,
@@ -392,6 +411,8 @@ def estimate_text_quality(
     if config and languages:
         spellchecker_hit_ratio = compute_spellchecker_hit_ratio(tokens, languages, config)
         image_heavy_ratio = compute_image_heavy_ratio(pages, config)
+    if config:
+        image_page_ratio = compute_image_page_ratio(pages)
     lexicon_ratio = None
     if dictionary_hit_ratio is not None and spellchecker_hit_ratio is not None:
         lexicon_ratio = max(dictionary_hit_ratio, spellchecker_hit_ratio)
@@ -418,6 +439,7 @@ def estimate_text_quality(
         dictionary_hit_ratio,
         spellchecker_hit_ratio,
         image_heavy_ratio,
+        image_page_ratio,
     )
 
 
@@ -607,6 +629,7 @@ def detect_available_ocr_engines() -> List[str]:
     available: List[str] = []
     try:
         import paddleocr  # noqa: F401
+        import paddle  # noqa: F401
         from pdf2image import convert_from_path  # noqa: F401
         available.append("paddle")
     except Exception:
@@ -1139,7 +1162,7 @@ def restore_missing_spaces(text: str, languages: str, hs=None) -> str:
     def score_word(w: str) -> Tuple[float, bool]:
         spelled = False
         try:
-            if hs is not None and hs.spell(w):
+            if hs is not None and (hs.spell(w) or hs.spell(w.lower())):
                 spelled = True
         except Exception:
             pass
@@ -1156,6 +1179,9 @@ def restore_missing_spaces(text: str, languages: str, hs=None) -> str:
     token_re = re.compile(r"[A-Za-zÄÖÜäöüß]{12,}")
 
     def consider_split(tok: str) -> str:
+        base_score, base_dict = score_word(tok)
+        if base_dict or base_score >= 3.0:
+            return tok
         best = None  # type: Optional[Tuple[str, float, bool, str, float, bool]]
 
         # Try camelCase boundary first: a…zA…Z
@@ -1274,6 +1300,7 @@ def postprocess_text(
     config: DoclingProcessingConfig,
     languages: str,
     wordlist: Sequence[str],
+    allow_missing_space: bool = True,
 ) -> str:
     if not text:
         return text
@@ -1281,14 +1308,69 @@ def postprocess_text(
     cleaned = replace_ligatures(cleaned)
     cleaned = normalize_whitespace(cleaned)
     hs = build_spellchecker_for_languages(config, languages) if config.enable_hunspell else None
-    # Attempt to restore missing spaces before word-level corrections
     try:
-        restored = restore_missing_spaces(cleaned, languages, hs)
-        if restored != cleaned:
-            LOGGER.info("Applied missing-space restoration pass")
-        cleaned = restored
-    except Exception as exc:
-        LOGGER.warning("Missing-space restoration failed: %s", exc)
+        from wordfreq import zipf_frequency as _zipf
+    except Exception:
+        _zipf = None
+    lang_codes = select_wordfreq_languages(languages)
+
+    dictionary = {word.lower() for word in (wordlist or [])}
+
+    def is_valid_word(word: str) -> bool:
+        lower = word.lower()
+        if lower in dictionary:
+            return True
+        if hs is not None and (hs.spell(word) or hs.spell(lower)):
+            return True
+        if _zipf is not None:
+            try:
+                return max(_zipf(lower, lc) for lc in lang_codes) >= 3.0
+            except Exception:
+                return False
+        return False
+
+    def match_case(candidate: str, original: str) -> str:
+        if original.isupper():
+            return candidate.upper()
+        if original[:1].isupper():
+            return candidate.capitalize()
+        return candidate
+
+    def merge_broken_words(input_text: str) -> str:
+        token_re = re.compile(r"\b([A-Za-zÄÖÜäöüß]{2,})\s+([A-Za-zÄÖÜäöüß]{2,})\b")
+
+        def repl(match: re.Match) -> str:
+            w1 = match.group(1)
+            w2 = match.group(2)
+            combined = w1 + w2
+            if len(combined) < 5:
+                return match.group(0)
+            if not is_valid_word(combined):
+                return match.group(0)
+            w1_ok = is_valid_word(w1)
+            w2_ok = is_valid_word(w2)
+            if w1_ok and w2_ok and len(w1) > 3 and len(w2) > 3:
+                return match.group(0)
+            return match_case(combined, w1)
+
+        prev = input_text
+        for _ in range(2):
+            updated = token_re.sub(repl, prev)
+            if updated == prev:
+                break
+            prev = updated
+        return prev
+    # Attempt to restore missing spaces before word-level corrections
+    if allow_missing_space:
+        try:
+            restored = restore_missing_spaces(cleaned, languages, hs)
+            if restored != cleaned:
+                LOGGER.info("Applied missing-space restoration pass")
+            cleaned = restored
+        except Exception as exc:
+            LOGGER.warning("Missing-space restoration failed: %s", exc)
+
+    cleaned = merge_broken_words(cleaned)
     if config.enable_dictionary_correction or hs is not None:
         cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
     cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
@@ -1858,26 +1940,26 @@ def density_percentile(density: Sequence[float], percentile: float) -> float:
     return sorted_vals[idx]
 
 
-def count_column_gaps(
+def find_column_gaps(
     density: Sequence[float],
     config: DoclingProcessingConfig,
-) -> int:
+) -> List[Tuple[int, int]]:
     if not density:
-        return 0
+        return []
     total = len(density)
     margin = max(1, int(total * 0.05))
     start = margin
     end = max(start + 1, total - margin)
     core = density[start:end]
     if not core:
-        return 0
+        return []
     text_level = density_percentile(core, config.column_detect_text_percentile)
     if text_level < config.column_detect_min_text_density:
-        return 0
+        return []
     threshold = max(config.column_detect_min_gap_density, text_level * config.column_detect_gap_threshold_ratio)
     min_gap = max(1, int(len(core) * config.column_detect_min_gap_ratio))
 
-    gaps = 0
+    gaps: List[Tuple[int, int]] = []
     idx = 0
     while idx < len(core):
         if core[idx] < threshold:
@@ -1885,10 +1967,17 @@ def count_column_gaps(
             while idx < len(core) and core[idx] < threshold:
                 idx += 1
             if idx - gap_start >= min_gap:
-                gaps += 1
+                gaps.append((start + gap_start, start + idx))
         else:
             idx += 1
     return gaps
+
+
+def count_column_gaps(
+    density: Sequence[float],
+    config: DoclingProcessingConfig,
+) -> int:
+    return len(find_column_gaps(density, config))
 
 
 def detect_multicolumn_layout(
@@ -1929,6 +2018,225 @@ def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
     return temp_file.name
 
 
+def split_blocks_into_columns(
+    blocks: List[Dict[str, Any]], log_label: str = "OCR"
+) -> Tuple[List[List[Dict[str, Any]]], float, float]:
+    if not blocks:
+        return [], 0.0, 0.0
+    # Robust grouping by x-center: find one or two big gaps -> 2 or 3 columns
+    xs = sorted(b["xc"] for b in blocks)
+    x_min, x_max = xs[0], xs[-1]
+    span = max(1.0, x_max - x_min)
+    widths = sorted((b["x1"] - b["x0"]) for b in blocks)
+    w_med = widths[len(widths) // 2] if widths else 1.0
+    # Lower threshold than before: helps separate three narrow columns
+    gap_thr = max(0.06 * span, 0.5 * w_med)
+
+    # Compute gaps between consecutive x-centers
+    diffs: List[Tuple[float, int]] = []
+    for i in range(1, len(xs)):
+        diffs.append((xs[i] - xs[i - 1], i))  # (gap, split_index)
+    gap_values = sorted(gap for gap, _ in diffs)
+    median_gap = gap_values[len(gap_values) // 2] if gap_values else 0.0
+    # Candidate split positions are those with large gaps
+    candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
+
+    # Build columns by splitting at up to two largest valid gaps ensuring min size per group
+    min_lines = max(3, len(blocks) // 20 or 1)
+    columns: List[List[Dict[str, Any]]] = []
+    blocks_sorted = sorted(blocks, key=lambda b: b["xc"])  # align with xs order
+    used_splits: List[int] = []
+    if candidates:
+        # Prefer two-gap (3-column) split if possible
+        cands_sorted = sorted(
+            ((xs[i - 1], xs[i], i) for i in candidates), key=lambda t: t[1] - t[0], reverse=True
+        )
+        # Try all pairs of split indices to form 3 groups
+        tried = False
+        for _a in range(min(5, len(cands_sorted))):
+            for _b in range(_a + 1, min(6, len(cands_sorted))):
+                i1 = cands_sorted[_a][2]
+                i2 = cands_sorted[_b][2]
+                a, b = sorted([i1, i2])
+                if a < min_lines or (b - a) < min_lines or (len(blocks) - b) < min_lines:
+                    continue
+                used_splits = [a, b]
+                tried = True
+                break
+            if tried:
+                break
+        if not used_splits:
+            # Fall back to single split (2 columns)
+            # pick the largest valid gap that yields two groups of minimum size
+            for _, _, i in cands_sorted:
+                if i >= min_lines and (len(blocks) - i) >= min_lines:
+                    used_splits = [i]
+                    break
+
+    if used_splits:
+        used_splits = sorted(set(used_splits))
+        start = 0
+        for s in used_splits:
+            columns.append(blocks_sorted[start:s])
+            start = s
+        columns.append(blocks_sorted[start:])
+    else:
+        # Fallback threshold grouping
+        cur: List[Dict[str, Any]] = []
+        prev_xc: Optional[float] = None
+        for b in blocks_sorted:
+            if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
+                cur.append(b)
+            else:
+                if cur:
+                    columns.append(cur)
+                cur = [b]
+            prev_xc = b["xc"]
+        if cur:
+            columns.append(cur)
+
+    def _kmeans_1d(points: List[float], k: int) -> Optional[Tuple[List[List[int]], List[float]]]:
+        if len(points) < k:
+            return None
+        sorted_points = sorted(points)
+        centers = []
+        for i in range(k):
+            pct = (i + 0.5) / k
+            idx = int(pct * (len(sorted_points) - 1))
+            centers.append(sorted_points[idx])
+        for _ in range(20):
+            clusters: List[List[int]] = [[] for _ in range(k)]
+            for idx, val in enumerate(points):
+                nearest = min(range(k), key=lambda c: abs(val - centers[c]))
+                clusters[nearest].append(idx)
+            new_centers = []
+            for c_idx in range(k):
+                if not clusters[c_idx]:
+                    return None
+                new_centers.append(sum(points[i] for i in clusters[c_idx]) / len(clusters[c_idx]))
+            if max(abs(new_centers[i] - centers[i]) for i in range(k)) < 0.5:
+                centers = new_centers
+                break
+            centers = new_centers
+        return clusters, centers
+
+    def _kmeans_improvement(points: List[float], clusters: List[List[int]], centers: List[float]) -> float:
+        mean = sum(points) / len(points)
+        total_var = sum((val - mean) ** 2 for val in points) / max(1, len(points))
+        if total_var <= 1e-6:
+            return 0.0
+        within = 0.0
+        for c_idx, cluster in enumerate(clusters):
+            center = centers[c_idx]
+            for i in cluster:
+                within += (points[i] - center) ** 2
+        within /= max(1, len(points))
+        return (total_var - within) / total_var
+
+    def _boundary_valley_ok(points: List[float], centers: List[float], span_points: float) -> bool:
+        ordered = sorted(centers)
+        if len(ordered) <= 1:
+            return False
+        band = max(0.04 * span_points, 1.5 * w_med)
+        band = min(band, 0.2 * span_points)
+        total = len(points)
+        for i in range(len(ordered) - 1):
+            boundary = 0.5 * (ordered[i] + ordered[i + 1])
+            count = sum(1 for val in points if abs(val - boundary) <= band / 2)
+            expected = max(1e-6, band / span_points * total)
+            if (count / expected) > 0.85:
+                return False
+        return True
+
+    if len(columns) <= 1 and len(blocks_sorted) >= 20:
+        min_lines = max(3, len(blocks_sorted) // 20 or 1)
+
+        def _try_kmeans(points: List[float], basis: str) -> Optional[Tuple[List[List[Dict[str, Any]]], float, int, str]]:
+            span_points = max(1.0, max(points) - min(points))
+            best_cols: Optional[List[List[Dict[str, Any]]]] = None
+            best_score = 0.0
+            best_k = 0
+            for k in (2, 3):
+                if len(blocks_sorted) < k * min_lines:
+                    continue
+                result = _kmeans_1d(points, k)
+                if not result:
+                    continue
+                clusters, centers = result
+                if min(len(c) for c in clusters) < min_lines:
+                    continue
+                improvement = _kmeans_improvement(points, clusters, centers)
+                if improvement < 0.6:
+                    continue
+                if not _boundary_valley_ok(points, centers, span_points):
+                    continue
+                ordered = sorted(range(k), key=lambda i: centers[i])
+                ordered_centers = [centers[i] for i in ordered]
+                min_gap = min(
+                    ordered_centers[i + 1] - ordered_centers[i]
+                    for i in range(len(ordered_centers) - 1)
+                )
+                if min_gap < 0.02 * span_points:
+                    continue
+                score = improvement + (min_gap / span_points)
+                if score > best_score:
+                    best_score = score
+                    best_k = k
+                    best_cols = [[blocks_sorted[i] for i in clusters[idx]] for idx in ordered]
+            if best_cols:
+                return best_cols, best_score, best_k, basis
+            return None
+
+        candidates = [
+            _try_kmeans([b["xc"] for b in blocks_sorted], "xc"),
+            _try_kmeans([b["x0"] for b in blocks_sorted], "x0"),
+        ]
+        best = None
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if best is None or candidate[1] > best[1]:
+                best = candidate
+        if best:
+            columns, best_score, best_k, basis = best
+            try:
+                LOGGER.info(
+                    "%s column grouping fallback (kmeans-%s): k=%d score=%.2f",
+                    log_label,
+                    basis,
+                    best_k,
+                    best_score,
+                )
+            except Exception:
+                pass
+
+    # Sort columns left-to-right by median x center
+    def col_key(col: List[Dict[str, Any]]) -> float:
+        centers = sorted(b["xc"] for b in col)
+        return centers[len(centers) // 2]
+
+    columns = [col for col in columns if col]
+    columns.sort(key=col_key)
+    try:
+        LOGGER.info("%s column grouping: k=%d (gap_thr=%.2f, span=%.1f)", log_label, len(columns), gap_thr, span)
+    except Exception:
+        pass
+    return columns, gap_thr, span
+
+
+def order_blocks_into_columns(blocks: List[Dict[str, Any]], log_label: str = "OCR") -> str:
+    columns, _, _ = split_blocks_into_columns(blocks, log_label=log_label)
+    if not columns:
+        return ""
+    # Within each column, sort top-down and join
+    col_texts: List[str] = []
+    for col in columns:
+        col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
+        col_texts.append("\n".join(b["text"] for b in col_sorted if b["text"]))
+    # Read columns left to right
+    return "\n\n".join(t for t in col_texts if t)
+
+
 def ocr_pages_with_paddle(
     images: Sequence[Any],
     languages: str,
@@ -1957,95 +2265,6 @@ def ocr_pages_with_paddle(
         x0, y0, x1, y1 = float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))
         xc = 0.5 * (x0 + x1)
         return x0, y0, x1, y1, xc
-
-    def _order_blocks_into_columns(blocks: List[Dict[str, Any]]) -> str:
-        if not blocks:
-            return ""
-        # Robust grouping by x-center: find one or two big gaps -> 2 or 3 columns
-        xs = sorted(b["xc"] for b in blocks)
-        x_min, x_max = xs[0], xs[-1]
-        span = max(1.0, x_max - x_min)
-        widths = sorted((b["x1"] - b["x0"]) for b in blocks)
-        w_med = widths[len(widths)//2] if widths else 1.0
-        # Lower threshold than before: helps separate three narrow columns
-        gap_thr = max(0.06 * span, 0.5 * w_med)
-
-        # Compute gaps between consecutive x-centers
-        diffs: List[Tuple[float, int]] = []
-        for i in range(1, len(xs)):
-            diffs.append((xs[i] - xs[i-1], i))  # (gap, split_index)
-        # Candidate split positions are those with large gaps
-        candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
-
-        # Build columns by splitting at up to two largest valid gaps ensuring min size per group
-        min_lines = max(3, len(blocks) // 20 or 1)
-        columns: List[List[Dict[str, Any]]] = []
-        blocks_sorted = sorted(blocks, key=lambda b: b["xc"])  # align with xs order
-        used_splits: List[int] = []
-        if candidates:
-            # Prefer two-gap (3-column) split if possible
-            cands_sorted = sorted(((xs[i-1], xs[i], i) for i in candidates), key=lambda t: t[1]-t[0], reverse=True)
-            # Try all pairs of split indices to form 3 groups
-            tried = False
-            for _a in range(min(5, len(cands_sorted))):
-                for _b in range(_a+1, min(6, len(cands_sorted))):
-                    i1 = cands_sorted[_a][2]
-                    i2 = cands_sorted[_b][2]
-                    a, b = sorted([i1, i2])
-                    if a < min_lines or (b - a) < min_lines or (len(blocks) - b) < min_lines:
-                        continue
-                    used_splits = [a, b]
-                    tried = True
-                    break
-                if tried:
-                    break
-            if not used_splits:
-                # Fall back to single split (2 columns)
-                # pick the largest valid gap that yields two groups of minimum size
-                for _, _, i in cands_sorted:
-                    if i >= min_lines and (len(blocks) - i) >= min_lines:
-                        used_splits = [i]
-                        break
-
-        if used_splits:
-            used_splits = sorted(set(used_splits))
-            start = 0
-            for s in used_splits:
-                columns.append(blocks_sorted[start:s])
-                start = s
-            columns.append(blocks_sorted[start:])
-        else:
-            # Fallback threshold grouping
-            cur: List[Dict[str, Any]] = []
-            prev_xc: Optional[float] = None
-            for b in blocks_sorted:
-                if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
-                    cur.append(b)
-                else:
-                    if cur:
-                        columns.append(cur)
-                    cur = [b]
-                prev_xc = b["xc"]
-            if cur:
-                columns.append(cur)
-
-        # Sort columns left-to-right by median x center
-        def col_key(col: List[Dict[str, Any]]) -> float:
-            centers = sorted(b["xc"] for b in col)
-            return centers[len(centers)//2]
-        columns = [col for col in columns if col]
-        columns.sort(key=col_key)
-        try:
-            LOGGER.info("Paddle column grouping: k=%d (gap_thr=%.2f, span=%.1f)", len(columns), gap_thr, span)
-        except Exception:
-            pass
-        # Within each column, sort top-down and join
-        col_texts: List[str] = []
-        for col in columns:
-            col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
-            col_texts.append("\n".join(b["text"] for b in col_sorted if b["text"]))
-        # Read columns left to right
-        return "\n\n".join(t for t in col_texts if t)
 
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
@@ -2083,7 +2302,7 @@ def ocr_pages_with_paddle(
                     confidences.append(conf_val)
                 if text_val:
                     blocks.append({"x0": x0, "y0": y0, "x1": x1, "y1": y1, "xc": xc, "text": text_val})
-        ordered_text = _order_blocks_into_columns(blocks)
+        ordered_text = order_blocks_into_columns(blocks, log_label="Paddle")
         pages.append({"page_num": idx, "text": ordered_text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
@@ -2096,6 +2315,7 @@ def ocr_pages_with_paddle(
 def ocr_pages_with_tesseract(
     images: Sequence[Any],
     languages: str,
+    config: DoclingProcessingConfig,
     progress_cb: Optional[ProgressCallback] = None,
     progress_base: int = 0,
     progress_span: int = 0,
@@ -2111,15 +2331,136 @@ def ocr_pages_with_tesseract(
     else:
         raise RuntimeError("Tesseract not found on PATH; set TESSERACT_CMD or install tesseract.")
 
+    def _safe_float(values: Any, idx: int) -> float:
+        if isinstance(values, list) and idx < len(values):
+            try:
+                return float(values[idx])
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _group_words_into_lines(words: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        if not words:
+            return []
+        heights = sorted((w["y1"] - w["y0"]) for w in words)
+        h_med = heights[len(heights) // 2] if heights else 1.0
+        y_thr = max(4.0, 0.6 * h_med)
+        words_sorted = sorted(words, key=lambda w: (w["yc"], w["x0"]))
+        lines: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = []
+        current_y: Optional[float] = None
+        for w in words_sorted:
+            if current_y is None or abs(w["yc"] - current_y) <= y_thr:
+                current.append(w)
+            else:
+                lines.append(current)
+                current = [w]
+            current_y = w["yc"]
+        if current:
+            lines.append(current)
+        return lines
+
     pages: List[Dict[str, Any]] = []
+    confidences: List[float] = []
     total = max(1, len(images))
     for idx, image in enumerate(images, start=1):
-        text = pytesseract.image_to_string(image, lang=languages)
+        text = ""
+        words: List[Dict[str, Any]] = []
+        try:
+            data = pytesseract.image_to_data(
+                image, lang=languages, output_type=pytesseract.Output.DICT
+            )
+            items = len(data.get("text", []))
+            for i in range(items):
+                raw_text = str(data["text"][i] or "").strip()
+                if not raw_text:
+                    continue
+                x0 = _safe_float(data.get("left"), i)
+                y0 = _safe_float(data.get("top"), i)
+                x1 = x0 + _safe_float(data.get("width"), i)
+                y1 = y0 + _safe_float(data.get("height"), i)
+                xc = 0.5 * (x0 + x1)
+                yc = 0.5 * (y0 + y1)
+                words.append(
+                    {
+                        "x0": x0,
+                        "y0": y0,
+                        "x1": x1,
+                        "y1": y1,
+                        "xc": xc,
+                        "yc": yc,
+                        "text": raw_text,
+                    }
+                )
+
+                conf_raw = data.get("conf", [None])[i]
+                try:
+                    conf_val = float(conf_raw)
+                except Exception:
+                    conf_val = None
+                if conf_val is not None and conf_val >= 0:
+                    confidences.append(conf_val)
+
+            if words:
+                columns, _, _ = split_blocks_into_columns(words, log_label="Tesseract")
+                column_lines: List[List[Dict[str, Any]]] = []
+                for col in columns:
+                    lines: List[Dict[str, Any]] = []
+                    for line_words in _group_words_into_lines(col):
+                        line_sorted = sorted(line_words, key=lambda w: w["x0"])
+                        line_text = " ".join(w["text"] for w in line_sorted if w["text"])
+                        if not line_text:
+                            continue
+                        line_y0 = min(w["y0"] for w in line_sorted)
+                        line_y1 = max(w["y1"] for w in line_sorted)
+                        line_x0 = min(w["x0"] for w in line_sorted)
+                        lines.append(
+                            {"text": line_text, "y0": line_y0, "y1": line_y1, "x0": line_x0}
+                        )
+                    lines.sort(key=lambda l: (l["y0"], l["x0"]))
+                    column_lines.append(lines)
+                def _join_lines(lines: List[Dict[str, Any]]) -> str:
+                    heights = [line["y1"] - line["y0"] for line in lines if line.get("y1") is not None]
+                    heights = sorted(h for h in heights if h > 0)
+                    h_med = heights[len(heights) // 2] if heights else 10.0
+                    gap_thr = max(6.0, 1.6 * h_med)
+                    paragraphs: List[str] = []
+                    current = ""
+                    prev_y1: Optional[float] = None
+                    for line in lines:
+                        line_text = str(line.get("text", "")).strip()
+                        if not line_text:
+                            continue
+                        y0 = float(line.get("y0") or 0.0)
+                        y1 = float(line.get("y1") or y0)
+                        if current and prev_y1 is not None and (y0 - prev_y1) > gap_thr:
+                            paragraphs.append(current.strip())
+                            current = ""
+                        if not current:
+                            current = line_text
+                        else:
+                            if current.endswith("-"):
+                                current = current[:-1] + line_text.lstrip()
+                            else:
+                                current = current.rstrip() + " " + line_text.lstrip()
+                        prev_y1 = y1
+                    if current:
+                        paragraphs.append(current.strip())
+                    return "\n\n".join(paragraphs)
+
+                col_texts = [_join_lines(lines) for lines in column_lines if lines]
+                text = "\n\n".join(t for t in col_texts if t)
+        except Exception:
+            text = ""
+
+        if not text:
+            text = pytesseract.image_to_string(image, lang=languages)
         pages.append({"page_num": idx, "text": text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
             progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
-    return pages, {}
+    avg_conf = sum(confidences) / len(confidences) if confidences else None
+    return pages, {"ocr_confidence_avg": avg_conf}
 
 
 def run_external_ocr_pages(
@@ -2144,6 +2485,7 @@ def run_external_ocr_pages(
         return ocr_pages_with_tesseract(
             images,
             normalize_languages_for_engine(languages, engine),
+            config,
             progress_cb,
             progress_base,
             progress_span,
@@ -2161,9 +2503,22 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
     languages = select_language_set(config.language_hint, pdf_path, config)
     quality = estimate_text_quality(analysis_pages, config, languages)
     low_quality = is_low_quality(quality, config)
+    text_layer_overlay = bool(
+        has_text_layer
+        and quality.image_page_ratio is not None
+        and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
+    )
+    if quality.image_page_ratio is not None:
+        LOGGER.info(
+            "Text-layer overlay: %s (img_pages=%.2f, threshold=%.2f)",
+            text_layer_overlay,
+            quality.image_page_ratio,
+            config.quality_image_page_ratio_threshold,
+        )
     return {
         "text_layer_detected": has_text_layer,
         "text_layer_low_quality": has_text_layer and low_quality,
+        "text_layer_overlay": text_layer_overlay,
         "avg_chars_per_page": quality.avg_chars_per_page,
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
@@ -2171,6 +2526,7 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
         "image_heavy_ratio": quality.image_heavy_ratio,
+        "image_page_ratio": quality.image_page_ratio,
     }
 
 
@@ -2190,6 +2546,11 @@ def convert_pdf_with_docling(
     languages = select_language_set(config.language_hint, pdf_path, config)
     quality = estimate_text_quality(analysis_pages, config, languages)
     low_quality = is_low_quality(quality, config)
+    text_layer_overlay = bool(
+        has_text_layer
+        and quality.image_page_ratio is not None
+        and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
+    )
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
     emit(15, "route", "Selecting OCR route")
@@ -2244,8 +2605,9 @@ def convert_pdf_with_docling(
     dict_ratio = "n/a" if quality.dictionary_hit_ratio is None else f"{quality.dictionary_hit_ratio:.2f}"
     spell_ratio = "n/a" if quality.spellchecker_hit_ratio is None else f"{quality.spellchecker_hit_ratio:.2f}"
     img_ratio = "n/a" if quality.image_heavy_ratio is None else f"{quality.image_heavy_ratio:.2f}"
+    img_pages_ratio = "n/a" if quality.image_page_ratio is None else f"{quality.image_page_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s, img=%s)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s, img=%s, img_pages=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
@@ -2253,6 +2615,7 @@ def convert_pdf_with_docling(
         dict_ratio,
         spell_ratio,
         img_ratio,
+        img_pages_ratio,
     )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
@@ -2283,6 +2646,8 @@ def convert_pdf_with_docling(
     emit(70, "docling", "Docling conversion complete")
 
     ocr_stats: Dict[str, Any] = {}
+    ocr_engine_used = decision.ocr_engine
+    external_ocr_used = False
     # Always allow external OCR if selected, even when the PDF was rasterized for Docling,
     # so we can prefer column-aware ordering from Paddle/Tesseract when desired.
     if decision.ocr_used and decision.use_external_ocr:
@@ -2298,10 +2663,31 @@ def convert_pdf_with_docling(
             )
             if ocr_pages:
                 pages = ocr_pages
+                external_ocr_used = True
                 if config.postprocess_markdown and not markdown.strip():
                     markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
         except Exception as exc:
             LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
+            if decision.ocr_engine != "tesseract" and "tesseract" in available_engines:
+                try:
+                    LOGGER.info("Retrying external OCR with tesseract.")
+                    ocr_pages, ocr_stats = run_external_ocr_pages(
+                        pdf_path,
+                        "tesseract",
+                        languages,
+                        config,
+                        progress_cb=emit,
+                        progress_base=70,
+                        progress_span=20,
+                    )
+                    if ocr_pages:
+                        pages = ocr_pages
+                        ocr_engine_used = "tesseract"
+                        external_ocr_used = True
+                        if config.postprocess_markdown and not markdown.strip():
+                            markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
+                except Exception as exc2:
+                    LOGGER.warning("External OCR failed (tesseract): %s", exc2)
     if rasterized_source and rasterized_pdf_path:
         try:
             os.unlink(rasterized_pdf_path)
@@ -2311,12 +2697,14 @@ def convert_pdf_with_docling(
     emit(90, "chunking", "Building chunks")
     metadata = {
         "ocr_used": decision.ocr_used,
-        "ocr_engine": decision.ocr_engine,
+        "ocr_engine": ocr_engine_used,
+        "external_ocr_used": external_ocr_used,
         "languages": decision.languages,
         "route_reason": decision.route_reason,
         "per_page_reason": decision.per_page_reason,
         "text_layer_detected": has_text_layer,
         "text_layer_low_quality": has_text_layer and low_quality,
+        "text_layer_overlay": text_layer_overlay,
         "rasterized_source_pdf": rasterized_source,
         "rasterize_failed": bool(rasterize_error),
         "rasterize_error": rasterize_error,
@@ -2330,6 +2718,7 @@ def convert_pdf_with_docling(
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
         "image_heavy_ratio": quality.image_heavy_ratio,
+        "image_page_ratio": quality.image_page_ratio,
         "per_page_ocr": decision.per_page_ocr,
     }
     # Attach spellchecker backend info if available
@@ -2471,6 +2860,11 @@ def main() -> int:
     parser.add_argument("--progress", action="store_true", help="Emit JSON progress events to stdout")
     parser.add_argument("--enable-dictionary-correction", action="store_true", help="Enable dictionary-based OCR corrections")
     parser.add_argument("--dictionary-path", help="Path to dictionary wordlist (one word per line)")
+    parser.add_argument(
+        "--postprocess-text-layer",
+        action="store_true",
+        help="Apply spell correction even when OCR is not run (text layer present).",
+    )
     parser.add_argument("--enable-hunspell", action="store_true", help="Enable Hunspell dictionary support if available")
     parser.add_argument("--hunspell-aff", help="Path to Hunspell .aff file")
     parser.add_argument("--hunspell-dic", help="Path to Hunspell .dic file")
@@ -2586,6 +2980,8 @@ def main() -> int:
         config.enable_dictionary_correction = True
     if args.dictionary_path:
         config.dictionary_path = args.dictionary_path
+    if args.postprocess_text_layer:
+        config.postprocess_text_layer = True
     if args.enable_hunspell:
         config.enable_hunspell = True
     if args.hunspell_aff:
@@ -2637,32 +3033,55 @@ def main() -> int:
         eprint(f"Docling conversion failed: {exc}")
         return 2
 
-    markdown = conversion.markdown
-    if config.enable_post_correction and config.postprocess_markdown and conversion.metadata.get("ocr_used"):
-        wordlist = prepare_dictionary_words(config)
-        languages = conversion.metadata.get("languages", config.default_lang_english)
-        markdown = postprocess_text(markdown, config, languages, wordlist)
-
-    try:
-        with open(args.out_md, "w", encoding="utf-8") as handle:
-            handle.write(markdown)
-    except Exception as exc:
-        eprint(f"Failed to write markdown: {exc}")
-        return 2
-
     try:
         pages = conversion.pages
         languages = conversion.metadata.get("languages", config.default_lang_english)
         postprocess_fn: Optional[Callable[[str], str]] = None
-        if config.enable_post_correction and conversion.metadata.get("ocr_used"):
+        ocr_used = bool(conversion.metadata.get("ocr_used"))
+        text_layer_overlay = bool(conversion.metadata.get("text_layer_overlay"))
+        text_layer_low_quality = bool(conversion.metadata.get("text_layer_low_quality"))
+        text_layer_should_postprocess = text_layer_overlay or text_layer_low_quality
+        should_postprocess = config.enable_post_correction and (
+            ocr_used or (config.postprocess_text_layer and text_layer_should_postprocess)
+        )
+        if should_postprocess:
             wordlist = prepare_dictionary_words(config)
-            postprocess_fn = lambda text: postprocess_text(text, config, languages, wordlist)
+            allow_missing_space = ocr_used
+            postprocess_fn = lambda text: postprocess_text(
+                text,
+                config,
+                languages,
+                wordlist,
+                allow_missing_space=allow_missing_space,
+            )
 
         if postprocess_fn:
             pages = [
                 {"page_num": page.get("page_num", idx + 1), "text": postprocess_fn(str(page.get("text", "")))}
                 for idx, page in enumerate(pages)
             ]
+
+        markdown = conversion.markdown
+        if config.enable_post_correction and config.postprocess_markdown and should_postprocess:
+            wordlist = prepare_dictionary_words(config)
+            allow_missing_space = ocr_used
+            markdown = postprocess_text(
+                markdown,
+                config,
+                languages,
+                wordlist,
+                allow_missing_space=allow_missing_space,
+            )
+
+        if conversion.metadata.get("external_ocr_used"):
+            markdown = "\n\n".join(page.get("text", "") for page in pages)
+
+        try:
+            with open(args.out_md, "w", encoding="utf-8") as handle:
+                handle.write(markdown)
+        except Exception as exc:
+            eprint(f"Failed to write markdown: {exc}")
+            return 2
 
         if args.chunking == "section":
             chunks = build_chunks_section(
