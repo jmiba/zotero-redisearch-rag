@@ -62,26 +62,47 @@ def main() -> int:
 
     ocr_kwargs = {
         "lang": "en",
+        "use_doc_orientation_classify": True,
+        "use_doc_unwarping": True,
     }
     if args.max_side and args.max_side > 0:
         ocr_kwargs["text_det_limit_side_len"] = args.max_side
         ocr_kwargs["text_det_limit_type"] = "max"
 
-    def _create_ocr(kwargs: dict) -> PaddleOCR:
+    def _create_ocr(kwargs: dict, use_textline_orientation: bool) -> PaddleOCR:
         try:
-            return PaddleOCR(use_textline_orientation=True, **kwargs)
+            return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
         except TypeError:
-            return PaddleOCR(use_angle_cls=True, **kwargs)
+            return PaddleOCR(use_angle_cls=use_textline_orientation, **kwargs)
 
-    try:
-        ocr = _create_ocr(ocr_kwargs)
-    except TypeError:
+    def _try_create(kwargs: dict, use_textline_orientation: bool) -> PaddleOCR | None:
+        try:
+            return _create_ocr(kwargs, use_textline_orientation)
+        except TypeError:
+            return None
+
+    ocr = _try_create(ocr_kwargs, True)
+    if ocr is None:
+        reduced_kwargs = dict(ocr_kwargs)
+        reduced_kwargs.pop("use_doc_orientation_classify", None)
+        reduced_kwargs.pop("use_doc_unwarping", None)
+        ocr = _try_create(reduced_kwargs, True)
+    if ocr is None:
         legacy_kwargs = dict(ocr_kwargs)
         if "text_det_limit_side_len" in legacy_kwargs:
             legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
         if "text_det_limit_type" in legacy_kwargs:
             legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _create_ocr(legacy_kwargs)
+        ocr = _try_create(legacy_kwargs, True)
+    if ocr is None:
+        legacy_kwargs = dict(ocr_kwargs)
+        legacy_kwargs.pop("use_doc_orientation_classify", None)
+        legacy_kwargs.pop("use_doc_unwarping", None)
+        if "text_det_limit_side_len" in legacy_kwargs:
+            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
+        if "text_det_limit_type" in legacy_kwargs:
+            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
+        ocr = _create_ocr(legacy_kwargs, True)
 
     images = []
     if args.pdf:

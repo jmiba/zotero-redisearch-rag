@@ -134,6 +134,11 @@ class DoclingProcessingConfig:
     ocr_overlay_dpi: int = 400
     paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 3500
+    paddle_use_doc_orientation_classify: bool = True
+    paddle_use_doc_unwarping: bool = True
+    paddle_use_textline_orientation: bool = True
+    paddle_use_structure_v3: bool = True
+    paddle_structure_version: str = "PP-StructureV3"
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -1677,31 +1682,74 @@ def postprocess_text(
         except Exception as exc:
             LOGGER.warning("Missing-space restoration failed: %s", exc)
 
-    def split_common_prefixes(input_text: str) -> str:
-        prefixes = ("and", "the", "of", "in", "on", "to", "as", "for", "with", "from", "by", "but")
-        token_re = re.compile(r"[A-Za-zÄÖÜäöüß]{5,}")
+    def split_concatenated_words(input_text: str) -> str:
+        token_re = re.compile(r"[A-Za-zÄÖÜäöüß]{6,}")
+        has_caps_re = re.compile(r"[a-zäöüß][A-ZÄÖÜ]")
+
+        def score_word(word: str) -> Tuple[float, bool]:
+            spelled = False
+            try:
+                if hs is not None and (hs.spell(word) or hs.spell(word.lower())):
+                    spelled = True
+            except Exception:
+                pass
+            if spelled:
+                return 5.0, True
+            if _zipf is None:
+                return 0.0, False
+            try:
+                z = max(_zipf(word.lower(), lc) for lc in lang_codes)
+            except Exception:
+                z = 0.0
+            return float(z), False
+
+        def is_strong_word(word: str) -> bool:
+            score, spelled = score_word(word)
+            return spelled or score >= 4.0
 
         def repl(match: re.Match) -> str:
             tok = match.group(0)
-            lower = tok.lower()
-            for pref in prefixes:
-                if not lower.startswith(pref):
+            base_score, base_dict = score_word(tok)
+            if base_dict or base_score >= 3.0:
+                return tok
+            if len(tok) < 10 and not has_caps_re.search(tok):
+                return tok
+
+            best = None  # type: Optional[Tuple[str, float, str, float]]
+            for i in range(3, len(tok) - 2):
+                left, right = tok[:i], tok[i:]
+                if len(left) < 3 or len(right) < 3:
                     continue
-                if len(tok) <= len(pref) + 2:
+                if not (is_strong_word(left) and is_strong_word(right)):
                     continue
-                left = tok[: len(pref)]
-                right = tok[len(pref) :]
-                if is_valid_word(left) and is_valid_word(right):
-                    try:
-                        LOGGER.info("Split prefix: %s -> %s %s", tok, left, right)
-                    except Exception:
-                        pass
-                    return f"{left} {right}"
-            return tok
+                s1, _ = score_word(left)
+                s2, _ = score_word(right)
+                combined = s1 + s2
+                if best is None or combined > (best[1] + best[3]):
+                    best = (left, s1, right, s2)
+
+            if best is None:
+                return tok
+            left, s1, right, s2 = best
+            if _zipf is not None and (s1 + s2) - base_score < 3.0:
+                return tok
+            try:
+                LOGGER.info(
+                    "Split concat: %s -> %s %s (scores=%.2f/%.2f base=%.2f)",
+                    tok,
+                    left,
+                    right,
+                    s1,
+                    s2,
+                    base_score,
+                )
+            except Exception:
+                pass
+            return f"{left} {right}"
 
         return token_re.sub(repl, input_text)
 
-    cleaned = split_common_prefixes(cleaned)
+    cleaned = split_concatenated_words(cleaned)
     cleaned = merge_broken_words(cleaned)
     if config.enable_dictionary_correction or hs is not None:
         cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
@@ -2593,6 +2641,131 @@ def has_output_text(markdown: str, pages: Sequence[Dict[str, Any]]) -> bool:
     return bool(markdown.strip()) or ocr_pages_text_chars(pages) > 0
 
 
+def ocr_pages_with_paddle_structure(
+    images: Sequence[Any],
+    languages: str,
+    config: DoclingProcessingConfig,
+    progress_cb: Optional[ProgressCallback] = None,
+    progress_base: int = 0,
+    progress_span: int = 0,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    from paddleocr import PPStructure
+
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError(f"numpy is required for PPStructure: {exc}") from exc
+
+    structure_kwargs: Dict[str, Any] = {
+        "lang": languages,
+        "layout": True,
+        "ocr": True,
+        "show_log": False,
+    }
+    if config.paddle_use_textline_orientation:
+        structure_kwargs["use_textline_orientation"] = True
+    if config.paddle_use_doc_orientation_classify:
+        structure_kwargs["use_doc_orientation_classify"] = True
+    if config.paddle_use_doc_unwarping:
+        structure_kwargs["use_doc_unwarping"] = True
+    if config.paddle_structure_version:
+        structure_kwargs["structure_version"] = config.paddle_structure_version
+
+    def _create_structure(kwargs: Dict[str, Any]) -> PPStructure:
+        return PPStructure(**kwargs)
+
+    structure = None
+    try:
+        structure = _create_structure(structure_kwargs)
+    except TypeError:
+        reduced_kwargs = dict(structure_kwargs)
+        reduced_kwargs.pop("use_textline_orientation", None)
+        reduced_kwargs.pop("use_doc_orientation_classify", None)
+        reduced_kwargs.pop("use_doc_unwarping", None)
+        try:
+            structure = _create_structure(reduced_kwargs)
+        except TypeError:
+            reduced_kwargs.pop("structure_version", None)
+            structure = _create_structure(reduced_kwargs)
+
+    def _block_to_dict(block: Any) -> Dict[str, Any]:
+        if isinstance(block, dict):
+            return block
+        to_dict = getattr(block, "to_dict", None)
+        if callable(to_dict):
+            try:
+                converted = to_dict()
+                if isinstance(converted, dict):
+                    return converted
+            except Exception:
+                return {}
+        return {}
+
+    def _strip_html(text: str) -> str:
+        return re.sub(r"<[^>]+>", " ", text)
+
+    def _extract_block_lines(block: Dict[str, Any]) -> List[str]:
+        res = block.get("res") or block.get("text") or block.get("content")
+        if isinstance(res, str):
+            cleaned = _strip_html(res).strip()
+            return [cleaned] if cleaned else []
+        if isinstance(res, dict):
+            text_val = res.get("text")
+            if isinstance(text_val, str):
+                cleaned = text_val.strip()
+                return [cleaned] if cleaned else []
+            html_val = res.get("html")
+            if isinstance(html_val, str):
+                cleaned = _strip_html(html_val).strip()
+                return [cleaned] if cleaned else []
+        if isinstance(res, list):
+            lines: List[str] = []
+            for item in res:
+                if isinstance(item, str):
+                    item = item.strip()
+                    if item:
+                        lines.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text_val = item.get("text")
+                    if isinstance(text_val, str):
+                        text_val = text_val.strip()
+                        if text_val:
+                            lines.append(text_val)
+            return lines
+        return []
+
+    pages: List[Dict[str, Any]] = []
+    total = max(1, len(images))
+    for idx, image in enumerate(images, start=1):
+        result = structure(np.array(image))
+        blocks = result if isinstance(result, list) else []
+        lines_out: List[str] = []
+        for block in blocks:
+            block_dict = _block_to_dict(block)
+            block_type = str(
+                block_dict.get("type")
+                or block_dict.get("label")
+                or block_dict.get("category")
+                or ""
+            ).lower()
+            block_lines = _extract_block_lines(block_dict)
+            if not block_lines:
+                continue
+            if block_type in ("title", "header", "heading"):
+                title = " ".join(block_lines).strip()
+                if title:
+                    lines_out.append(f"# {title}")
+            else:
+                lines_out.append("\n".join(block_lines))
+        pages.append({"page_num": idx, "text": "\n\n".join(lines_out).strip()})
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int(idx / total * progress_span)
+            progress_cb(percent, "layout", f"Layout page {idx}/{total}")
+
+    return pages, {"layout_used": True, "layout_model": config.paddle_structure_version}
+
+
 def ocr_pages_with_paddle(
     images: Sequence[Any],
     languages: str,
@@ -2613,22 +2786,45 @@ def ocr_pages_with_paddle(
     if config.paddle_target_max_side_px > 0:
         ocr_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
         ocr_kwargs["text_det_limit_type"] = "max"
+    if config.paddle_use_doc_orientation_classify:
+        ocr_kwargs["use_doc_orientation_classify"] = True
+    if config.paddle_use_doc_unwarping:
+        ocr_kwargs["use_doc_unwarping"] = True
 
-    def _create_ocr(kwargs: Dict[str, Any]) -> PaddleOCR:
+    def _create_ocr(kwargs: Dict[str, Any], use_textline_orientation: bool) -> PaddleOCR:
         try:
-            return PaddleOCR(use_textline_orientation=True, **kwargs)
+            return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
         except TypeError:
-            return PaddleOCR(use_angle_cls=True, **kwargs)
+            return PaddleOCR(use_angle_cls=use_textline_orientation, **kwargs)
 
-    try:
-        ocr = _create_ocr(ocr_kwargs)
-    except TypeError:
+    def _try_create(kwargs: Dict[str, Any], use_textline_orientation: bool) -> Optional[PaddleOCR]:
+        try:
+            return _create_ocr(kwargs, use_textline_orientation)
+        except TypeError:
+            return None
+
+    ocr = _try_create(ocr_kwargs, config.paddle_use_textline_orientation)
+    if ocr is None:
+        reduced_kwargs = dict(ocr_kwargs)
+        reduced_kwargs.pop("use_doc_orientation_classify", None)
+        reduced_kwargs.pop("use_doc_unwarping", None)
+        ocr = _try_create(reduced_kwargs, config.paddle_use_textline_orientation)
+    if ocr is None:
         legacy_kwargs = dict(ocr_kwargs)
         if "text_det_limit_side_len" in legacy_kwargs:
             legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
         if "text_det_limit_type" in legacy_kwargs:
             legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _create_ocr(legacy_kwargs)
+        ocr = _try_create(legacy_kwargs, config.paddle_use_textline_orientation)
+    if ocr is None:
+        legacy_kwargs = dict(ocr_kwargs)
+        legacy_kwargs.pop("use_doc_orientation_classify", None)
+        legacy_kwargs.pop("use_doc_unwarping", None)
+        if "text_det_limit_side_len" in legacy_kwargs:
+            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
+        if "text_det_limit_type" in legacy_kwargs:
+            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
+        ocr = _create_ocr(legacy_kwargs, config.paddle_use_textline_orientation)
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
@@ -3130,6 +3326,18 @@ def run_external_ocr_pages(
             effective_dpi = config.paddle_max_dpi
     images = render_pdf_pages(pdf_path, effective_dpi)
     if engine == "paddle":
+        if config.paddle_use_structure_v3:
+            try:
+                return ocr_pages_with_paddle_structure(
+                    images,
+                    normalize_languages_for_engine(languages, engine),
+                    config,
+                    progress_cb,
+                    progress_base,
+                    progress_span,
+                )
+            except Exception as exc:
+                LOGGER.warning("PP-StructureV3 failed; falling back to PaddleOCR: %s", exc)
         return ocr_pages_with_paddle(
             images,
             normalize_languages_for_engine(languages, engine),
@@ -3548,6 +3756,24 @@ def main() -> int:
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
     parser.add_argument(
+        "--paddle-structure-v3",
+        dest="paddle_structure_v3",
+        action="store_true",
+        default=None,
+        help="Use PP-StructureV3 layout parsing for Paddle OCR",
+    )
+    parser.add_argument(
+        "--no-paddle-structure-v3",
+        dest="paddle_structure_v3",
+        action="store_false",
+        default=None,
+        help="Disable PP-StructureV3 layout parsing for Paddle OCR",
+    )
+    parser.add_argument(
+        "--paddle-structure-version",
+        help="Override Paddle PP-Structure version (e.g., PP-StructureV3)",
+    )
+    parser.add_argument(
         "--max-chunk-chars",
         type=int,
         help="Max chars for section chunks before splitting (section mode only).",
@@ -3686,6 +3912,10 @@ def main() -> int:
         config.quality_confidence_threshold = args.quality_threshold
     if args.language_hint:
         config.language_hint = args.language_hint
+    if args.paddle_structure_v3 is not None:
+        config.paddle_use_structure_v3 = args.paddle_structure_v3
+    if args.paddle_structure_version:
+        config.paddle_structure_version = args.paddle_structure_version
     if args.max_chunk_chars is not None:
         config.max_chunk_chars = args.max_chunk_chars
     if args.chunk_overlap_chars is not None:
