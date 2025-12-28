@@ -70,10 +70,7 @@ def main() -> int:
         ocr_kwargs["text_det_limit_type"] = "max"
 
     def _create_ocr(kwargs: dict, use_textline_orientation: bool) -> PaddleOCR:
-        try:
-            return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
-        except TypeError:
-            return PaddleOCR(use_angle_cls=use_textline_orientation, **kwargs)
+        return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
 
     def _try_create(kwargs: dict, use_textline_orientation: bool) -> PaddleOCR | None:
         try:
@@ -88,21 +85,7 @@ def main() -> int:
         reduced_kwargs.pop("use_doc_unwarping", None)
         ocr = _try_create(reduced_kwargs, True)
     if ocr is None:
-        legacy_kwargs = dict(ocr_kwargs)
-        if "text_det_limit_side_len" in legacy_kwargs:
-            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
-        if "text_det_limit_type" in legacy_kwargs:
-            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _try_create(legacy_kwargs, True)
-    if ocr is None:
-        legacy_kwargs = dict(ocr_kwargs)
-        legacy_kwargs.pop("use_doc_orientation_classify", None)
-        legacy_kwargs.pop("use_doc_unwarping", None)
-        if "text_det_limit_side_len" in legacy_kwargs:
-            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
-        if "text_det_limit_type" in legacy_kwargs:
-            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _create_ocr(legacy_kwargs, True)
+        ocr = _create_ocr(ocr_kwargs, True)
 
     images = []
     if args.pdf:
@@ -223,15 +206,9 @@ def main() -> int:
         result = None
         try:
             result = ocr.predict(np.array(image))  # type: ignore[attr-defined]
-        except Exception:
-            try:
-                result = ocr.ocr(np.array(image), cls=True)
-            except Exception:
-                try:
-                    result = ocr.ocr(np.array(image))
-                except Exception as exc:
-                    print(f"PaddleOCR failed: {exc}")
-                    return 2
+        except Exception as exc:
+            print(f"PaddleOCR failed: {exc}")
+            return 2
 
         if args.dump:
             print(f"Page {idx} result type: {type(result)}")

@@ -97,6 +97,18 @@ const ISO_639_1_TO_3: Record<string, string> = {
 const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
 const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 
+type ParsedChunkBlock = {
+  chunkId: string;
+  text: string;
+  deleteFlag: boolean;
+};
+
+const ZRR_SYNC_START_RE = /<!--\s*zrr:sync-start[^>]*-->/i;
+const ZRR_SYNC_END_RE = /<!--\s*zrr:sync-end\s*-->/i;
+const ZRR_CHUNK_START_RE = /<!--\s*zrr:chunk\b([^>]*)-->/i;
+const ZRR_CHUNK_END_RE = /<!--\s*zrr:chunk\s+end\s*-->/i;
+const ZRR_CHUNK_DELETE_RE = /<!--\s*zrr:delete\s*-->/i;
+
 class TextPromptModal extends Modal {
   private titleText: string;
   private placeholder: string;
@@ -184,9 +196,19 @@ const buildLogDecorations = (view: EditorView): DecorationSet => {
 };
 
 const LOG_THEME = EditorView.theme({
+  ".cm-editor": {
+    height: "100%",
+    display: "flex",
+    flexDirection: "column",
+    minHeight: "0",
+  },
   ".cm-scroller": {
     fontFamily: "var(--font-monospace)",
     fontSize: "0.85rem",
+    flex: "1",
+    height: "100%",
+    maxHeight: "100%",
+    overflow: "auto",
   },
   ".zrr-log-error": { color: "var(--text-error)" },
   ".zrr-log-warning": { color: "var(--text-accent)" },
@@ -211,15 +233,26 @@ const LOG_HIGHLIGHT_PLUGIN = ViewPlugin.fromClass(
   }
 );
 
+type OutputModalOptions = {
+  autoRefresh?: boolean;
+  refreshIntervalMs?: number;
+  onRefresh?: () => Promise<string>;
+  onClear?: () => Promise<void>;
+  clearLabel?: string;
+};
+
 class OutputModal extends Modal {
   private titleText: string;
   private bodyText: string;
   private editorView?: EditorView;
+  private refreshTimer?: number;
+  private options?: OutputModalOptions;
 
-  constructor(app: App, titleText: string, bodyText: string) {
+  constructor(app: App, titleText: string, bodyText: string, options?: OutputModalOptions) {
     super(app);
     this.titleText = titleText;
     this.bodyText = bodyText;
+    this.options = options;
   }
 
   onOpen(): void {
@@ -231,18 +264,42 @@ class OutputModal extends Modal {
       this.modalEl.style.height = "80vh";
       this.modalEl.style.maxHeight = "90vh";
       this.modalEl.style.resize = "both";
-      this.modalEl.style.overflow = "auto";
+      this.modalEl.style.overflow = "hidden";
     }
     contentEl.style.display = "flex";
     contentEl.style.flexDirection = "column";
     contentEl.style.height = "100%";
+    contentEl.style.overflow = "hidden";
+    contentEl.style.minHeight = "0";
 
-    contentEl.createEl("h3", { text: this.titleText });
+    const header = contentEl.createDiv();
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.gap = "0.5rem";
+    header.createEl("h3", { text: this.titleText });
+    const actions = header.createDiv();
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    if (this.options?.onClear) {
+      const clearLabel = this.options.clearLabel ?? "Clear log";
+      const clearButton = actions.createEl("button", { text: clearLabel });
+      clearButton.addEventListener("click", async () => {
+        try {
+          await this.options?.onClear?.();
+        } finally {
+          await this.refreshFromSource();
+        }
+      });
+    }
     const editorWrap = contentEl.createDiv();
-    editorWrap.style.flex = "1";
+    editorWrap.style.flex = "1 1 0";
     editorWrap.style.minHeight = "0";
     editorWrap.style.border = "1px solid var(--background-modifier-border)";
     editorWrap.style.borderRadius = "6px";
+    editorWrap.style.display = "flex";
+    editorWrap.style.flexDirection = "column";
+    editorWrap.style.overflow = "auto";
 
     const state = EditorState.create({
       doc: this.bodyText,
@@ -260,11 +317,49 @@ class OutputModal extends Modal {
       parent: editorWrap,
     });
 
+    void this.refreshFromSource();
+    if (this.options?.autoRefresh && this.options.onRefresh) {
+      const intervalMs = this.options.refreshIntervalMs ?? 2000;
+      this.refreshTimer = window.setInterval(() => {
+        void this.refreshFromSource();
+      }, intervalMs);
+    }
   }
 
   onClose(): void {
+    if (this.refreshTimer !== undefined) {
+      window.clearInterval(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
     this.editorView?.destroy();
     this.editorView = undefined;
+  }
+
+  private async refreshFromSource(): Promise<void> {
+    if (!this.options?.onRefresh || !this.editorView) {
+      return;
+    }
+    let nextText = "";
+    try {
+      nextText = (await this.options.onRefresh()) || "";
+    } catch {
+      return;
+    }
+    if (nextText === this.bodyText) {
+      return;
+    }
+    const view = this.editorView;
+    const scrollTop = view.scrollDOM.scrollTop;
+    const selection = view.state.selection.main;
+    const maxPos = nextText.length;
+    const anchor = Math.min(selection.anchor, maxPos);
+    const head = Math.min(selection.head, maxPos);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: nextText },
+      selection: { anchor, head },
+    });
+    view.scrollDOM.scrollTop = scrollTop;
+    this.bodyText = nextText;
   }
 }
 
@@ -377,6 +472,9 @@ export default class ZoteroRagPlugin extends Plugin {
   private statusBarInnerEl?: HTMLElement;
   private lastPythonEnvNotice: string | null = null;
   private lastContainerNotice: string | null = null;
+  private noteSyncTimers = new Map<string, number>();
+  private noteSyncInFlight = new Set<string>();
+  private noteSyncSuppressed = new Set<string>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -387,6 +485,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerView(VIEW_TYPE_ZOTERO_CHAT, (leaf) => new ZoteroChatView(leaf, this));
     this.setupStatusBar();
     this.registerNoteRenameHandler();
+    this.registerNoteSyncHandler();
 
     try {
       await this.ensureBundledTools();
@@ -440,6 +539,18 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "start-redis-stack",
       name: "Start Redis Stack (Docker/Podman Compose)",
       callback: () => this.startRedisStack(),
+    });
+
+    this.addCommand({
+      id: "open-docling-log",
+      name: "Open Docling log file",
+      callback: () => this.openLogFile(),
+    });
+
+    this.addCommand({
+      id: "clear-docling-log",
+      name: "Clear Docling log file",
+      callback: () => this.clearLogFile(),
     });
 
     void this.autoDetectContainerCliOnLoad();
@@ -690,8 +801,17 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);
-      const noteContent = this.buildNoteMarkdown(values, item.meta ?? {}, docId, pdfLink, itemPath, doclingMd);
-      await this.app.vault.adapter.write(notePath, noteContent);
+      const chunkPayload = await this.readChunkPayload(chunkPath);
+      const doclingContent = this.buildSyncedDoclingContent(docId, chunkPayload, doclingMd);
+      const noteContent = this.buildNoteMarkdown(
+        values,
+        item.meta ?? {},
+        docId,
+        pdfLink,
+        itemPath,
+        doclingContent
+      );
+      await this.writeNoteWithSyncSuppressed(notePath, noteContent);
     } catch (error) {
       new Notice("Failed to finalize note markdown.");
       console.error(error);
@@ -1735,6 +1855,48 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async reindexChunkUpdates(
+    docId: string,
+    chunkPath: string,
+    chunkIds: string[],
+    deleteIds: string[]
+  ): Promise<void> {
+    if (!chunkIds.length && !deleteIds.length) {
+      return;
+    }
+    const pluginDir = this.getPluginDir();
+    const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+    const args = [
+      "--chunks-json",
+      this.getAbsoluteVaultPath(chunkPath),
+      "--redis-url",
+      this.settings.redisUrl,
+      "--index",
+      this.getRedisIndexName(),
+      "--prefix",
+      this.getRedisKeyPrefix(),
+      "--embed-base-url",
+      this.settings.embedBaseUrl,
+      "--embed-api-key",
+      this.settings.embedApiKey,
+      "--embed-model",
+      this.settings.embedModel,
+      "--upsert",
+    ];
+    if (chunkIds.length) {
+      args.push("--chunk-ids", chunkIds.join(","));
+    }
+    if (deleteIds.length) {
+      args.push("--delete-chunk-ids", deleteIds.join(","));
+    }
+
+    try {
+      await this.runPython(indexScript, args);
+    } catch (error) {
+      console.error(`Failed to reindex updated chunks for ${docId}`, error);
+    }
+  }
+
   private async promptZoteroItem(): Promise<ZoteroLocalItem | null> {
     return new Promise((resolve) => {
       new ZoteroItemSuggestModal(this.app, this, resolve).open();
@@ -2280,6 +2442,277 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       })
     );
+  }
+
+  private registerNoteSyncHandler(): void {
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") {
+          return;
+        }
+        if (this.noteSyncSuppressed.has(file.path)) {
+          return;
+        }
+        this.scheduleNoteSync(file);
+      })
+    );
+  }
+
+  private scheduleNoteSync(file: TFile): void {
+    const existing = this.noteSyncTimers.get(file.path);
+    if (existing !== undefined) {
+      window.clearTimeout(existing);
+    }
+    const handle = window.setTimeout(() => {
+      this.noteSyncTimers.delete(file.path);
+      void this.syncNoteToRedis(file);
+    }, 1200);
+    this.noteSyncTimers.set(file.path, handle);
+  }
+
+  private async syncNoteToRedis(file: TFile): Promise<void> {
+    if (this.noteSyncInFlight.has(file.path)) {
+      return;
+    }
+    if (this.noteSyncSuppressed.has(file.path)) {
+      return;
+    }
+    this.noteSyncInFlight.add(file.path);
+    try {
+      const content = await this.app.vault.read(file);
+      const syncSection = this.extractSyncSection(content);
+      if (!syncSection) {
+        return;
+      }
+      const docId =
+        this.extractDocIdFromFrontmatter(content) ?? this.extractDocIdFromSyncMarker(content);
+      if (!docId) {
+        return;
+      }
+
+      const parsedBlocks = this.parseSyncedChunkBlocks(syncSection);
+      if (!parsedBlocks.length) {
+        return;
+      }
+
+      const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(chunkPath))) {
+        return;
+      }
+      const chunkPayload = await this.readChunkPayload(chunkPath);
+      if (!chunkPayload) {
+        return;
+      }
+      const chunks = Array.isArray(chunkPayload.chunks) ? chunkPayload.chunks : [];
+      const chunkMap = new Map<string, Record<string, any>>();
+      for (const chunk of chunks) {
+        const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+        if (id) {
+          chunkMap.set(id, chunk);
+        }
+      }
+
+      const seen = new Set<string>();
+      const updates = new Set<string>();
+      const deletions = new Set<string>();
+
+      for (const block of parsedBlocks) {
+        const chunkId = block.chunkId;
+        if (!chunkId) {
+          continue;
+        }
+        seen.add(chunkId);
+        const existing = chunkMap.get(chunkId);
+        if (!existing) {
+          console.warn(`Sync note: chunk id not found in cache (${chunkId})`);
+          continue;
+        }
+        if (block.deleteFlag || !block.text.trim()) {
+          deletions.add(chunkId);
+          continue;
+        }
+        const normalized = this.normalizeChunkText(block.text);
+        if (!normalized) {
+          deletions.add(chunkId);
+          continue;
+        }
+        const currentText = typeof existing.text === "string" ? existing.text : String(existing.text ?? "");
+        if (normalized !== currentText) {
+          existing.text = normalized;
+          existing.char_count = normalized.length;
+          updates.add(chunkId);
+        }
+      }
+
+      for (const chunkId of chunkMap.keys()) {
+        if (!seen.has(chunkId)) {
+          deletions.add(chunkId);
+        }
+      }
+
+      if (!updates.size && !deletions.size) {
+        return;
+      }
+
+      if (deletions.size) {
+        chunkPayload.chunks = chunks.filter((chunk) => {
+          const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+          return id && !deletions.has(id);
+        });
+      }
+
+      await adapter.write(chunkPath, JSON.stringify(chunkPayload, null, 2));
+
+      await this.reindexChunkUpdates(
+        docId,
+        chunkPath,
+        Array.from(updates),
+        Array.from(deletions)
+      );
+    } catch (error) {
+      console.warn("Failed to sync note edits to Redis", error);
+    } finally {
+      this.noteSyncInFlight.delete(file.path);
+    }
+  }
+
+  private extractSyncSection(content: string): string | null {
+    const startMatch = ZRR_SYNC_START_RE.exec(content);
+    if (!startMatch) {
+      return null;
+    }
+    const afterStart = content.slice(startMatch.index + startMatch[0].length);
+    const endMatch = ZRR_SYNC_END_RE.exec(afterStart);
+    if (!endMatch) {
+      return null;
+    }
+    return afterStart.slice(0, endMatch.index);
+  }
+
+  private extractDocIdFromSyncMarker(content: string): string | null {
+    const startMatch = ZRR_SYNC_START_RE.exec(content);
+    if (!startMatch) {
+      return null;
+    }
+    const marker = startMatch[0] ?? "";
+    const docMatch = marker.match(/doc_id=([\"']?)([^\"'\s]+)\1/i);
+    return docMatch ? docMatch[2].trim() : null;
+  }
+
+  private parseSyncedChunkBlocks(section: string): ParsedChunkBlock[] {
+    const lines = section.split(/\r?\n/);
+    const blocks: ParsedChunkBlock[] = [];
+    let currentId = "";
+    let currentDelete = false;
+    let currentLines: string[] = [];
+
+    const flush = (): void => {
+      if (!currentId) {
+        return;
+      }
+      blocks.push({
+        chunkId: currentId,
+        text: currentLines.join("\n").trim(),
+        deleteFlag: currentDelete,
+      });
+      currentId = "";
+      currentDelete = false;
+      currentLines = [];
+    };
+
+    for (const line of lines) {
+      const startMatch = line.match(ZRR_CHUNK_START_RE);
+      if (startMatch) {
+        flush();
+        const attrs = startMatch[1] ?? "";
+        const idMatch = attrs.match(/id=([\"']?)([^\"'\s]+)\1/i);
+        const chunkId = idMatch ? idMatch[2].trim() : "";
+        if (!chunkId) {
+          continue;
+        }
+        currentId = chunkId;
+        currentDelete = /\bdelete\b/i.test(attrs);
+        currentLines = [];
+        continue;
+      }
+      if (ZRR_CHUNK_END_RE.test(line)) {
+        flush();
+        continue;
+      }
+      if (!currentId) {
+        continue;
+      }
+      if (ZRR_CHUNK_DELETE_RE.test(line)) {
+        currentDelete = true;
+        continue;
+      }
+      currentLines.push(line);
+    }
+
+    flush();
+    return blocks;
+  }
+
+  private normalizeChunkText(text: string): string {
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
+      .join("\n")
+      .trim();
+  }
+
+
+  private buildSyncedDoclingContent(
+    docId: string,
+    chunkPayload: Record<string, any> | null,
+    fallbackMarkdown: string
+  ): string {
+    const chunks = Array.isArray(chunkPayload?.chunks) ? chunkPayload?.chunks : [];
+    if (!chunks.length) {
+      return `<!-- zrr:sync-start doc_id=${docId} -->\n${fallbackMarkdown}\n<!-- zrr:sync-end -->`;
+    }
+    const parts: string[] = [`<!-- zrr:sync-start doc_id=${docId} -->`];
+    for (const chunk of chunks) {
+      const chunkId = typeof chunk?.chunk_id === "string" ? chunk.chunk_id.trim() : "";
+      if (!chunkId) {
+        continue;
+      }
+      const text = typeof chunk?.text === "string" ? chunk.text.trim() : "";
+      parts.push(`<!-- zrr:chunk id=${chunkId} -->`);
+      if (text) {
+        parts.push(text);
+      }
+      parts.push("<!-- zrr:chunk end -->");
+      parts.push("");
+    }
+    if (parts[parts.length - 1] === "") {
+      parts.pop();
+    }
+    parts.push("<!-- zrr:sync-end -->");
+    return parts.join("\n");
+  }
+
+  private async readChunkPayload(chunkPath: string): Promise<Record<string, any> | null> {
+    try {
+      const raw = await this.app.vault.adapter.read(chunkPath);
+      return JSON.parse(raw);
+    } catch (error) {
+      console.warn("Failed to read cached chunks JSON", error);
+      return null;
+    }
+  }
+
+  private async writeNoteWithSyncSuppressed(notePath: string, content: string): Promise<void> {
+    this.noteSyncSuppressed.add(notePath);
+    try {
+      await this.app.vault.adapter.write(notePath, content);
+    } finally {
+      window.setTimeout(() => {
+        this.noteSyncSuppressed.delete(notePath);
+      }, 1500);
+    }
   }
 
   private async resolveNotePathForDocId(docId: string | undefined): Promise<string | null> {
@@ -3429,8 +3862,17 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);
-      const noteContent = this.buildNoteMarkdown(values, item.meta ?? {}, docId, pdfLink, itemPath, doclingMd);
-      await this.app.vault.adapter.write(notePath, noteContent);
+      const updatedChunkPayload = await this.readChunkPayload(chunkPath);
+      const doclingContent = this.buildSyncedDoclingContent(docId, updatedChunkPayload, doclingMd);
+      const noteContent = this.buildNoteMarkdown(
+        values,
+        item.meta ?? {},
+        docId,
+        pdfLink,
+        itemPath,
+        doclingContent
+      );
+      await this.writeNoteWithSyncSuppressed(notePath, noteContent);
     } catch (error) {
       if (showNotices) {
         new Notice("Failed to finalize note markdown.");
@@ -3490,7 +3932,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const frontmatter = this.renderFrontmatter(values, meta, docId, pdfLink, jsonLink);
     const frontmatterBlock = frontmatter ? `---\n${frontmatter}\n---\n\n` : "";
 
-    return `${frontmatterBlock}PDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;
+    //return `${frontmatterBlock}PDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;
+    return `${frontmatterBlock}PDF: !${pdfLink}\n\n${doclingMarkdown}`;
   }
 
   private renderFrontmatter(
@@ -4731,8 +5174,23 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
     try {
-      const content = await adapter.read(rel);
-      new OutputModal(this.app, "Docling log", content || "(empty)").open();
+      const readLog = async (): Promise<string> => {
+        try {
+          const content = await adapter.read(rel);
+          return content || "(empty)";
+        } catch {
+          return "(empty)";
+        }
+      };
+      const content = await readLog();
+      new OutputModal(this.app, "Docling log", content || "(empty)", {
+        autoRefresh: true,
+        refreshIntervalMs: 2000,
+        onRefresh: readLog,
+        onClear: async () => {
+          await this.clearLogFile();
+        },
+      }).open();
     } catch (error) {
       new Notice("Failed to open log file.");
       console.error(error);

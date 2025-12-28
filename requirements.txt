@@ -1,6 +1,10 @@
 docling
 paddleocr
+paddlex[ocr]
 paddlepaddle==3.2.2
+opencv-python
+pyclipper
+shapely
 pdf2image
 pypdf
 pytesseract
@@ -9,6 +13,7 @@ requests
 pyzotero
 tqdm
 wordfreq
+markdown
 
 # Optional for language normalization and spellchecking
 langcodes

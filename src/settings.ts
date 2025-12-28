@@ -350,7 +350,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Frontmatter template")
       .setDesc(
-        "Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}, {{item_json}}"
+        "Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}"
       )
       .addTextArea((text) => {
         text.inputEl.rows = 8;

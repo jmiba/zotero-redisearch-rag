@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import html
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -162,6 +164,43 @@ def parse_item_metadata(item_payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def parse_chunk_id_list(raw: Optional[str], doc_id: str) -> List[str]:
+    if not raw:
+        return []
+    items: List[str] = []
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        if doc_id and cleaned.startswith(f"{doc_id}:"):
+            cleaned = cleaned.split(":", 1)[1]
+        items.append(cleaned)
+    return items
+
+
+def markdown_to_text(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        import markdown as md
+    except Exception:
+        return text
+    try:
+        html_text = md.markdown(text, extensions=["extra", "sane_lists"])
+    except Exception:
+        return text
+    html_text = re.sub(r"<br\s*/?>", "\n", html_text, flags=re.IGNORECASE)
+    stripped = re.sub(r"<[^>]+>", " ", html_text)
+    stripped = html.unescape(stripped)
+    stripped = re.sub(r"[ \t]+", " ", stripped)
+    stripped = re.sub(r"\s*\n\s*", "\n", stripped)
+    return stripped.strip()
+
+
+def normalize_index_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Index Docling chunks into RedisSearch.")
     parser.add_argument("--chunks-json", required=True)
@@ -174,6 +213,8 @@ def main() -> int:
     parser.add_argument("--embed-model", required=True)
     parser.add_argument("--upsert", action="store_true")
     parser.add_argument("--progress", action="store_true")
+    parser.add_argument("--chunk-ids", help="Comma-separated chunk IDs to index")
+    parser.add_argument("--delete-chunk-ids", help="Comma-separated chunk IDs to delete")
     args = parser.parse_args()
 
     if not os.path.isfile(args.chunks_json):
@@ -193,6 +234,11 @@ def main() -> int:
     if not doc_id or not isinstance(chunks, list):
         eprint("Invalid chunks JSON schema")
         return 2
+    doc_id = str(doc_id)
+
+    chunk_id_filter = set(parse_chunk_id_list(args.chunk_ids, doc_id))
+    delete_ids = set(parse_chunk_id_list(args.delete_chunk_ids, doc_id))
+    incremental = bool(chunk_id_filter or delete_ids)
 
     attachment_key = None
     try:
@@ -205,24 +251,25 @@ def main() -> int:
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
 
-    # Delete all existing chunk keys for this doc_id before indexing
-    pattern = f"{args.prefix}{doc_id}:*"
-    deleted = 0
-    try:
-        batch: List[bytes] = []
-        for key in client.scan_iter(match=pattern, count=500):
-            batch.append(key)
-            if len(batch) >= 500:
+    if not incremental:
+        # Delete all existing chunk keys for this doc_id before indexing
+        pattern = f"{args.prefix}{doc_id}:*"
+        deleted = 0
+        try:
+            batch: List[bytes] = []
+            for key in client.scan_iter(match=pattern, count=500):
+                batch.append(key)
+                if len(batch) >= 500:
+                    client.delete(*batch)
+                    deleted += len(batch)
+                    batch = []
+            if batch:
                 client.delete(*batch)
                 deleted += len(batch)
-                batch = []
-        if batch:
-            client.delete(*batch)
-            deleted += len(batch)
-        if deleted:
-            eprint(f"Deleted {deleted} existing chunk keys for doc_id {doc_id}")
-    except Exception as exc:
-        eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
+            if deleted:
+                eprint(f"Deleted {deleted} existing chunk keys for doc_id {doc_id}")
+        except Exception as exc:
+            eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
 
     try:
         ensure_index(client, args.index, args.prefix)
@@ -240,13 +287,26 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to read item JSON metadata: {exc}")
 
+    if delete_ids:
+        try:
+            delete_keys = [f"{args.prefix}{doc_id}:{chunk_id}" for chunk_id in delete_ids]
+            client.delete(*delete_keys)
+        except Exception as exc:
+            eprint(f"Failed to delete chunk keys for doc_id {doc_id}: {exc}")
+
     valid_chunks = []
     for chunk in chunks:
-        text = str(chunk.get("text", ""))
+        raw_text = str(chunk.get("text", ""))
+        text = normalize_index_text(markdown_to_text(raw_text))
         if not text.strip():
             continue
         chunk_id = chunk.get("chunk_id")
         if not chunk_id:
+            continue
+        chunk_id = str(chunk_id)
+        if chunk_id_filter and chunk_id not in chunk_id_filter:
+            continue
+        if chunk_id in delete_ids:
             continue
         valid_chunks.append(chunk)
 
@@ -255,7 +315,8 @@ def main() -> int:
 
     for chunk in valid_chunks:
         current += 1
-        text = str(chunk.get("text", ""))
+        raw_text = str(chunk.get("text", ""))
+        text = normalize_index_text(markdown_to_text(raw_text))
         chunk_id = chunk.get("chunk_id")
 
         stable_chunk_id = f"{doc_id}:{chunk_id}"

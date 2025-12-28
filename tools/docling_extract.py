@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
@@ -61,8 +62,8 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
 @dataclass
 class DoclingProcessingConfig:
     ocr_mode: str = "auto"
-    prefer_ocr_engine: str = "paddle"
-    fallback_ocr_engine: str = "tesseract"
+    prefer_ocr_engine: str = "tesseract"
+    fallback_ocr_engine: str = "paddle"
     language_hint: Optional[str] = None
     default_lang_german: str = "deu+eng"
     default_lang_english: str = "eng"
@@ -135,10 +136,12 @@ class DoclingProcessingConfig:
     paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 3500
     paddle_use_doc_orientation_classify: bool = True
-    paddle_use_doc_unwarping: bool = True
-    paddle_use_textline_orientation: bool = True
-    paddle_use_structure_v3: bool = True
+    paddle_use_doc_unwarping: bool = False
+    paddle_use_textline_orientation: bool = False
+    paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
+    paddle_structure_header_ratio: float = 0.05
+    paddle_structure_footer_ratio: float = 0.05
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -209,6 +212,180 @@ def normalize_whitespace(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def normalize_chunk_whitespace(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    lines = text.split("\n")
+    out_lines: List[str] = []
+    buffer: List[str] = []
+
+    def flush() -> None:
+        if buffer:
+            out_lines.append(" ".join(buffer).strip())
+            buffer.clear()
+
+    heading_re = re.compile(r"^#{1,6}\s+")
+    list_re = re.compile(r"^(?:[-*+]\s+|\d+\.\s+)")
+    footnote_re = re.compile(r"^(?:\[\^\d{1,3}\]:|\[\s*\d+\s*\]|\(\s*\d+\s*\)|\d+[\.\)])\s*\S")
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            if out_lines and out_lines[-1] != "":
+                out_lines.append("")
+            continue
+        if heading_re.match(stripped) or list_re.match(stripped) or footnote_re.match(stripped):
+            flush()
+            if footnote_re.match(stripped) and out_lines and out_lines[-1] != "":
+                out_lines.append("")
+            out_lines.append(stripped)
+            continue
+        buffer.append(stripped)
+
+    flush()
+    result = "\n".join(out_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
+_FOOTNOTE_HEADING_RE = re.compile(
+    r"^#{1,6}\s+(references|bibliography|footnotes?|endnotes?|notes)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_heading_line(line: str) -> bool:
+    return bool(re.match(r"^#{1,6}\s+", line.strip()))
+
+
+def _is_footnote_heading(line: str) -> bool:
+    return bool(_FOOTNOTE_HEADING_RE.match(line.strip()))
+
+
+def _match_footnote_definition(line: str) -> Optional[Tuple[str, str]]:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    patterns = (
+        r"^\[\s*(\d{1,3})\s*\]\s*(.+)$",
+        r"^\(\s*(\d{1,3})\s*\)\s*(.+)$",
+        r"^(\d{1,3})[\.\)]\s+(.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, stripped)
+        if match:
+            return match.group(1), match.group(2).strip()
+    return None
+
+
+def _clustered_definition_indices(lines: Sequence[str]) -> Set[int]:
+    indices = [idx for idx, line in enumerate(lines) if _match_footnote_definition(line)]
+    clustered: Set[int] = set()
+    for i, idx in enumerate(indices):
+        for j in range(i + 1, len(indices)):
+            other = indices[j]
+            if other - idx <= 6:
+                clustered.add(idx)
+                clustered.add(other)
+            else:
+                break
+    return clustered
+
+
+def extract_footnote_definitions(text: str) -> Dict[str, str]:
+    if not text:
+        return {}
+    lines = text.splitlines()
+    clustered = _clustered_definition_indices(lines)
+    footnotes: Dict[str, str] = {}
+    current_id: Optional[str] = None
+    in_heading_block = False
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if _is_heading_line(stripped):
+            in_heading_block = _is_footnote_heading(stripped)
+            current_id = None
+            continue
+        matched = _match_footnote_definition(line)
+        if matched and (in_heading_block or idx in clustered):
+            fid, content = matched
+            footnotes[fid] = content
+            current_id = fid
+            continue
+        if current_id:
+            if not stripped:
+                current_id = None
+                continue
+            footnotes[current_id] = f"{footnotes[current_id]} {stripped}".strip()
+    return footnotes
+
+
+def _replace_inline_footnote_refs(text: str, footnote_ids: Set[str]) -> str:
+    if not text or not footnote_ids:
+        return text
+
+    def _replace_list(match: re.Match) -> str:
+        nums = re.findall(r"\d{1,3}", match.group(1))
+        if not nums or not all(num in footnote_ids for num in nums):
+            return match.group(0)
+        return " ".join(f"[^{num}]" for num in nums)
+
+    def _replace_single(match: re.Match) -> str:
+        fid = match.group(1)
+        return f"[^{fid}]" if fid in footnote_ids else match.group(0)
+
+    def _replace_attached(match: re.Match) -> str:
+        fid = match.group(1)
+        return f"[^{fid}]" if fid in footnote_ids else match.group(0)
+
+    text = re.sub(r"\[(\s*\d{1,3}\s*(?:[,;]\s*\d{1,3}\s*)+)\]", _replace_list, text)
+    text = re.sub(r"\((\s*\d{1,3}\s*(?:[,;]\s*\d{1,3}\s*)+)\)", _replace_list, text)
+    text = re.sub(r"\[(\d{1,3})\]", _replace_single, text)
+    text = re.sub(r"\((\d{1,3})\)", _replace_single, text)
+    text = re.sub(r"(?<=[^\W\d_])(\d{1,3})(?=(?:\s|[.,;:\)\]]|$))", _replace_attached, text)
+    return text
+
+
+def apply_footnotes_to_text(text: str, footnotes: Dict[str, str]) -> str:
+    if not text or not footnotes:
+        return text
+    lines = text.splitlines()
+    clustered = _clustered_definition_indices(lines)
+    out_lines: List[str] = []
+    current_id: Optional[str] = None
+    in_heading_block = False
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if _is_heading_line(stripped):
+            in_heading_block = _is_footnote_heading(stripped)
+            current_id = None
+            out_lines.append(line)
+            continue
+        matched = _match_footnote_definition(line)
+        if matched and (in_heading_block or idx in clustered):
+            fid, _ = matched
+            content = footnotes.get(fid)
+            if content:
+                out_lines.append(f"[^{fid}]: {content}")
+                current_id = fid
+            else:
+                out_lines.append(line)
+                current_id = None
+            continue
+        if current_id:
+            if not stripped:
+                out_lines.append("")
+                current_id = None
+            continue
+        out_lines.append(line)
+
+    normalized = "\n".join(out_lines)
+    return _replace_inline_footnote_refs(normalized, set(footnotes.keys()))
 
 
 def dehyphenate_text(text: str) -> str:
@@ -1793,7 +1970,7 @@ def extract_pages(doc: Any) -> List[Dict[str, Any]]:
             for idx, page in enumerate(pages_list, start=1):
                 page_num = getattr(page, "page_number", None) or getattr(page, "number", None) or idx
                 text = None
-                for attr in ("text", "content", "markdown", "md"):
+                for attr in ("markdown", "md", "text", "content"):
                     if hasattr(page, attr):
                         value = getattr(page, attr)
                         text = value() if callable(value) else value
@@ -2649,29 +2826,103 @@ def ocr_pages_with_paddle_structure(
     progress_base: int = 0,
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    from paddleocr import PPStructure
+    def _check_ppstructure_deps() -> None:
+        missing: List[str] = []
+        for module_name in ("cv2", "pyclipper", "shapely", "paddlex"):
+            try:
+                __import__(module_name)
+            except Exception:
+                missing.append(module_name)
+        if missing:
+            raise RuntimeError(
+                "PP-Structure dependencies missing: "
+                + ", ".join(missing)
+                + ". Install them in the plugin venv."
+            )
+
+    def _resolve_ppstructure():
+        import importlib
+        import pkgutil
+
+        candidates = [
+            ("paddleocr", "PPStructure"),
+            ("paddleocr", "PPStructureV3"),
+            ("paddleocr.ppstructure", "PPStructure"),
+            ("paddleocr.ppstructure", "PPStructureV3"),
+            ("paddleocr.ppstructure.predict_system", "PPStructure"),
+            ("paddleocr.ppstructure.predict_system", "StructureSystem"),
+            ("paddleocr._pipelines", "PPStructure"),
+            ("paddleocr._pipelines", "PPStructureV3"),
+            ("paddleocr._pipelines", "StructureSystem"),
+        ]
+        for module_name, attr_name in candidates:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+            if hasattr(module, attr_name):
+                LOGGER.info("PPStructure resolved from %s.%s", module_name, attr_name)
+                return getattr(module, attr_name)
+
+        try:
+            pipelines = importlib.import_module("paddleocr._pipelines")
+        except Exception:
+            pipelines = None
+        if pipelines and hasattr(pipelines, "__path__"):
+            for modinfo in pkgutil.walk_packages(pipelines.__path__, pipelines.__name__ + "."):
+                if "structure" not in modinfo.name:
+                    continue
+                try:
+                    module = importlib.import_module(modinfo.name)
+                except Exception:
+                    continue
+                for attr_name in ("PPStructure", "PPStructureV3", "StructureSystem"):
+                    if hasattr(module, attr_name):
+                        LOGGER.info("PPStructure resolved from %s.%s", modinfo.name, attr_name)
+                        return getattr(module, attr_name)
+        raise RuntimeError(
+            "PPStructure not available in paddleocr; install a version that ships PPStructure."
+        )
+
+    _check_ppstructure_deps()
+    PPStructure = _resolve_ppstructure()
+    structure_name = getattr(PPStructure, "__name__", "")
+    structure_module = getattr(PPStructure, "__module__", "")
+    use_v3 = "v3" in structure_name.lower() or "pp_structurev3" in structure_module.lower()
 
     try:
         import numpy as np
     except Exception as exc:
         raise RuntimeError(f"numpy is required for PPStructure: {exc}") from exc
 
-    structure_kwargs: Dict[str, Any] = {
-        "lang": languages,
-        "layout": True,
-        "ocr": True,
-        "show_log": False,
-    }
-    if config.paddle_use_textline_orientation:
-        structure_kwargs["use_textline_orientation"] = True
-    if config.paddle_use_doc_orientation_classify:
-        structure_kwargs["use_doc_orientation_classify"] = True
-    if config.paddle_use_doc_unwarping:
-        structure_kwargs["use_doc_unwarping"] = True
-    if config.paddle_structure_version:
-        structure_kwargs["structure_version"] = config.paddle_structure_version
+    if use_v3:
+        structure_kwargs: Dict[str, Any] = {"lang": languages}
+        if config.paddle_target_max_side_px > 0:
+            structure_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
+            structure_kwargs["text_det_limit_type"] = "max"
+        if config.paddle_use_textline_orientation:
+            structure_kwargs["use_textline_orientation"] = True
+        if config.paddle_use_doc_orientation_classify:
+            structure_kwargs["use_doc_orientation_classify"] = True
+        if config.paddle_use_doc_unwarping:
+            structure_kwargs["use_doc_unwarping"] = True
+    else:
+        structure_kwargs = {
+            "lang": languages,
+            "layout": True,
+            "ocr": True,
+            "show_log": False,
+        }
+        if config.paddle_use_textline_orientation:
+            structure_kwargs["use_textline_orientation"] = True
+        if config.paddle_use_doc_orientation_classify:
+            structure_kwargs["use_doc_orientation_classify"] = True
+        if config.paddle_use_doc_unwarping:
+            structure_kwargs["use_doc_unwarping"] = True
+        if config.paddle_structure_version:
+            structure_kwargs["structure_version"] = config.paddle_structure_version
 
-    def _create_structure(kwargs: Dict[str, Any]) -> PPStructure:
+    def _create_structure(kwargs: Dict[str, Any]) -> Any:
         return PPStructure(**kwargs)
 
     structure = None
@@ -2682,11 +2933,37 @@ def ocr_pages_with_paddle_structure(
         reduced_kwargs.pop("use_textline_orientation", None)
         reduced_kwargs.pop("use_doc_orientation_classify", None)
         reduced_kwargs.pop("use_doc_unwarping", None)
+        reduced_kwargs.pop("text_det_limit_side_len", None)
+        reduced_kwargs.pop("text_det_limit_type", None)
         try:
             structure = _create_structure(reduced_kwargs)
         except TypeError:
             reduced_kwargs.pop("structure_version", None)
             structure = _create_structure(reduced_kwargs)
+        except Exception as exc:
+            LOGGER.exception("PP-Structure init failed with reduced kwargs: %s", exc)
+            raise
+    except Exception as exc:
+        LOGGER.exception("PP-Structure init failed: %s", exc)
+        raise
+
+    def _run_structure(structure_obj: Any, image_arr: Any) -> Any:
+        if callable(structure_obj):
+            return structure_obj(image_arr)
+        predict = getattr(structure_obj, "predict", None)
+        if callable(predict):
+            try:
+                return predict(image_arr)
+            except Exception:
+                return predict([image_arr])
+        paddlex_pipeline = getattr(structure_obj, "paddlex_pipeline", None)
+        pipeline_predict = getattr(paddlex_pipeline, "predict", None)
+        if callable(pipeline_predict):
+            try:
+                return pipeline_predict(image_arr)
+            except Exception:
+                return pipeline_predict([image_arr])
+        raise RuntimeError("PP-Structure instance is not callable and has no predict method.")
 
     def _block_to_dict(block: Any) -> Dict[str, Any]:
         if isinstance(block, dict):
@@ -2735,14 +3012,92 @@ def ocr_pages_with_paddle_structure(
             return lines
         return []
 
+    def _extract_bbox(block: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
+        bbox = block.get("bbox") or block.get("box") or block.get("points")
+        if bbox is None:
+            return None
+        if isinstance(bbox, dict):
+            try:
+                x0 = float(bbox.get("x0", bbox.get("left", 0.0)))
+                y0 = float(bbox.get("y0", bbox.get("top", 0.0)))
+                x1 = float(bbox.get("x1", bbox.get("right", 0.0)))
+                y1 = float(bbox.get("y1", bbox.get("bottom", 0.0)))
+                return x0, y0, x1, y1
+            except Exception:
+                return None
+        if isinstance(bbox, (list, tuple)):
+            if len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
+                x0, y0, x1, y1 = bbox
+                return float(x0), float(y0), float(x1), float(y1)
+            if len(bbox) >= 4 and all(isinstance(v, (list, tuple)) for v in bbox):
+                xs = []
+                ys = []
+                for pt in bbox:
+                    if len(pt) < 2:
+                        continue
+                    xs.append(float(pt[0]))
+                    ys.append(float(pt[1]))
+                if xs and ys:
+                    return min(xs), min(ys), max(xs), max(ys)
+            if len(bbox) >= 8 and all(isinstance(v, (int, float)) for v in bbox):
+                xs = [float(v) for v in bbox[0::2]]
+                ys = [float(v) for v in bbox[1::2]]
+                if xs and ys:
+                    return min(xs), min(ys), max(xs), max(ys)
+        return None
+
+    def _is_header_footer(bbox: Optional[Tuple[float, float, float, float]], page_h: float) -> bool:
+        if not bbox or page_h <= 0:
+            return False
+        _, y0, _, y1 = bbox
+        top_band = max(0.0, float(config.paddle_structure_header_ratio))
+        bottom_band = max(0.0, float(config.paddle_structure_footer_ratio))
+        if top_band > 0 and y1 <= page_h * top_band:
+            return True
+        if bottom_band > 0 and y0 >= page_h * (1.0 - bottom_band):
+            return True
+        return False
+
     pages: List[Dict[str, Any]] = []
     total = max(1, len(images))
+    total_pages = len(images)
+    removed_total = 0
+    repeat_threshold = 0
+    repeated_clusters: List[BoilerplateCluster] = []
+    page_records: List[Dict[str, Any]] = []
+    edge_candidates: List[List[str]] = []
+
     for idx, image in enumerate(images, start=1):
-        result = structure(np.array(image))
-        blocks = result if isinstance(result, list) else []
-        lines_out: List[str] = []
+        LOGGER.info("PP-Structure page %d/%d: layout start", idx, total)
+        t_start = time.perf_counter()
+        result = _run_structure(structure, np.array(image))
+        if isinstance(result, dict):
+            blocks = (
+                result.get("layout")
+                or result.get("blocks")
+                or result.get("result")
+                or result.get("items")
+                or []
+            )
+        elif hasattr(result, "layout"):
+            blocks = getattr(result, "layout", []) or []
+        else:
+            blocks = result if isinstance(result, list) else []
+        elapsed = time.perf_counter() - t_start
+        LOGGER.info(
+            "PP-Structure page %d/%d: layout done in %.2fs (blocks=%d)",
+            idx,
+            total,
+            elapsed,
+            len(blocks),
+        )
+        page_h = float(getattr(image, "height", 0.0) or 0.0)
+        record_blocks: List[Dict[str, Any]] = []
+        edge_lines: List[str] = []
         for block in blocks:
             block_dict = _block_to_dict(block)
+            if not block_dict:
+                continue
             block_type = str(
                 block_dict.get("type")
                 or block_dict.get("label")
@@ -2752,16 +3107,61 @@ def ocr_pages_with_paddle_structure(
             block_lines = _extract_block_lines(block_dict)
             if not block_lines:
                 continue
-            if block_type in ("title", "header", "heading"):
-                title = " ".join(block_lines).strip()
-                if title:
-                    lines_out.append(f"# {title}")
+            bbox = _extract_bbox(block_dict)
+            is_edge = _is_header_footer(bbox, page_h)
+            if is_edge:
+                edge_lines.append(" ".join(block_lines).strip())
+            record_blocks.append(
+                {
+                    "type": block_type,
+                    "lines": block_lines,
+                    "edge": is_edge,
+                }
+            )
+        page_records.append({"page_num": idx, "blocks": record_blocks})
+        if config.enable_boilerplate_removal and edge_lines:
+            edge_candidates.append([line for line in edge_lines if line])
+
+    if config.enable_boilerplate_removal and total_pages >= config.boilerplate_min_pages:
+        repeated_clusters, repeat_threshold = detect_repeated_line_clusters(
+            edge_candidates,
+            total_pages,
+            config,
+        )
+
+    for record in page_records:
+        lines_out: List[str] = []
+        for block in record["blocks"]:
+            block_lines = block["lines"]
+            block_text = " ".join(block_lines).strip()
+            if not block_text:
+                continue
+            if config.enable_boilerplate_removal and block["edge"]:
+                normalized = normalize_boilerplate_line(block_text)
+                if matches_repeated_cluster(block_text, repeated_clusters, config) or is_boilerplate_line(normalized):
+                    removed_total += 1
+                    continue
+            if block["type"] in ("title", "header", "heading"):
+                lines_out.append(f"# {block_text}")
             else:
                 lines_out.append("\n".join(block_lines))
-        pages.append({"page_num": idx, "text": "\n\n".join(lines_out).strip()})
+        pages.append({"page_num": record["page_num"], "text": "\n\n".join(lines_out).strip()})
         if progress_cb and progress_span > 0:
-            percent = progress_base + int(idx / total * progress_span)
-            progress_cb(percent, "layout", f"Layout page {idx}/{total}")
+            percent = progress_base + int(record["page_num"] / total * progress_span)
+            progress_cb(percent, "layout", f"Paddle layout page {record['page_num']}/{total}")
+
+    if removed_total and config.enable_boilerplate_removal:
+        LOGGER.info(
+            "Boilerplate removal (PP-Structure): removed %s blocks (repeat_threshold=%s, repeated_lines=%s)",
+            removed_total,
+            repeat_threshold,
+            len(repeated_clusters),
+        )
+    LOGGER.info(
+        "PP-Structure OCR complete: pages=%d, text_chars=%d",
+        len(pages),
+        ocr_pages_text_chars(pages),
+    )
 
     return pages, {"layout_used": True, "layout_model": config.paddle_structure_version}
 
@@ -2781,7 +3181,7 @@ def ocr_pages_with_paddle(
     except Exception as exc:
         raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
 
-    # Newer PaddleOCR prefers use_textline_orientation; older uses use_angle_cls
+    # PaddleOCR orientation classification uses use_textline_orientation
     ocr_kwargs: Dict[str, Any] = {"lang": languages}
     if config.paddle_target_max_side_px > 0:
         ocr_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
@@ -2792,10 +3192,7 @@ def ocr_pages_with_paddle(
         ocr_kwargs["use_doc_unwarping"] = True
 
     def _create_ocr(kwargs: Dict[str, Any], use_textline_orientation: bool) -> PaddleOCR:
-        try:
-            return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
-        except TypeError:
-            return PaddleOCR(use_angle_cls=use_textline_orientation, **kwargs)
+        return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
 
     def _try_create(kwargs: Dict[str, Any], use_textline_orientation: bool) -> Optional[PaddleOCR]:
         try:
@@ -2810,21 +3207,7 @@ def ocr_pages_with_paddle(
         reduced_kwargs.pop("use_doc_unwarping", None)
         ocr = _try_create(reduced_kwargs, config.paddle_use_textline_orientation)
     if ocr is None:
-        legacy_kwargs = dict(ocr_kwargs)
-        if "text_det_limit_side_len" in legacy_kwargs:
-            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
-        if "text_det_limit_type" in legacy_kwargs:
-            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _try_create(legacy_kwargs, config.paddle_use_textline_orientation)
-    if ocr is None:
-        legacy_kwargs = dict(ocr_kwargs)
-        legacy_kwargs.pop("use_doc_orientation_classify", None)
-        legacy_kwargs.pop("use_doc_unwarping", None)
-        if "text_det_limit_side_len" in legacy_kwargs:
-            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
-        if "text_det_limit_type" in legacy_kwargs:
-            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _create_ocr(legacy_kwargs, config.paddle_use_textline_orientation)
+        ocr = _create_ocr(ocr_kwargs, config.paddle_use_textline_orientation)
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
@@ -2940,19 +3323,17 @@ def ocr_pages_with_paddle(
     repeated_clusters: List[BoilerplateCluster] = []
     page_edge_candidates: List[List[str]] = []
 
-    for image in images:
+    for idx, image in enumerate(images, start=1):
+        if config.enable_boilerplate_removal:
+            LOGGER.info("Paddle OCR prepass %d/%d: start", idx, total_pages)
+        t_start = time.perf_counter()
         edge_lines: List[Tuple[str, float]] = []
         result = None
         image_arr = _image_to_array(image)
         try:
             result = ocr.predict(image_arr)  # type: ignore[attr-defined]
         except Exception as exc:
-            LOGGER.debug("PaddleOCR predict failed; falling back to ocr: %s", exc)
-        if not result:
-            try:
-                result = ocr.ocr(image_arr, cls=True)
-            except TypeError:
-                result = ocr.ocr(image_arr)
+            LOGGER.debug("PaddleOCR predict failed: %s", exc)
         if result:
             for quad, text_val, _ in _iter_paddle_entries(result):
                 if not text_val:
@@ -2968,6 +3349,15 @@ def ocr_pages_with_paddle(
             page_edge_candidates.append(
                 select_edge_texts_by_y(edge_lines, config.boilerplate_edge_lines)
             )
+        if config.enable_boilerplate_removal:
+            elapsed = time.perf_counter() - t_start
+            LOGGER.info(
+                "Paddle OCR prepass %d/%d: done in %.2fs (edge_lines=%d)",
+                idx,
+                total_pages,
+                elapsed,
+                len(edge_lines),
+            )
 
     if config.enable_boilerplate_removal and total_pages >= config.boilerplate_min_pages:
         repeated_clusters, repeat_threshold = detect_repeated_line_clusters(
@@ -2978,15 +3368,17 @@ def ocr_pages_with_paddle(
     removed_total = 0
 
     for idx, image in enumerate(images, start=1):
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int((idx - 1) / total * progress_span)
+            progress_cb(percent, "ocr", f"Paddle OCR page {idx}/{total} (running)")
+        LOGGER.info("Paddle OCR page %d/%d: start", idx, total)
+        t_start = time.perf_counter()
         # Prefer new API: predict(); fall back to ocr() with/without cls
         image_arr = _image_to_array(image)
         try:
             result = ocr.predict(image_arr)  # type: ignore[attr-defined]
         except Exception:
-            try:
-                result = ocr.ocr(image_arr, cls=True)
-            except TypeError:
-                result = ocr.ocr(image_arr)
+            result = None
         blocks: List[Dict[str, Any]] = []
         fallback_lines: List[str] = []
         if result:
@@ -3040,9 +3432,18 @@ def ocr_pages_with_paddle(
         else:
             ordered_text = "\n".join(fallback_lines)
         pages.append({"page_num": idx, "text": ordered_text})
+        elapsed = time.perf_counter() - t_start
+        LOGGER.info(
+            "Paddle OCR page %d/%d: done in %.2fs (text_chars=%d, blocks=%d)",
+            idx,
+            total,
+            elapsed,
+            len(ordered_text),
+            len(blocks),
+        )
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
-            progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
+            progress_cb(percent, "ocr", f"Paddle OCR page {idx}/{total}")
 
     if removed_total and config.enable_boilerplate_removal:
         LOGGER.info(
@@ -3053,6 +3454,11 @@ def ocr_pages_with_paddle(
         )
 
     avg_conf = sum(confidences) / len(confidences) if confidences else None
+    LOGGER.info(
+        "Paddle OCR complete: pages=%d, text_chars=%d",
+        len(pages),
+        ocr_pages_text_chars(pages),
+    )
     return pages, {"ocr_confidence_avg": avg_conf}
 
 
@@ -3112,7 +3518,9 @@ def ocr_pages_with_tesseract(
     removed_total = 0
     if config.enable_boilerplate_removal and total >= config.boilerplate_min_pages:
         page_edge_candidates: List[List[str]] = []
-        for image in images:
+        for idx, image in enumerate(images, start=1):
+            LOGGER.info("Tesseract OCR prepass %d/%d: start", idx, total)
+            t_start = time.perf_counter()
             line_items: List[Tuple[str, float]] = []
             try:
                 data = pytesseract.image_to_data(
@@ -3148,6 +3556,14 @@ def ocr_pages_with_tesseract(
                     line_items.append((line_text, line_y0))
             except Exception:
                 line_items = []
+            elapsed = time.perf_counter() - t_start
+            LOGGER.info(
+                "Tesseract OCR prepass %d/%d: done in %.2fs (edge_lines=%d)",
+                idx,
+                total,
+                elapsed,
+                len(line_items),
+            )
             if line_items:
                 page_edge_candidates.append(
                     select_edge_texts_by_y(line_items, config.boilerplate_edge_lines)
@@ -3158,6 +3574,11 @@ def ocr_pages_with_tesseract(
             config,
         )
     for idx, image in enumerate(images, start=1):
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int((idx - 1) / total * progress_span)
+            progress_cb(percent, "ocr", f"Tesseract OCR page {idx}/{total} (running)")
+        LOGGER.info("Tesseract OCR page %d/%d: start", idx, total)
+        t_start = time.perf_counter()
         text = ""
         words: List[Dict[str, Any]] = []
         try:
@@ -3281,9 +3702,18 @@ def ocr_pages_with_tesseract(
         if not text:
             text = pytesseract.image_to_string(image, lang=languages)
         pages.append({"page_num": idx, "text": text})
+        elapsed = time.perf_counter() - t_start
+        LOGGER.info(
+            "Tesseract OCR page %d/%d: done in %.2fs (text_chars=%d, words=%d)",
+            idx,
+            total,
+            elapsed,
+            len(text),
+            len(words),
+        )
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
-            progress_cb(percent, "ocr", f"OCR page {idx}/{total}")
+            progress_cb(percent, "ocr", f"Tesseract OCR page {idx}/{total}")
     if removed_total and config.enable_boilerplate_removal:
         LOGGER.info(
             "Boilerplate removal (OCR lines): removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
@@ -3292,6 +3722,11 @@ def ocr_pages_with_tesseract(
             len(repeated_clusters),
         )
     avg_conf = sum(confidences) / len(confidences) if confidences else None
+    LOGGER.info(
+        "Tesseract OCR complete: pages=%d, text_chars=%d",
+        len(pages),
+        ocr_pages_text_chars(pages),
+    )
     return pages, {"ocr_confidence_avg": avg_conf}
 
 
@@ -3306,6 +3741,21 @@ def run_external_ocr_pages(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_dpi = dpi or config.ocr_dpi
+    if progress_cb and progress_span > 0:
+        label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
+        progress_cb(progress_base, "ocr", f"{label} starting")
+    if engine == "paddle" and config.paddle_use_structure_v3:
+        LOGGER.info(
+            "External OCR starting: engine=%s (PP-Structure), dpi=%d",
+            engine,
+            effective_dpi,
+        )
+    else:
+        LOGGER.info(
+            "External OCR starting: engine=%s, dpi=%d",
+            engine,
+            effective_dpi,
+        )
     if engine == "paddle":
         max_side_points = get_pdf_max_page_points(pdf_path)
         if max_side_points and config.paddle_target_max_side_px > 0:
@@ -3325,6 +3775,7 @@ def run_external_ocr_pages(
             )
             effective_dpi = config.paddle_max_dpi
     images = render_pdf_pages(pdf_path, effective_dpi)
+    LOGGER.info("External OCR rendered pages: %d", len(images))
     if engine == "paddle":
         if config.paddle_use_structure_v3:
             try:
@@ -3664,24 +4115,73 @@ def convert_pdf_with_docling(
     return DoclingConversionResult(markdown=markdown, pages=pages, metadata=metadata)
 
 
+def build_page_heading_map(
+    markdown: str,
+    pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+) -> Dict[int, List[str]]:
+    headings: Dict[int, List[str]] = {}
+    if not markdown or not pages:
+        return headings
+    sections = split_markdown_sections(markdown)
+    if not sections:
+        return headings
+    for section in sections:
+        title = str(section.get("title") or "").strip()
+        text = str(section.get("text") or "").strip()
+        if not title or not text:
+            continue
+        page_start, _ = find_page_range(text, pages, config)
+        if page_start <= 0:
+            continue
+        headings.setdefault(int(page_start), []).append(title)
+    return headings
+
+
+def inject_headings_inline(text: str, titles: Sequence[str]) -> str:
+    if not text or not titles:
+        return text
+    updated = text
+    for title in titles:
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            continue
+        pattern = re.escape(clean_title).replace("\\ ", r"\s+")
+        heading_line = re.compile(rf"^\s*#+\s*{pattern}\s*$", re.IGNORECASE | re.MULTILINE)
+        if heading_line.search(updated):
+            continue
+        title_re = re.compile(rf"(?<!\w){pattern}(?!\w)", re.IGNORECASE)
+        matches = list(title_re.finditer(updated))
+        if matches:
+            match = matches[-1]
+            start, end = match.span()
+            replacement = f"\n\n## {clean_title}\n\n"
+            updated = updated[:start] + replacement + updated[end:]
+    return updated
+
+
 def build_chunks_page(
     doc_id: str,
     pages: List[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
+    heading_map: Optional[Dict[int, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     total_pages = len(pages)
     for page in pages:
         raw_text = str(page.get("text", ""))
+        page_num = int(page.get("page_num", 0))
         if postprocess:
-            page_num = int(page.get("page_num", 0))
             raw_text = postprocess(raw_text, f"page {page_num}/{total_pages}")
         raw_text = clean_chunk_text(raw_text, config)
-        cleaned = normalize_text(raw_text)
+        if heading_map:
+            titles = heading_map.get(page_num, [])
+            if titles:
+                raw_text = inject_headings_inline(raw_text, titles)
+        cleaned = normalize_chunk_whitespace(raw_text)
         if not cleaned:
             continue
-        page_num = int(page.get("page_num", 0))
         chunk_id = f"p{page_num}"
         chunks.append({
             "chunk_id": chunk_id,
@@ -3727,7 +4227,7 @@ def build_chunks_section(
         overlap_chars = config.chunk_overlap_chars if config else 0
         segments = split_text_by_size(text, max_chars, overlap_chars)
         for seg_idx, segment in enumerate(segments, start=1):
-            cleaned = normalize_text(segment)
+            cleaned = normalize_whitespace(segment)
             if not cleaned:
                 continue
             page_start, page_end = find_page_range(cleaned, pages, config)
@@ -3985,7 +4485,7 @@ def main() -> int:
         languages = conversion.metadata.get("languages", config.default_lang_english)
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        should_postprocess = config.enable_post_correction and ocr_used
+        should_postprocess = config.enable_post_correction
         if should_postprocess:
             wordlist = prepare_dictionary_words(config)
             allow_missing_space = ocr_used
@@ -4061,6 +4561,18 @@ def main() -> int:
             LOGGER.warning("Markdown empty; rebuilding from %d pages", len(pages))
             markdown = "\n\n".join(str(page.get("text", "")) for page in pages)
 
+        footnote_source = markdown if markdown.strip() else "\n\n".join(str(page.get("text", "")) for page in pages)
+        footnotes = extract_footnote_definitions(footnote_source)
+        if footnotes:
+            markdown = apply_footnotes_to_text(markdown, footnotes)
+            updated_pages: List[Dict[str, Any]] = []
+            for page in pages:
+                updated_pages.append({
+                    "page_num": page.get("page_num", 0),
+                    "text": apply_footnotes_to_text(str(page.get("text", "")), footnotes),
+                })
+            pages = updated_pages
+
         if not has_output_text(markdown, pages):
             eprint("Extraction produced empty output after fallback attempts.")
             return 2
@@ -4083,7 +4595,14 @@ def main() -> int:
                 postprocess=postprocess_fn,
             )
         else:
-            chunks = build_chunks_page(args.doc_id, pages, config=config)
+            heading_map = build_page_heading_map(markdown, pages, config)
+            chunks = build_chunks_page(
+                args.doc_id,
+                pages,
+                config=config,
+                postprocess=postprocess_fn,
+                heading_map=heading_map,
+            )
     except Exception as exc:
         eprint(f"Failed to build chunks: {exc}")
         return 2
