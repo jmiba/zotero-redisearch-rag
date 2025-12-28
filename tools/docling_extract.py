@@ -132,6 +132,8 @@ class DoclingProcessingConfig:
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
     ocr_overlay_dpi: int = 400
+    paddle_max_dpi: int = 300
+    paddle_target_max_side_px: int = 3500
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -847,6 +849,26 @@ def normalize_languages_for_engine(languages: str, engine: str) -> str:
             return "en"
         return "en"
     return languages
+
+
+def get_pdf_max_page_points(pdf_path: str, max_pages: int = 3) -> Optional[float]:
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return None
+    try:
+        reader = PdfReader(pdf_path)
+        max_side = 0.0
+        total_pages = len(reader.pages)
+        sample_count = min(max_pages, total_pages)
+        for idx in range(sample_count):
+            page = reader.pages[idx]
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+            max_side = max(max_side, width, height)
+        return max_side or None
+    except Exception:
+        return None
 
 
 def decide_ocr_route(
@@ -1634,7 +1656,7 @@ def postprocess_text(
                 return match.group(0)
             w1_ok = is_valid_word(w1)
             w2_ok = is_valid_word(w2)
-            if w1_ok and w2_ok and len(w1) > 3 and len(w2) > 3:
+            if w1_ok and w2_ok:
                 return match.group(0)
             return match_case(combined, w1)
 
@@ -1655,6 +1677,31 @@ def postprocess_text(
         except Exception as exc:
             LOGGER.warning("Missing-space restoration failed: %s", exc)
 
+    def split_common_prefixes(input_text: str) -> str:
+        prefixes = ("and", "the", "of", "in", "on", "to", "as", "for", "with", "from", "by", "but")
+        token_re = re.compile(r"[A-Za-zÄÖÜäöüß]{5,}")
+
+        def repl(match: re.Match) -> str:
+            tok = match.group(0)
+            lower = tok.lower()
+            for pref in prefixes:
+                if not lower.startswith(pref):
+                    continue
+                if len(tok) <= len(pref) + 2:
+                    continue
+                left = tok[: len(pref)]
+                right = tok[len(pref) :]
+                if is_valid_word(left) and is_valid_word(right):
+                    try:
+                        LOGGER.info("Split prefix: %s -> %s %s", tok, left, right)
+                    except Exception:
+                        pass
+                    return f"{left} {right}"
+            return tok
+
+        return token_re.sub(repl, input_text)
+
+    cleaned = split_common_prefixes(cleaned)
     cleaned = merge_broken_words(cleaned)
     if config.enable_dictionary_correction or hs is not None:
         cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
@@ -2515,6 +2562,7 @@ def split_blocks_into_columns(
 def order_blocks_into_columns(
     blocks: List[Dict[str, Any]],
     log_label: str = "OCR",
+    preserve_single_column_order: bool = False,
 ) -> str:
     columns, _, _ = split_blocks_into_columns(blocks, log_label=log_label)
     if not columns:
@@ -2522,7 +2570,10 @@ def order_blocks_into_columns(
     # Within each column, sort top-down and join
     col_texts: List[str] = []
     for col in columns:
-        col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
+        if preserve_single_column_order and len(columns) == 1:
+            col_sorted = sorted(col, key=lambda b: b.get("line_id", 0))
+        else:
+            col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
         lines: List[str] = []
         for block in col_sorted:
             raw = str(block.get("text", "")).strip()
@@ -2558,10 +2609,26 @@ def ocr_pages_with_paddle(
         raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
 
     # Newer PaddleOCR prefers use_textline_orientation; older uses use_angle_cls
+    ocr_kwargs: Dict[str, Any] = {"lang": languages}
+    if config.paddle_target_max_side_px > 0:
+        ocr_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
+        ocr_kwargs["text_det_limit_type"] = "max"
+
+    def _create_ocr(kwargs: Dict[str, Any]) -> PaddleOCR:
+        try:
+            return PaddleOCR(use_textline_orientation=True, **kwargs)
+        except TypeError:
+            return PaddleOCR(use_angle_cls=True, **kwargs)
+
     try:
-        ocr = PaddleOCR(use_textline_orientation=True, lang=languages)
+        ocr = _create_ocr(ocr_kwargs)
     except TypeError:
-        ocr = PaddleOCR(use_angle_cls=True, lang=languages)
+        legacy_kwargs = dict(ocr_kwargs)
+        if "text_det_limit_side_len" in legacy_kwargs:
+            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
+        if "text_det_limit_type" in legacy_kwargs:
+            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
+        ocr = _create_ocr(legacy_kwargs)
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
@@ -2572,6 +2639,105 @@ def ocr_pages_with_paddle(
         xc = 0.5 * (x0 + x1)
         return x0, y0, x1, y1, xc
 
+    def _image_to_array(img: Any) -> Any:
+        if hasattr(img, "convert"):
+            try:
+                img = img.convert("RGB")
+            except Exception:
+                pass
+        return np.array(img)
+
+    def _paddle_obj_to_dict(obj: Any) -> Optional[Dict[str, Any]]:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj
+        to_dict = getattr(obj, "to_dict", None)
+        if callable(to_dict):
+            try:
+                converted = to_dict()
+                if isinstance(converted, dict):
+                    return converted
+            except Exception:
+                return None
+        rec_texts = getattr(obj, "rec_texts", None)
+        dt_polys = getattr(obj, "dt_polys", None)
+        if rec_texts is not None or dt_polys is not None:
+            return {"rec_texts": rec_texts, "dt_polys": dt_polys, "rec_scores": getattr(obj, "rec_scores", None)}
+        return None
+
+    def _extract_from_paddle_dict(result: Dict[str, Any]) -> List[Tuple[Any, str, Optional[float]]]:
+        texts = result.get("rec_texts") or result.get("texts") or result.get("rec_text")
+        if not isinstance(texts, list):
+            return []
+        boxes = (
+            result.get("dt_polys")
+            or result.get("det_polys")
+            or result.get("dt_boxes")
+            or result.get("boxes")
+        )
+        scores = result.get("rec_scores") or result.get("scores") or result.get("rec_score")
+        entries: List[Tuple[Any, str, Optional[float]]] = []
+        for idx, text_val in enumerate(texts):
+            text_str = str(text_val or "").strip()
+            if not text_str:
+                continue
+            quad = None
+            if isinstance(boxes, list) and idx < len(boxes):
+                quad = boxes[idx]
+            conf_val = None
+            if isinstance(scores, list) and idx < len(scores):
+                try:
+                    conf_val = float(scores[idx])
+                except Exception:
+                    conf_val = None
+            entries.append((quad, text_str, conf_val))
+        return entries
+
+    def _iter_paddle_entries(result: Any) -> List[Tuple[Any, str, Optional[float]]]:
+        if isinstance(result, dict):
+            return _extract_from_paddle_dict(result)
+        if isinstance(result, list):
+            entries = result
+            if len(result) == 1:
+                maybe_dict = _paddle_obj_to_dict(result[0])
+                if maybe_dict is not None:
+                    return _extract_from_paddle_dict(maybe_dict)
+                if isinstance(result[0], (list, tuple, dict)):
+                    entries = result[0]
+            if isinstance(entries, dict):
+                return _extract_from_paddle_dict(entries)
+            if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+                combined: List[Tuple[Any, str, Optional[float]]] = []
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        combined.extend(_extract_from_paddle_dict(entry))
+                    else:
+                        maybe_dict = _paddle_obj_to_dict(entry)
+                        if maybe_dict is not None:
+                            combined.extend(_extract_from_paddle_dict(maybe_dict))
+                return combined
+            extracted: List[Tuple[Any, str, Optional[float]]] = []
+            for entry in entries:
+                if not entry or not isinstance(entry, (list, tuple)):
+                    continue
+                quad = entry[0] if len(entry) > 0 else None
+                text_part = entry[1] if len(entry) > 1 else None
+                if text_part is None:
+                    continue
+                text_str = ""
+                conf_val = None
+                if isinstance(text_part, (list, tuple)) and text_part:
+                    text_str = str(text_part[0] or "").strip()
+                    if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
+                        conf_val = float(text_part[1])
+                else:
+                    text_str = str(text_part or "").strip()
+                if text_str:
+                    extracted.append((quad, text_str, conf_val))
+            return extracted
+        return []
+
     total = max(1, len(images))
     total_pages = len(images)
     repeat_threshold = 0
@@ -2580,34 +2746,27 @@ def ocr_pages_with_paddle(
 
     for image in images:
         edge_lines: List[Tuple[str, float]] = []
+        result = None
+        image_arr = _image_to_array(image)
         try:
-            result = ocr.predict(np.array(image))  # type: ignore[attr-defined]
-        except Exception:
+            result = ocr.predict(image_arr)  # type: ignore[attr-defined]
+        except Exception as exc:
+            LOGGER.debug("PaddleOCR predict failed; falling back to ocr: %s", exc)
+        if not result:
             try:
-                result = ocr.ocr(np.array(image), cls=True)
+                result = ocr.ocr(image_arr, cls=True)
             except TypeError:
-                result = ocr.ocr(np.array(image))
+                result = ocr.ocr(image_arr)
         if result:
-            entries = result[0] if isinstance(result, list) else result
-            for entry in entries:
-                if not entry or not isinstance(entry, (list, tuple)):
-                    continue
-                text_part = entry[1] if len(entry) > 1 else None
-                quad = entry[0] if len(entry) > 0 else None
-                if text_part is None:
-                    continue
-                if isinstance(text_part, (list, tuple)) and text_part:
-                    text_val = str(text_part[0] or "").strip()
-                else:
-                    text_val = str(text_part or "").strip()
+            for quad, text_val, _ in _iter_paddle_entries(result):
                 if not text_val:
                     continue
-                y0_val = 0.0
-                if quad is not None:
-                    try:
-                        _, y0_val, _, _, _ = _bbox_from_quad(quad)
-                    except Exception:
-                        y0_val = 0.0
+                if quad is None:
+                    continue
+                try:
+                    _, y0_val, _, _, _ = _bbox_from_quad(quad)
+                except Exception:
+                    y0_val = 0.0
                 edge_lines.append((text_val, y0_val))
         if config.enable_boilerplate_removal and edge_lines:
             page_edge_candidates.append(
@@ -2624,47 +2783,39 @@ def ocr_pages_with_paddle(
 
     for idx, image in enumerate(images, start=1):
         # Prefer new API: predict(); fall back to ocr() with/without cls
+        image_arr = _image_to_array(image)
         try:
-            result = ocr.predict(np.array(image))  # type: ignore[attr-defined]
+            result = ocr.predict(image_arr)  # type: ignore[attr-defined]
         except Exception:
             try:
-                result = ocr.ocr(np.array(image), cls=True)
+                result = ocr.ocr(image_arr, cls=True)
             except TypeError:
-                result = ocr.ocr(np.array(image))
+                result = ocr.ocr(image_arr)
         blocks: List[Dict[str, Any]] = []
+        fallback_lines: List[str] = []
         if result:
-            entries = result[0] if isinstance(result, list) else result
-            for entry in entries:
-                if not entry or not isinstance(entry, (list, tuple)):
+            for quad, text_val, conf_val in _iter_paddle_entries(result):
+                if conf_val is not None:
+                    confidences.append(conf_val)
+                if not text_val:
                     continue
-                quad = entry[0] if len(entry) > 0 else None
-                text_part = entry[1] if len(entry) > 1 else None
-                if quad is None or text_part is None:
+                if quad is None:
+                    fallback_lines.append(text_val)
                     continue
                 try:
                     x0, y0, x1, y1, xc = _bbox_from_quad(quad)
                 except Exception:
+                    fallback_lines.append(text_val)
                     continue
-                text_val = ""
-                conf_val = None
-                if isinstance(text_part, (list, tuple)) and text_part:
-                    text_val = str(text_part[0] or "").strip()
-                    if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
-                        conf_val = float(text_part[1])
-                else:
-                    text_val = str(text_part or "").strip()
-                if conf_val is not None:
-                    confidences.append(conf_val)
-                if text_val:
-                    blocks.append({
-                        "x0": x0,
-                        "y0": y0,
-                        "x1": x1,
-                        "y1": y1,
-                        "xc": xc,
-                        "text": text_val,
-                        "line_id": len(blocks),
-                    })
+                blocks.append({
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                    "xc": xc,
+                    "text": text_val,
+                    "line_id": len(blocks),
+                })
         edge_ids: Set[int] = set()
         if config.enable_boilerplate_removal and blocks:
             edge_ids = edge_ids_by_y(
@@ -2684,7 +2835,14 @@ def ocr_pages_with_paddle(
                     continue
                 filtered_blocks.append(b)
             blocks = filtered_blocks
-        ordered_text = order_blocks_into_columns(blocks, log_label="Paddle")
+        if blocks:
+            ordered_text = order_blocks_into_columns(
+                blocks,
+                log_label="Paddle",
+                preserve_single_column_order=True,
+            )
+        else:
+            ordered_text = "\n".join(fallback_lines)
         pages.append({"page_num": idx, "text": ordered_text})
         if progress_cb and progress_span > 0:
             percent = progress_base + int(idx / total * progress_span)
@@ -2951,7 +3109,26 @@ def run_external_ocr_pages(
     progress_base: int = 0,
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    images = render_pdf_pages(pdf_path, dpi or config.ocr_dpi)
+    effective_dpi = dpi or config.ocr_dpi
+    if engine == "paddle":
+        max_side_points = get_pdf_max_page_points(pdf_path)
+        if max_side_points and config.paddle_target_max_side_px > 0:
+            target_dpi = int(config.paddle_target_max_side_px * 72 / max_side_points)
+            if target_dpi > 0 and target_dpi < effective_dpi:
+                LOGGER.info(
+                    "Paddle OCR DPI adjusted for page size: %d -> %d",
+                    effective_dpi,
+                    target_dpi,
+                )
+                effective_dpi = target_dpi
+        if config.paddle_max_dpi > 0 and effective_dpi > config.paddle_max_dpi:
+            LOGGER.info(
+                "Paddle OCR DPI capped: %d -> %d",
+                effective_dpi,
+                config.paddle_max_dpi,
+            )
+            effective_dpi = config.paddle_max_dpi
+    images = render_pdf_pages(pdf_path, effective_dpi)
     if engine == "paddle":
         return ocr_pages_with_paddle(
             images,

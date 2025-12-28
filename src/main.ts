@@ -10,6 +10,14 @@ import {
   addIcon,
   normalizePath,
 } from "obsidian";
+import { EditorState, RangeSetBuilder } from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+} from "@codemirror/view";
 import { spawn } from "child_process";
 import { promises as fs, existsSync } from "fs";
 import http from "http";
@@ -143,9 +151,70 @@ class TextPromptModal extends Modal {
   }
 }
 
+const getLogLineClass = (text: string): string | null => {
+  if (text.includes("STDERR")) {
+    return "zrr-log-stderr";
+  }
+  if (text.includes("ERROR")) {
+    return "zrr-log-error";
+  }
+  if (text.includes("WARNING") || text.includes("WARN")) {
+    return "zrr-log-warning";
+  }
+  if (text.includes("INFO")) {
+    return "zrr-log-info";
+  }
+  return null;
+};
+
+const buildLogDecorations = (view: EditorView): DecorationSet => {
+  const builder = new RangeSetBuilder<Decoration>();
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos);
+      const className = getLogLineClass(line.text);
+      if (className) {
+        builder.add(line.from, line.from, Decoration.line({ class: className }));
+      }
+      pos = line.to + 1;
+    }
+  }
+  return builder.finish();
+};
+
+const LOG_THEME = EditorView.theme({
+  ".cm-scroller": {
+    fontFamily: "var(--font-monospace)",
+    fontSize: "0.85rem",
+  },
+  ".zrr-log-error": { color: "var(--text-error)" },
+  ".zrr-log-warning": { color: "var(--text-accent)" },
+  ".zrr-log-info": { color: "var(--text-muted)" },
+  ".zrr-log-stderr": { color: "var(--text-accent)" },
+});
+
+const LOG_HIGHLIGHT_PLUGIN = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = buildLogDecorations(view);
+    }
+    update(update: ViewUpdate): void {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = buildLogDecorations(update.view);
+      }
+    }
+  },
+  {
+    decorations: (value) => value.decorations,
+  }
+);
+
 class OutputModal extends Modal {
   private titleText: string;
   private bodyText: string;
+  private editorView?: EditorView;
 
   constructor(app: App, titleText: string, bodyText: string) {
     super(app);
@@ -169,15 +238,33 @@ class OutputModal extends Modal {
     contentEl.style.height = "100%";
 
     contentEl.createEl("h3", { text: this.titleText });
-    const textarea = contentEl.createEl("textarea");
-    textarea.value = this.bodyText;
-    textarea.style.flex = "1";
-    textarea.style.width = "100%";
-    textarea.style.resize = "none";
-    textarea.style.whiteSpace = "pre";
-    textarea.style.fontFamily = "var(--font-monospace)";
-    textarea.style.fontSize = "0.85rem";
-    textarea.spellcheck = false;
+    const editorWrap = contentEl.createDiv();
+    editorWrap.style.flex = "1";
+    editorWrap.style.minHeight = "0";
+    editorWrap.style.border = "1px solid var(--background-modifier-border)";
+    editorWrap.style.borderRadius = "6px";
+
+    const state = EditorState.create({
+      doc: this.bodyText,
+      extensions: [
+        LOG_THEME,
+        LOG_HIGHLIGHT_PLUGIN,
+        EditorView.editable.of(true),
+        EditorState.readOnly.of(false),
+        EditorView.lineWrapping,
+      ],
+    });
+
+    this.editorView = new EditorView({
+      state,
+      parent: editorWrap,
+    });
+
+  }
+
+  onClose(): void {
+    this.editorView?.destroy();
+    this.editorView = undefined;
   }
 }
 
@@ -4398,6 +4485,12 @@ export default class ZoteroRagPlugin extends Plugin {
     const extras = process.platform === "win32" ? [] : ["/opt/homebrew/bin", "/usr/local/bin"];
     const merged = [...extras, current].filter(Boolean).join(sep);
     env.PATH = merged;
+    if (!env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK) {
+      env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True";
+    }
+    if (!env.DISABLE_MODEL_SOURCE_CHECK) {
+      env.DISABLE_MODEL_SOURCE_CHECK = "True";
+    }
     return env;
   }
 
