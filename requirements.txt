@@ -1,5 +1,6 @@
 docling
 paddleocr
+paddlepaddle==3.2.2
 pdf2image
 pypdf
 pytesseract

@@ -156,9 +156,28 @@ class OutputModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
+    if (this.modalEl) {
+      this.modalEl.style.width = "80vw";
+      this.modalEl.style.maxWidth = "1200px";
+      this.modalEl.style.height = "80vh";
+      this.modalEl.style.maxHeight = "90vh";
+      this.modalEl.style.resize = "both";
+      this.modalEl.style.overflow = "auto";
+    }
+    contentEl.style.display = "flex";
+    contentEl.style.flexDirection = "column";
+    contentEl.style.height = "100%";
+
     contentEl.createEl("h3", { text: this.titleText });
-    const pre = contentEl.createEl("pre");
-    pre.setText(this.bodyText);
+    const textarea = contentEl.createEl("textarea");
+    textarea.value = this.bodyText;
+    textarea.style.flex = "1";
+    textarea.style.width = "100%";
+    textarea.style.resize = "none";
+    textarea.style.whiteSpace = "pre";
+    textarea.style.fontFamily = "var(--font-monospace)";
+    textarea.style.fontSize = "0.85rem";
+    textarea.spellcheck = false;
   }
 }
 
@@ -502,6 +521,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath, doclingLanguageHint);
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
+      const doclingLogPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       await this.runPythonStreaming(
         doclingScript,
         this.buildDoclingArgs(
@@ -513,7 +533,8 @@ export default class ZoteroRagPlugin extends Plugin {
           true
         ),
         (payload) => this.handleDoclingProgress(payload, qualityLabel),
-        () => {}
+        () => {},
+        doclingLogPath
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
       await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachment.key);
@@ -1812,6 +1833,10 @@ export default class ZoteroRagPlugin extends Plugin {
       const ocrMode =
         this.settings.ocrMode === "force_low_quality" ? "auto" : this.settings.ocrMode;
       const args = ["--quality-only", "--pdf", pdfPath, "--ocr", ocrMode];
+      const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
+      if (logPath) {
+        args.push("--log-file", logPath);
+      }
       if (this.settings.ocrMode === "force_low_quality") {
         args.push("--force-ocr-low-quality");
       }
@@ -1819,7 +1844,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (languageHint) {
         args.push("--language-hint", languageHint);
       }
-      const output = await this.runPythonWithOutput(doclingScript, args);
+      const output = await this.runPythonWithOutput(doclingScript, args, logPath);
       const payload = JSON.parse(output);
       const quality = payload?.confidence_proxy;
       if (typeof quality === "number") {
@@ -3224,6 +3249,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf, doclingLanguageHint);
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
+      const doclingLogPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       await this.runPythonStreaming(
         doclingScript,
         this.buildDoclingArgs(
@@ -3235,7 +3261,8 @@ export default class ZoteroRagPlugin extends Plugin {
           true
         ),
         (payload) => this.handleDoclingProgress(payload, qualityLabel),
-        () => {}
+        () => {},
+        doclingLogPath
       );
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
       if (attachmentKey) {
@@ -4191,10 +4218,32 @@ export default class ZoteroRagPlugin extends Plugin {
       console.log(`Python env: using plugin dir ${pluginDir}`);
       console.log(`Python env: venv path ${venvDir}`);
 
+      let bootstrap: { command: string; args: string[] } | null = null;
+      const ensureBootstrap = async (): Promise<{ command: string; args: string[] }> => {
+        if (!bootstrap) {
+          bootstrap = await this.resolveBootstrapPython();
+        }
+        return bootstrap;
+      };
+
+      if (existsSync(venvPython)) {
+        const venvVersion = await this.getPythonVersion(venvPython, []);
+        if (venvVersion && this.isUnsupportedPythonVersion(venvVersion)) {
+          const resolved = await ensureBootstrap();
+          console.log(
+            `Python env: existing venv uses Python ${venvVersion.major}.${venvVersion.minor}; rebuilding with ${resolved.command} ${resolved.args.join(
+              " "
+            )}`
+          );
+          this.showStatusProgress("Rebuilding Python environment...", null);
+          await fs.rm(venvDir, { recursive: true, force: true });
+        }
+      }
+
       if (!existsSync(venvPython)) {
-        const bootstrap = await this.resolveBootstrapPython();
-        console.log(`Python env: creating venv with ${bootstrap.command} ${bootstrap.args.join(" ")}`);
-        await this.runCommand(bootstrap.command, [...bootstrap.args, "-m", "venv", venvDir], {
+        const resolved = await ensureBootstrap();
+        console.log(`Python env: creating venv with ${resolved.command} ${resolved.args.join(" ")}`);
+        await this.runCommand(resolved.command, [...resolved.args, "-m", "venv", venvDir], {
           cwd: pluginDir,
         });
       }
@@ -4256,41 +4305,107 @@ export default class ZoteroRagPlugin extends Plugin {
   private async resolveBootstrapPython(): Promise<{ command: string; args: string[] }> {
     const configured = (this.settings.pythonPath || "").trim();
     if (configured && (await this.canRunCommand(configured, []))) {
+      const version = await this.getPythonVersion(configured, []);
+      if (version && this.isUnsupportedPythonVersion(version)) {
+        throw new Error(
+          `Configured Python ${version.major}.${version.minor} is not supported. Install Python 3.11 or 3.12 and update the Python path.`
+        );
+      }
       return { command: configured, args: [] };
     }
 
     const candidates =
       process.platform === "win32"
         ? [
+            { command: "py", args: ["-3.12"] },
+            { command: "py", args: ["-3.11"] },
+            { command: "py", args: ["-3.10"] },
             { command: "py", args: ["-3"] },
             { command: "python", args: [] },
           ]
         : [
+            { command: "python3.12", args: [] },
+            { command: "python3.11", args: [] },
+            { command: "python3.10", args: [] },
             { command: "python3", args: [] },
             { command: "python", args: [] },
           ];
 
     for (const candidate of candidates) {
       if (await this.canRunCommand(candidate.command, candidate.args)) {
+        const version = await this.getPythonVersion(candidate.command, candidate.args);
+        if (version && this.isUnsupportedPythonVersion(version)) {
+          console.log(
+            `Python env: skipping ${candidate.command} ${candidate.args.join(" ")} (Python ${version.major}.${version.minor} unsupported)`
+          );
+          continue;
+        }
         return candidate;
       }
     }
 
-    throw new Error("No usable Python interpreter found on PATH.");
+    throw new Error("No usable Python 3.11/3.12 interpreter found on PATH.");
+  }
+
+  private isUnsupportedPythonVersion(version: { major: number; minor: number }): boolean {
+    return version.major > 3 || (version.major === 3 && version.minor >= 13);
+  }
+
+  private async getPythonVersion(
+    command: string,
+    args: string[]
+  ): Promise<{ major: number; minor: number } | null> {
+    return new Promise((resolve) => {
+      const child = spawn(command, [
+        ...args,
+        "-c",
+        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+      ]);
+      let stdout = "";
+      child.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
+      child.on("error", () => resolve(null));
+      child.on("close", (code) => {
+        if (code !== 0) {
+          resolve(null);
+          return;
+        }
+        const match = stdout.trim().match(/(\d+)\.(\d+)/);
+        if (!match) {
+          resolve(null);
+          return;
+        }
+        resolve({ major: Number(match[1]), minor: Number(match[2]) });
+      });
+    });
   }
 
   private async canRunCommand(command: string, args: string[]): Promise<boolean> {
     return new Promise((resolve) => {
-      const child = spawn(command, [...args, "--version"]);
+      const child = spawn(command, [...args, "--version"], {
+        env: this.buildPythonEnv(),
+      });
       child.on("error", () => resolve(false));
       child.on("close", (code) => resolve(code === 0));
     });
+  }
+
+  private buildPythonEnv(): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    const sep = path.delimiter;
+    const current = env.PATH || "";
+    const extras = process.platform === "win32" ? [] : ["/opt/homebrew/bin", "/usr/local/bin"];
+    const merged = [...extras, current].filter(Boolean).join(sep);
+    env.PATH = merged;
+    return env;
   }
 
   private runPython(scriptPath: string, args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
+        env: this.buildPythonEnv(),
       });
 
       let stderr = "";
@@ -4322,7 +4437,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options?.cwd,
-        env: options?.env,
+        env: options?.env ?? this.buildPythonEnv(),
       });
 
       let stderr = "";
@@ -4348,11 +4463,13 @@ export default class ZoteroRagPlugin extends Plugin {
     scriptPath: string,
     args: string[],
     onPayload: (payload: any) => void,
-    onFallbackFinal: (payload: any) => void
+    onFallbackFinal: (payload: any) => void,
+    stderrLogPath?: string | null
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
+        env: this.buildPythonEnv(),
       });
 
       let stdoutBuffer = "";
@@ -4403,6 +4520,9 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!sawFinal && lastPayload) {
           onFallbackFinal(lastPayload);
         }
+        if (stderrLogPath) {
+          void this.appendToLogFile(stderrLogPath, stderr);
+        }
         if (code === 0) {
           resolve();
         } else {
@@ -4422,7 +4542,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options?.cwd,
-        env: options?.env,
+        env: options?.env ?? this.buildPythonEnv(),
       });
 
       const handleChunk = (chunk: Buffer): void => {
@@ -4542,10 +4662,43 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  private runPythonWithOutput(scriptPath: string, args: string[]): Promise<string> {
+  private formatStderrForLog(raw: string): string {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter((line) => Boolean(line.trim()));
+    if (!lines.length) {
+      return "";
+    }
+    const timestamp = new Date().toISOString().replace("T", " ").replace("Z", "").replace(".", ",");
+    return lines.map((line) => `${timestamp} STDERR docling_extract: ${line}`).join("\n") + "\n";
+  }
+
+  private async appendToLogFile(logFilePath: string, raw: string): Promise<void> {
+    if (!raw || !raw.trim()) {
+      return;
+    }
+    const formatted = this.formatStderrForLog(raw);
+    if (!formatted) {
+      return;
+    }
+    try {
+      await fs.mkdir(path.dirname(logFilePath), { recursive: true });
+      await fs.appendFile(logFilePath, formatted);
+    } catch (error) {
+      console.warn("Failed to append stderr to log file", error);
+    }
+  }
+
+  private runPythonWithOutput(
+    scriptPath: string,
+    args: string[],
+    stderrLogPath?: string | null
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
+        env: this.buildPythonEnv(),
       });
 
       let stdout = "";
@@ -4565,6 +4718,9 @@ export default class ZoteroRagPlugin extends Plugin {
       });
 
       child.on("close", (code) => {
+        if (stderrLogPath) {
+          void this.appendToLogFile(stderrLogPath, stderr);
+        }
         if (code === 0) {
           resolve(stdout.trim());
         } else {

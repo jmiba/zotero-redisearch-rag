@@ -118,6 +118,15 @@ class DoclingProcessingTests(unittest.TestCase):
         output = self.docling.apply_umlaut_corrections(text, "deu+eng", [])
         self.assertEqual(output, "\u00fcber")
 
+    def test_ocr_pages_text_chars(self):
+        pages = [
+            {"page_num": 1, "text": ""},
+            {"page_num": 2, "text": "   "},
+        ]
+        self.assertEqual(self.docling.ocr_pages_text_chars(pages), 0)
+        pages = [{"page_num": 1, "text": "hello"}]
+        self.assertGreater(self.docling.ocr_pages_text_chars(pages), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

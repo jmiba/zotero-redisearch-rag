@@ -229,6 +229,19 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Prerequisites" });
 
     new Setting(containerEl)
+      .setName("Python path")
+      .setDesc("Optional path to the Python interpreter used to create or run the plugin env.")
+      .addText((text) =>
+        text
+          .setPlaceholder("python3")
+          .setValue(this.plugin.settings.pythonPath)
+          .onChange(async (value) => {
+            this.plugin.settings.pythonPath = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Python environment")
       .setDesc("Create or update the plugin's Python env (.venv in the plugin folder).")
       .addButton((button) => {

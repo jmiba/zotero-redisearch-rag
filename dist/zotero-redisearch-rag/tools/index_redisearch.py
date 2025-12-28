@@ -265,6 +265,19 @@ def main() -> int:
             continue
 
         try:
+            if args.progress:
+                print(
+                    json.dumps(
+                        {
+                            "type": "progress",
+                            "stage": "embedding",
+                            "current": current,
+                            "total": total,
+                            "message": f"Embedding chunk {current}/{total}",
+                        }
+                    ),
+                    flush=True,
+                )
             embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, text)
             if len(embedding) != 768:
                 raise RuntimeError(f"Embedding dim mismatch: {len(embedding)}")
@@ -297,7 +310,18 @@ def main() -> int:
             return 2
 
         if args.progress:
-            print(json.dumps({"type": "progress", "current": current, "total": total}), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "type": "progress",
+                        "stage": "index",
+                        "current": current,
+                        "total": total,
+                        "message": f"Indexing chunks {current}/{total}",
+                    }
+                ),
+                flush=True,
+            )
 
     return 0
 
