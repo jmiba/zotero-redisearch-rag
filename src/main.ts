@@ -2,6 +2,7 @@ import {
   App,
   FileSystemAdapter,
   Editor,
+  MarkdownView,
   Modal,
   Notice,
   Plugin,
@@ -569,7 +570,15 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = (await this.loadData()) ?? {};
+    const settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if (
+      settings.preferObsidianNoteForCitations === undefined &&
+      typeof (data as any).preferVaultPdfForCitations === "boolean"
+    ) {
+      settings.preferObsidianNoteForCitations = (data as any).preferVaultPdfForCitations;
+    }
+    this.settings = settings;
   }
 
   async saveSettings(): Promise<void> {
@@ -1382,8 +1391,7 @@ export default class ZoteroRagPlugin extends Plugin {
       entry?.zotero_title ||
       entry?.note_title ||
       (notePath ? path.basename(notePath, ".md") : citation.doc_id || "?");
-    const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
-    const pageLabel = pages.includes("-") ? pages.replace("-", " - ") : pages;
+    const pageLabel = this.formatCitationPageLabel(citation);
     const pageStart = citation.page_start ? String(citation.page_start) : "";
     const pdfPath = entry?.pdf_path || citation.source_pdf || "";
     const attachmentKey = citation.attachment_key || entry?.attachment_key;
@@ -1391,9 +1399,6 @@ export default class ZoteroRagPlugin extends Plugin {
     let zoteroUrl = citation.doc_id
       ? this.buildZoteroDeepLink(citation.doc_id, attachmentKey, pageStart, annotationKey)
       : undefined;
-    if (this.settings.preferVaultPdfForCitations && pdfPath && this.toVaultRelativePath(pdfPath)) {
-      zoteroUrl = undefined;
-    }
     return {
       noteTitle,
       pageLabel,
@@ -1502,18 +1507,18 @@ export default class ZoteroRagPlugin extends Plugin {
 
       const display = await this.resolveCitationDisplay(citation);
       const label = `${display.noteTitle} p. ${display.pageLabel}`;
-      const vaultLink = this.settings.preferVaultPdfForCitations
-        ? this.buildVaultPdfCitationLink(display.pdfPath || "", display.pageStart, label)
-        : "";
-      if (vaultLink) {
-        replacements.set(token, vaultLink);
-      } else if (display.zoteroUrl) {
-        replacements.set(token, `[${label}](${display.zoteroUrl})`);
+      const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, docId);
+      if (this.settings.preferObsidianNoteForCitations && display.notePath && chunkId) {
+        replacements.set(token, this.buildNoteChunkLink(display.notePath, chunkId, label));
       } else {
-        const fallbackLabel = display.pageLabel
-          ? `${docId} p. ${display.pageLabel}`
-          : `${docId}`;
-        replacements.set(token, `(${fallbackLabel})`);
+        if (display.zoteroUrl) {
+          replacements.set(token, `[${label}](${display.zoteroUrl})`);
+        } else {
+          const fallbackLabel = display.pageLabel
+            ? `${docId} p. ${display.pageLabel}`
+            : `${docId}`;
+          replacements.set(token, `(${fallbackLabel})`);
+        }
       }
     }
 
@@ -1631,8 +1636,20 @@ export default class ZoteroRagPlugin extends Plugin {
     display?: { notePath?: string; pdfPath?: string; zoteroUrl?: string; pageStart?: string }
   ): Promise<void> {
     const resolved = display ?? (await this.resolveCitationDisplay(citation));
-    if (resolved.notePath) {
+    const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, citation.doc_id);
+    const preferNote = this.settings.preferObsidianNoteForCitations;
+    if (preferNote && resolved.notePath && chunkId) {
+      const opened = await this.openNoteAtChunk(resolved.notePath, chunkId);
+      if (opened) {
+        return;
+      }
+    }
+    if (preferNote && resolved.notePath) {
       await this.openNoteInMain(resolved.notePath);
+      return;
+    }
+    if (!preferNote && resolved.zoteroUrl) {
+      this.openExternalUrl(resolved.zoteroUrl);
       return;
     }
     if (resolved.pdfPath) {
@@ -2469,14 +2486,14 @@ export default class ZoteroRagPlugin extends Plugin {
   private registerChunkDeleteMenu(): void {
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) => {
-        const found = this.findChunkStartLine(editor);
+        const found = this.findChunkAtCursor(editor);
         if (!found) {
           return;
         }
         menu.addItem((item) => {
           item
             .setTitle("Toggle ZRR chunk delete")
-            .onClick(() => this.toggleChunkDelete(editor, found.line));
+            .onClick(() => this.toggleChunkDelete(editor, found.startLine));
         });
       })
     );
@@ -2492,7 +2509,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (ZRR_CHUNK_START_RE.test(text)) {
         return { line, text };
       }
-      if (ZRR_SYNC_START_RE.test(text)) {
+      if (ZRR_SYNC_START_RE.test(text) || ZRR_SYNC_END_RE.test(text)) {
         break;
       }
     }
@@ -2512,8 +2529,24 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
+  private findChunkAtCursor(
+    editor: Editor,
+    fromLine?: number
+  ): { startLine: number; endLine: number; text: string } | null {
+    const cursorLine = fromLine ?? editor.getCursor().line;
+    const start = this.findChunkStartLine(editor, cursorLine);
+    if (!start) {
+      return null;
+    }
+    const endLine = this.findChunkEndLine(editor, start.line + 1);
+    if (endLine === null || cursorLine < start.line || cursorLine > endLine) {
+      return null;
+    }
+    return { startLine: start.line, endLine, text: start.text };
+  }
+
   private toggleChunkDelete(editor: Editor, fromLine?: number): void {
-    const found = this.findChunkStartLine(editor, fromLine);
+    const found = this.findChunkAtCursor(editor, fromLine);
     if (!found) {
       new Notice("No synced chunk found at cursor.");
       return;
@@ -2524,10 +2557,10 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
     let attrs = (startMatch[1] ?? "").trim();
-    const endLine = this.findChunkEndLine(editor, found.line + 1);
+    const endLine = found.endLine;
     let hasDeleteMarker = false;
     if (endLine !== null) {
-      for (let line = found.line + 1; line < endLine; line += 1) {
+      for (let line = found.startLine + 1; line < endLine; line += 1) {
         if (ZRR_CHUNK_DELETE_RE.test(editor.getLine(line))) {
           hasDeleteMarker = true;
           break;
@@ -2544,13 +2577,13 @@ export default class ZoteroRagPlugin extends Plugin {
     if (newLine !== found.text) {
       editor.replaceRange(
         newLine,
-        { line: found.line, ch: 0 },
-        { line: found.line, ch: found.text.length }
+        { line: found.startLine, ch: 0 },
+        { line: found.startLine, ch: found.text.length }
       );
     }
     if (hasDelete && endLine !== null) {
       const deleteLines: number[] = [];
-      for (let line = found.line + 1; line < endLine; line += 1) {
+      for (let line = found.startLine + 1; line < endLine; line += 1) {
         if (ZRR_CHUNK_DELETE_RE.test(editor.getLine(line))) {
           deleteLines.push(line);
         }
@@ -2578,6 +2611,47 @@ export default class ZoteroRagPlugin extends Plugin {
       void this.syncNoteToRedis(file);
     }, 1200);
     this.noteSyncTimers.set(file.path, handle);
+  }
+
+  private escapeRegExp(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  private formatCitationPageLabel(citation: ChatCitation): string {
+    const start = citation.page_start ? String(citation.page_start) : "";
+    const end = citation.page_end ? String(citation.page_end) : "";
+    if (start && (!end || start === end)) {
+      return start;
+    }
+    if (start && end) {
+      return `${start} - ${end}`;
+    }
+    const raw = (citation.pages || "").trim();
+    if (!raw) {
+      return "?";
+    }
+    const match = raw.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (match) {
+      return match[1] === match[2] ? match[1] : `${match[1]} - ${match[2]}`;
+    }
+    return raw.replace("-", " - ");
+  }
+
+  private normalizeChunkIdForNote(chunkId?: string, docId?: string): string | null {
+    if (!chunkId) {
+      return null;
+    }
+    const raw = String(chunkId);
+    if (docId && raw.startsWith(`${docId}:`)) {
+      return raw.slice(docId.length + 1);
+    }
+    if (raw.includes(":")) {
+      const parts = raw.split(":");
+      if (parts.length > 1 && docId && parts[0] === docId) {
+        return parts.slice(1).join(":");
+      }
+    }
+    return raw;
   }
 
   private async syncNoteToRedis(file: TFile): Promise<void> {
@@ -3440,15 +3514,70 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.app.workspace.openLinkText(normalized, "", false);
   }
 
+  private findChunkLineInText(text: string, chunkId: string): number | null {
+    if (!text || !chunkId) {
+      return null;
+    }
+    const escapedId = this.escapeRegExp(chunkId);
+    const markerRe = new RegExp(
+      `<!--\\s*zrr:chunk\\b[^>]*\\bid=(["']?)${escapedId}\\1[^>]*-->`,
+      "i"
+    );
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      if (markerRe.test(lines[i])) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  private async openNoteAtChunk(notePath: string, chunkId: string): Promise<boolean> {
+    if (!notePath || !chunkId) {
+      return false;
+    }
+    await this.openNoteInMain(notePath);
+    const leaf = this.getMainLeaf();
+    const view = leaf.view;
+    if (!(view instanceof MarkdownView)) {
+      return false;
+    }
+    const editor = view.editor;
+    const normalizedChunkId = this.normalizeChunkIdForNote(chunkId) || chunkId;
+    const line = this.findChunkLineInText(editor.getValue(), normalizedChunkId);
+    if (line === null) {
+      new Notice(`Chunk ${normalizedChunkId} not found in note.`);
+      return false;
+    }
+    editor.setCursor({ line, ch: 0 });
+    editor.scrollIntoView(
+      { from: { line, ch: 0 }, to: { line, ch: 0 } },
+      true
+    );
+    return true;
+  }
+
   public async openInternalLinkInMain(linkText: string): Promise<void> {
     const leaf = this.getMainLeaf();
-    const linkPath = linkText.split("#")[0].trim();
+    const [linkPathRaw, anchorRaw] = linkText.split("#");
+    const linkPath = (linkPathRaw || "").trim();
+    const anchor = (anchorRaw || "").trim();
+    const chunkAnchorPrefix = "zrr-chunk:";
     const file = linkPath
       ? this.app.metadataCache.getFirstLinkpathDest(linkPath, "")
       : null;
     if (file instanceof TFile) {
+      const chunkId = anchor.startsWith(chunkAnchorPrefix)
+        ? anchor.slice(chunkAnchorPrefix.length).trim()
+        : "";
+      if (chunkId) {
+        const opened = await this.openNoteAtChunk(file.path, chunkId);
+        if (opened) {
+          return;
+        }
+      }
       await leaf.openFile(file, { active: true });
-      if (linkText.includes("#")) {
+      if (linkText.includes("#") && !chunkId) {
         this.app.workspace.setActiveLeaf(leaf, { focus: true });
         await this.app.workspace.openLinkText(linkText, "", false);
       }
@@ -3533,31 +3662,29 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private formatCitationMarkdown(citation: ChatCitation): string {
     const docId = citation.doc_id || "?";
-    const pages = citation.pages || `${citation.page_start ?? "?"}-${citation.page_end ?? "?"}`;
     const label = `${docId}`;
-    const pageLabel = pages.includes("-") ? pages.replace("-", " - ") : pages;
+    const pageLabel = this.formatCitationPageLabel(citation);
     const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
     const attachmentKey = citation.attachment_key || this.docIndex?.[citation.doc_id || ""]?.attachment_key;
     const pageStart = citation.page_start ? String(citation.page_start) : "";
     const entry = this.docIndex?.[citation.doc_id || ""] ?? null;
     const noteTitle = entry?.zotero_title || entry?.note_title || label;
-    const noteTarget = entry?.note_path
-      ? normalizePath(entry.note_path).replace(/\.md$/i, "")
-      : this.sanitizeFileName(noteTitle) || noteTitle;
-    const noteLink =
-      noteTarget && noteTarget !== noteTitle ? `[[${noteTarget}|${noteTitle}]]` : `[[${noteTitle}]]`;
-    if (this.settings.preferVaultPdfForCitations) {
-      const pdfPath = entry?.pdf_path || citation.source_pdf || "";
-      const vaultLink = this.buildVaultPdfCitationLink(pdfPath, pageStart, pageLabel);
-      if (vaultLink) {
-        return `- ${noteLink}, p. ${vaultLink}`;
-      }
+    const fullLabel = `${noteTitle} p. ${pageLabel}`;
+    const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, citation.doc_id);
+    if (this.settings.preferObsidianNoteForCitations && chunkId && entry?.note_path) {
+      return `- ${this.buildNoteChunkLink(entry.note_path, chunkId, fullLabel)}`;
     }
     if (attachmentKey) {
       const zoteroUrl = this.buildZoteroDeepLink(docId, attachmentKey, pageStart, annotationKey);
-      return `- ${noteLink}, p. [${pageLabel}](${zoteroUrl})`;
+      return `- [${fullLabel}](${zoteroUrl})`;
     }
-    return `- ${noteLink}, p. ${pageLabel}`;
+    return `- ${fullLabel}`;
+  }
+
+  private buildNoteChunkLink(notePath: string, chunkId: string, label: string): string {
+    const target = normalizePath(notePath).replace(/\.md$/i, "");
+    const anchor = `zrr-chunk:${chunkId}`;
+    return `[[${target}#${anchor}|${label}]]`;
   }
 
   private generateChatId(): string {

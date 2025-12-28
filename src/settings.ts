@@ -51,7 +51,7 @@ export interface ZoteroRagSettings {
   enableFileLogging: boolean;
   logFilePath: string;
   createOcrLayeredPdf: boolean;
-  preferVaultPdfForCitations: boolean;
+  preferObsidianNoteForCitations: boolean;
 }
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
@@ -106,7 +106,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   enableFileLogging: false,
   logFilePath: `${CACHE_ROOT}/logs/docling_extract.log`,
   createOcrLayeredPdf: false,
-  preferVaultPdfForCitations: false,
+  preferObsidianNoteForCitations: true,
 };
 
 export class ZoteroRagSettingTab extends PluginSettingTab {
@@ -402,11 +402,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Prefer vault PDF for citations")
-      .setDesc("Use vault PDFs for citation links when available instead of Zotero deep links.")
+      .setName("Prefer Obsidian note for citations")
+      .setDesc("Link citations to the Obsidian note when available; otherwise use Zotero deep links.")
       .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.preferVaultPdfForCitations).onChange(async (value) => {
-          this.plugin.settings.preferVaultPdfForCitations = value;
+        toggle.setValue(this.plugin.settings.preferObsidianNoteForCitations).onChange(async (value) => {
+          this.plugin.settings.preferObsidianNoteForCitations = value;
           await this.plugin.saveSettings();
         })
       );

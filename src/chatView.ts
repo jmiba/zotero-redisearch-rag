@@ -323,28 +323,11 @@ export class ZoteroChatView extends ItemView {
     for (const citation of citations) {
       const display = await this.plugin.resolveCitationDisplay(citation);
       const item = list.createEl("li");
-      const noteLink = item.createEl("a", { text: display.noteTitle, href: "#" });
-      noteLink.addEventListener("click", (event) => {
+      const label = `${display.noteTitle} p. ${display.pageLabel}`;
+      const link = item.createEl("a", { text: label, href: "#" });
+      link.addEventListener("click", (event) => {
         event.preventDefault();
-        if (display.notePath) {
-          void this.plugin.openNoteInMain(display.notePath);
-        }
-      });
-
-      item.createEl("span", { text: ", p. " });
-
-      const pageLink = item.createEl("a", { text: display.pageLabel, href: "#" });
-      pageLink.addEventListener("click", (event) => {
-        event.preventDefault();
-        if (display.zoteroUrl) {
-          this.plugin.openExternalUrl(display.zoteroUrl);
-          return;
-        }
-        if (display.pdfPath) {
-          void this.plugin.openPdfInMain(display.pdfPath, display.pageStart);
-          return;
-        }
-        this.plugin.openCitationTarget(citation, display);
+        void this.plugin.openCitationTarget(citation, display);
       });
     }
   }
