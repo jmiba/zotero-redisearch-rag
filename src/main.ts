@@ -1,6 +1,7 @@
 import {
   App,
   FileSystemAdapter,
+  Editor,
   Modal,
   Notice,
   Plugin,
@@ -486,6 +487,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.setupStatusBar();
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
+    this.registerChunkDeleteMenu();
 
     try {
       await this.ensureBundledTools();
@@ -551,6 +553,12 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "clear-docling-log",
       name: "Clear Docling log file",
       callback: () => this.clearLogFile(),
+    });
+
+    this.addCommand({
+      id: "toggle-zrr-chunk-delete",
+      name: "Toggle ZRR chunk delete at cursor",
+      editorCallback: (editor) => this.toggleChunkDelete(editor),
     });
 
     void this.autoDetectContainerCliOnLoad();
@@ -2456,6 +2464,108 @@ export default class ZoteroRagPlugin extends Plugin {
         this.scheduleNoteSync(file);
       })
     );
+  }
+
+  private registerChunkDeleteMenu(): void {
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor) => {
+        const found = this.findChunkStartLine(editor);
+        if (!found) {
+          return;
+        }
+        menu.addItem((item) => {
+          item
+            .setTitle("Toggle ZRR chunk delete")
+            .onClick(() => this.toggleChunkDelete(editor, found.line));
+        });
+      })
+    );
+  }
+
+  private findChunkStartLine(
+    editor: Editor,
+    fromLine?: number
+  ): { line: number; text: string } | null {
+    let line = fromLine ?? editor.getCursor().line;
+    for (; line >= 0; line -= 1) {
+      const text = editor.getLine(line);
+      if (ZRR_CHUNK_START_RE.test(text)) {
+        return { line, text };
+      }
+      if (ZRR_SYNC_START_RE.test(text)) {
+        break;
+      }
+    }
+    return null;
+  }
+
+  private findChunkEndLine(editor: Editor, fromLine: number): number | null {
+    for (let line = fromLine; line < editor.lineCount(); line += 1) {
+      const text = editor.getLine(line);
+      if (ZRR_CHUNK_END_RE.test(text)) {
+        return line;
+      }
+      if (ZRR_SYNC_END_RE.test(text)) {
+        break;
+      }
+    }
+    return null;
+  }
+
+  private toggleChunkDelete(editor: Editor, fromLine?: number): void {
+    const found = this.findChunkStartLine(editor, fromLine);
+    if (!found) {
+      new Notice("No synced chunk found at cursor.");
+      return;
+    }
+    const startMatch = found.text.match(ZRR_CHUNK_START_RE);
+    if (!startMatch) {
+      new Notice("Invalid chunk marker.");
+      return;
+    }
+    let attrs = (startMatch[1] ?? "").trim();
+    const endLine = this.findChunkEndLine(editor, found.line + 1);
+    let hasDeleteMarker = false;
+    if (endLine !== null) {
+      for (let line = found.line + 1; line < endLine; line += 1) {
+        if (ZRR_CHUNK_DELETE_RE.test(editor.getLine(line))) {
+          hasDeleteMarker = true;
+          break;
+        }
+      }
+    }
+    const hasDelete = /\bdelete\b/i.test(attrs) || hasDeleteMarker;
+    if (hasDelete) {
+      attrs = attrs.replace(/\bdelete\b/gi, "").replace(/\s{2,}/g, " ").trim();
+    } else {
+      attrs = attrs ? `${attrs} delete` : "delete";
+    }
+    const newLine = `<!-- zrr:chunk${attrs ? " " + attrs : ""} -->`;
+    if (newLine !== found.text) {
+      editor.replaceRange(
+        newLine,
+        { line: found.line, ch: 0 },
+        { line: found.line, ch: found.text.length }
+      );
+    }
+    if (hasDelete && endLine !== null) {
+      const deleteLines: number[] = [];
+      for (let line = found.line + 1; line < endLine; line += 1) {
+        if (ZRR_CHUNK_DELETE_RE.test(editor.getLine(line))) {
+          deleteLines.push(line);
+        }
+      }
+      for (let idx = deleteLines.length - 1; idx >= 0; idx -= 1) {
+        const line = deleteLines[idx];
+        const lineCount = editor.lineCount();
+        if (line < lineCount - 1) {
+          editor.replaceRange("", { line, ch: 0 }, { line: line + 1, ch: 0 });
+        } else {
+          editor.replaceRange("", { line, ch: 0 }, { line, ch: editor.getLine(line).length });
+        }
+      }
+    }
+    new Notice(hasDelete ? "Chunk restored." : "Chunk marked for deletion.");
   }
 
   private scheduleNoteSync(file: TFile): void {

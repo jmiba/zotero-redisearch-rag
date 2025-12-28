@@ -338,15 +338,10 @@ def _replace_inline_footnote_refs(text: str, footnote_ids: Set[str]) -> str:
         fid = match.group(1)
         return f"[^{fid}]" if fid in footnote_ids else match.group(0)
 
-    def _replace_attached(match: re.Match) -> str:
-        fid = match.group(1)
-        return f"[^{fid}]" if fid in footnote_ids else match.group(0)
-
     text = re.sub(r"\[(\s*\d{1,3}\s*(?:[,;]\s*\d{1,3}\s*)+)\]", _replace_list, text)
     text = re.sub(r"\((\s*\d{1,3}\s*(?:[,;]\s*\d{1,3}\s*)+)\)", _replace_list, text)
     text = re.sub(r"\[(\d{1,3})\]", _replace_single, text)
     text = re.sub(r"\((\d{1,3})\)", _replace_single, text)
-    text = re.sub(r"(?<=[^\W\d_])(\d{1,3})(?=(?:\s|[.,;:\)\]]|$))", _replace_attached, text)
     return text
 
 
