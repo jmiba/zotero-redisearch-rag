@@ -104,7 +104,6 @@ class DoclingProcessingConfig:
     page_range_max_span_ratio: float = 0.7
     max_chunk_chars: int = 3000
     chunk_overlap_chars: int = 250
-    cleanup_remove_image_tags: bool = True
     per_page_ocr_on_low_quality: bool = True
     force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
@@ -201,10 +200,7 @@ def remove_image_placeholders(text: str) -> str:
 def clean_chunk_text(text: str, config: Optional[DoclingProcessingConfig]) -> str:
     if not text:
         return ""
-    cleaned = text
-    if config and config.cleanup_remove_image_tags:
-        cleaned = remove_image_placeholders(cleaned)
-    return cleaned
+    return remove_image_placeholders(text)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -228,19 +224,28 @@ def normalize_chunk_whitespace(text: str) -> str:
             buffer.clear()
 
     heading_re = re.compile(r"^#{1,6}\s+")
-    list_re = re.compile(r"^(?:[-*+]\s+|\d+\.\s+)")
-    footnote_re = re.compile(r"^(?:\[\^\d{1,3}\]:|\[\s*\d+\s*\]|\(\s*\d+\s*\)|\d+[\.\)])\s*\S")
+    list_re = re.compile(
+        r"^(?:[-*+]\s+|\d+[.)]\s+|[\u2022\u2023\u25AA\u2013\u2014\u00B7\x81]\s+)"
+    )
+    table_sep_re = re.compile(r"^\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*$")
+
+    def is_table_line(line: str) -> bool:
+        if table_sep_re.match(line):
+            return True
+        return line.count("|") >= 2
     for line in lines:
-        stripped = line.strip()
+        stripped = line.replace("\ufeff", "").strip()
         if not stripped:
             flush()
             if out_lines and out_lines[-1] != "":
                 out_lines.append("")
             continue
-        if heading_re.match(stripped) or list_re.match(stripped) or footnote_re.match(stripped):
+        if (
+            heading_re.match(stripped)
+            or list_re.match(stripped)
+            or is_table_line(stripped)
+        ):
             flush()
-            if footnote_re.match(stripped) and out_lines and out_lines[-1] != "":
-                out_lines.append("")
             out_lines.append(stripped)
             continue
         buffer.append(stripped)
@@ -251,136 +256,6 @@ def normalize_chunk_whitespace(text: str) -> str:
     return result.strip()
 
 
-_FOOTNOTE_HEADING_RE = re.compile(
-    r"^#{1,6}\s+(references|bibliography|footnotes?|endnotes?|notes)\b",
-    re.IGNORECASE,
-)
-
-
-def _is_heading_line(line: str) -> bool:
-    return bool(re.match(r"^#{1,6}\s+", line.strip()))
-
-
-def _is_footnote_heading(line: str) -> bool:
-    return bool(_FOOTNOTE_HEADING_RE.match(line.strip()))
-
-
-def _match_footnote_definition(line: str) -> Optional[Tuple[str, str]]:
-    stripped = line.strip()
-    if not stripped:
-        return None
-    patterns = (
-        r"^\[\s*(\d{1,3})\s*\]\s*(.+)$",
-        r"^\(\s*(\d{1,3})\s*\)\s*(.+)$",
-        r"^(\d{1,3})[\.\)]\s+(.+)$",
-    )
-    for pattern in patterns:
-        match = re.match(pattern, stripped)
-        if match:
-            return match.group(1), match.group(2).strip()
-    return None
-
-
-def _clustered_definition_indices(lines: Sequence[str]) -> Set[int]:
-    indices = [idx for idx, line in enumerate(lines) if _match_footnote_definition(line)]
-    clustered: Set[int] = set()
-    for i, idx in enumerate(indices):
-        for j in range(i + 1, len(indices)):
-            other = indices[j]
-            if other - idx <= 6:
-                clustered.add(idx)
-                clustered.add(other)
-            else:
-                break
-    return clustered
-
-
-def extract_footnote_definitions(text: str) -> Dict[str, str]:
-    if not text:
-        return {}
-    lines = text.splitlines()
-    clustered = _clustered_definition_indices(lines)
-    footnotes: Dict[str, str] = {}
-    current_id: Optional[str] = None
-    in_heading_block = False
-
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if _is_heading_line(stripped):
-            in_heading_block = _is_footnote_heading(stripped)
-            current_id = None
-            continue
-        matched = _match_footnote_definition(line)
-        if matched and (in_heading_block or idx in clustered):
-            fid, content = matched
-            footnotes[fid] = content
-            current_id = fid
-            continue
-        if current_id:
-            if not stripped:
-                current_id = None
-                continue
-            footnotes[current_id] = f"{footnotes[current_id]} {stripped}".strip()
-    return footnotes
-
-
-def _replace_inline_footnote_refs(text: str, footnote_ids: Set[str]) -> str:
-    if not text or not footnote_ids:
-        return text
-
-    def _replace_list(match: re.Match) -> str:
-        nums = re.findall(r"\d{1,3}", match.group(1))
-        if not nums or not all(num in footnote_ids for num in nums):
-            return match.group(0)
-        return " ".join(f"[^{num}]" for num in nums)
-
-    def _replace_single(match: re.Match) -> str:
-        fid = match.group(1)
-        return f"[^{fid}]" if fid in footnote_ids else match.group(0)
-
-    text = re.sub(r"\[(\s*\d{1,3}\s*(?:[,;]\s*\d{1,3}\s*)+)\]", _replace_list, text)
-    text = re.sub(r"\((\s*\d{1,3}\s*(?:[,;]\s*\d{1,3}\s*)+)\)", _replace_list, text)
-    text = re.sub(r"\[(\d{1,3})\]", _replace_single, text)
-    text = re.sub(r"\((\d{1,3})\)", _replace_single, text)
-    return text
-
-
-def apply_footnotes_to_text(text: str, footnotes: Dict[str, str]) -> str:
-    if not text or not footnotes:
-        return text
-    lines = text.splitlines()
-    clustered = _clustered_definition_indices(lines)
-    out_lines: List[str] = []
-    current_id: Optional[str] = None
-    in_heading_block = False
-
-    for idx, line in enumerate(lines):
-        stripped = line.strip()
-        if _is_heading_line(stripped):
-            in_heading_block = _is_footnote_heading(stripped)
-            current_id = None
-            out_lines.append(line)
-            continue
-        matched = _match_footnote_definition(line)
-        if matched and (in_heading_block or idx in clustered):
-            fid, _ = matched
-            content = footnotes.get(fid)
-            if content:
-                out_lines.append(f"[^{fid}]: {content}")
-                current_id = fid
-            else:
-                out_lines.append(line)
-                current_id = None
-            continue
-        if current_id:
-            if not stripped:
-                out_lines.append("")
-                current_id = None
-            continue
-        out_lines.append(line)
-
-    normalized = "\n".join(out_lines)
-    return _replace_inline_footnote_refs(normalized, set(footnotes.keys()))
 
 
 def dehyphenate_text(text: str) -> str:
@@ -2071,7 +1946,108 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     return sections
 
 
-_PAGE_RANGE_STOPWORDS = {
+_MARKDOWN_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*$")
+
+
+def extract_markdown_table_blocks(markdown: str) -> List[str]:
+    if not markdown:
+        return []
+    lines = markdown.splitlines()
+    blocks: List[str] = []
+    idx = 0
+    while idx < len(lines) - 1:
+        line = lines[idx]
+        if line.count("|") >= 2:
+            sep_idx: Optional[int] = None
+            if idx + 1 < len(lines) and _MARKDOWN_TABLE_SEP_RE.match(lines[idx + 1]):
+                sep_idx = idx + 1
+            elif (
+                idx + 2 < len(lines)
+                and not lines[idx + 1].strip()
+                and _MARKDOWN_TABLE_SEP_RE.match(lines[idx + 2])
+            ):
+                sep_idx = idx + 2
+
+            if sep_idx is not None:
+                block_lines = [line, lines[sep_idx]]
+                idx = sep_idx + 1
+                while idx < len(lines):
+                    row = lines[idx]
+                    if not row.strip():
+                        break
+                    if row.count("|") < 2:
+                        break
+                    block_lines.append(row)
+                    idx += 1
+                blocks.append("\n".join(block_lines).strip())
+                continue
+
+            # Fallback: headerless pipe tables (3+ consecutive pipe rows)
+            if idx + 2 < len(lines):
+                pipe_run = [line]
+                scan = idx + 1
+                while scan < len(lines):
+                    row = lines[scan]
+                    if not row.strip() or row.count("|") < 2:
+                        break
+                    pipe_run.append(row)
+                    scan += 1
+                if len(pipe_run) >= 3:
+                    blocks.append("\n".join(pipe_run).strip())
+                    idx = scan
+                    continue
+        idx += 1
+    return blocks
+
+
+def build_page_table_map(
+    markdown: str,
+    pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+) -> Dict[int, List[str]]:
+    table_blocks = extract_markdown_table_blocks(markdown)
+    if not table_blocks:
+        return {}
+    table_map: Dict[int, List[str]] = {}
+    for block in table_blocks:
+        page_start, _ = find_page_range(block, pages, config)
+        if page_start <= 0:
+            continue
+        table_map.setdefault(int(page_start), []).append(block)
+    return table_map
+
+
+def inject_markdown_tables(text: str, table_blocks: Sequence[str]) -> str:
+    if not text or not table_blocks:
+        return text
+    if any(line.count("|") >= 2 for line in text.splitlines()):
+        return text
+    row_regexes: List[re.Pattern[str]] = []
+    for block in table_blocks:
+        for line in block.splitlines():
+            if _MARKDOWN_TABLE_SEP_RE.match(line):
+                continue
+            if line.count("|") < 2:
+                continue
+            cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+            if len(cells) < 2:
+                continue
+            pattern = r"\b" + r"\b.*\b".join(re.escape(cell) for cell in cells) + r"\b"
+            row_regexes.append(re.compile(pattern, re.IGNORECASE))
+    if row_regexes:
+        kept_lines: List[str] = []
+        for line in text.splitlines():
+            if any(regex.search(line) for regex in row_regexes):
+                continue
+            kept_lines.append(line)
+        text = "\n".join(kept_lines).strip()
+    for block in table_blocks:
+        if block and block not in text:
+            text = f"{text}\n\n{block}".strip()
+    return text
+
+
+_PAGE_RANGE_STOPWORDS_EN = {
     "the", "and", "for", "with", "that", "this", "from", "into", "over",
     "under", "after", "before", "were", "was", "are", "is", "its", "their",
     "then", "than", "than", "which", "when", "where", "have", "has", "had",
@@ -2083,10 +2059,110 @@ _PAGE_RANGE_STOPWORDS = {
     "nine", "ten", "more", "most", "some", "many", "few", "each", "per",
 }
 
+_PAGE_RANGE_STOPWORDS_DE = {
+    "der", "die", "das", "und", "oder", "aber", "nicht", "ist", "sind",
+    "war", "waren", "mit", "für", "von", "zu", "im", "in", "auf", "an",
+    "als", "auch", "wie", "dass", "dem", "den", "des", "ein", "eine",
+    "einer", "eines", "einem", "einen", "ich", "du", "er", "sie", "es",
+    "wir", "ihr", "ihnen", "sein", "haben", "hat", "hatte", "hatten",
+    "wird", "werden", "kann", "können", "soll", "sollen", "diese",
+    "dieser", "dieses", "jeder", "jede", "jedes", "mehr", "weniger",
+}
 
-def tokenize_for_page_range(text: str) -> List[str]:
+_PAGE_RANGE_STOPWORDS_FR = {
+    "le", "la", "les", "de", "des", "du", "un", "une", "et", "ou",
+    "mais", "ne", "pas", "est", "sont", "été", "être", "avec", "pour",
+    "par", "sur", "dans", "ce", "ces", "cette", "son", "sa", "ses",
+    "leur", "leurs", "comme", "qui", "que", "quoi", "dont", "où",
+    "au", "aux", "plus", "moins", "se", "s", "il", "elle", "ils",
+    "elles", "nous", "vous", "je", "tu",
+}
+
+_PAGE_RANGE_STOPWORDS_ES = {
+    "el", "la", "los", "las", "de", "del", "y", "o", "pero", "no",
+    "es", "son", "fue", "fueron", "con", "para", "por", "en", "un",
+    "una", "unos", "unas", "su", "sus", "como", "que", "qué", "quien",
+    "quién", "donde", "dónde", "cuando", "cuándo", "más", "menos",
+    "al", "lo", "se", "si", "sí", "yo", "tú", "él", "ella", "ellos",
+    "ellas", "nosotros", "vosotros", "usted", "ustedes",
+}
+
+_PAGE_RANGE_STOPWORDS_PL = {
+    "i", "oraz", "a", "ale", "nie", "jest", "są", "był", "była",
+    "było", "byli", "były", "z", "ze", "do", "na", "w", "we", "o",
+    "od", "po", "przez", "dla", "u", "za", "pod", "nad", "między",
+    "się", "to", "ten", "ta", "te", "jego", "jej", "ich", "nas",
+    "was", "ja", "ty", "on", "ona", "oni", "one", "że", "jak",
+    "kiedy", "gdzie", "dlaczego", "który", "która", "które", "których",
+    "którym", "może", "można", "będzie", "będą", "być", "by",
+}
+
+
+def get_page_range_stopwords(languages: str) -> Set[str]:
+    stopwordsiso = None
+    try:
+        import stopwordsiso  # type: ignore
+    except Exception:
+        stopwordsiso = None
+
+    lang = (languages or "").lower()
+    selected: Set[str] = set()
+    tokens = [token for token in re.split(r"[+,\s]+", lang) if token]
+
+    if stopwordsiso is not None:
+        available = None
+        for attr in ("available_languages", "languages", "available"):
+            getter = getattr(stopwordsiso, attr, None)
+            if callable(getter):
+                try:
+                    available = set(getter())
+                    break
+                except Exception:
+                    available = None
+        for token in tokens:
+            codes: List[str] = []
+            try:
+                parsed = langcodes.find(token)
+                alpha2 = parsed.to_alpha2()
+                alpha3 = parsed.to_alpha3()
+                if alpha2:
+                    codes.append(alpha2)
+                if alpha3:
+                    codes.append(alpha3)
+            except Exception:
+                codes.append(token)
+            for code in codes:
+                if available is not None and code not in available:
+                    continue
+                try:
+                    selected |= set(stopwordsiso.stopwords(code))
+                except Exception:
+                    continue
+        if not selected and (available is None or "en" in available):
+            try:
+                selected |= set(stopwordsiso.stopwords("en"))
+            except Exception:
+                pass
+
+    if not selected:
+        if any(token in lang for token in ("de", "deu", "german", "deutsch")):
+            selected |= _PAGE_RANGE_STOPWORDS_DE
+        if any(token in lang for token in ("fr", "fra", "french", "francais", "français")):
+            selected |= _PAGE_RANGE_STOPWORDS_FR
+        if any(token in lang for token in ("es", "spa", "spanish", "espanol", "español")):
+            selected |= _PAGE_RANGE_STOPWORDS_ES
+        if any(token in lang for token in ("pl", "pol", "polish", "polski")):
+            selected |= _PAGE_RANGE_STOPWORDS_PL
+        if not selected or any(token in lang for token in ("en", "eng", "english")):
+            selected |= _PAGE_RANGE_STOPWORDS_EN
+
+    return selected
+
+def tokenize_for_page_range(text: str, stopwords: Optional[Set[str]] = None) -> List[str]:
     tokens = re.findall(r"[A-Za-z0-9]{3,}", text.lower())
-    return [token for token in tokens if token not in _PAGE_RANGE_STOPWORDS]
+    if not stopwords:
+        stopwords = _PAGE_RANGE_STOPWORDS_EN
+    return [token for token in tokens if token not in stopwords]
 
 
 def sample_tokens(tokens: Sequence[str], max_tokens: int) -> List[str]:
@@ -2100,8 +2176,10 @@ def compute_page_overlap(
     section_text: str,
     pages: List[Dict[str, Any]],
     config: DoclingProcessingConfig,
+    languages: Optional[str] = None,
 ) -> List[Tuple[float, int, int]]:
-    section_tokens = tokenize_for_page_range(section_text)
+    stopwords = get_page_range_stopwords(languages or "")
+    section_tokens = tokenize_for_page_range(section_text, stopwords)
     if not section_tokens:
         return []
     sample = sample_tokens(section_tokens, config.page_range_sample_tokens)
@@ -2110,7 +2188,7 @@ def compute_page_overlap(
     results: List[Tuple[float, int, int]] = []
     for page in pages:
         page_text = str(page.get("text", ""))
-        page_tokens = set(tokenize_for_page_range(page_text))
+        page_tokens = set(tokenize_for_page_range(page_text, stopwords))
         hits = len(sample_set & page_tokens)
         ratio = hits / max(1, total)
         results.append((ratio, hits, int(page.get("page_num", 0))))
@@ -2196,7 +2274,8 @@ def find_page_range(
 
     if page_start == 0 or page_end == 0:
         config = config or DoclingProcessingConfig()
-        overlap_scores = compute_page_overlap(cleaned, pages, config)
+        languages = select_language_set(config.language_hint, "", config)
+        overlap_scores = compute_page_overlap(cleaned, pages, config, languages)
         page_nums = select_overlap_cluster(overlap_scores, config)
         if page_nums:
             if page_start == 0:
@@ -4161,6 +4240,7 @@ def build_chunks_page(
     config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
     heading_map: Optional[Dict[int, List[str]]] = None,
+    table_map: Optional[Dict[int, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     total_pages = len(pages)
@@ -4170,6 +4250,10 @@ def build_chunks_page(
         if postprocess:
             raw_text = postprocess(raw_text, f"page {page_num}/{total_pages}")
         raw_text = clean_chunk_text(raw_text, config)
+        if table_map:
+            tables = table_map.get(page_num, [])
+            if tables:
+                raw_text = inject_markdown_tables(raw_text, tables)
         if heading_map:
             titles = heading_map.get(page_num, [])
             if titles:
@@ -4277,11 +4361,6 @@ def main() -> int:
         "--chunk-overlap-chars",
         type=int,
         help="Overlap chars when splitting large section chunks.",
-    )
-    parser.add_argument(
-        "--keep-image-tags",
-        action="store_true",
-        help="Preserve '<!-- image -->' tags instead of removing them.",
     )
     parser.add_argument(
         "--force-ocr-low-quality",
@@ -4415,8 +4494,6 @@ def main() -> int:
         config.max_chunk_chars = args.max_chunk_chars
     if args.chunk_overlap_chars is not None:
         config.chunk_overlap_chars = args.chunk_overlap_chars
-    if args.keep_image_tags:
-        config.cleanup_remove_image_tags = False
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
     if args.enable_dictionary_correction:
@@ -4556,18 +4633,6 @@ def main() -> int:
             LOGGER.warning("Markdown empty; rebuilding from %d pages", len(pages))
             markdown = "\n\n".join(str(page.get("text", "")) for page in pages)
 
-        footnote_source = markdown if markdown.strip() else "\n\n".join(str(page.get("text", "")) for page in pages)
-        footnotes = extract_footnote_definitions(footnote_source)
-        if footnotes:
-            markdown = apply_footnotes_to_text(markdown, footnotes)
-            updated_pages: List[Dict[str, Any]] = []
-            for page in pages:
-                updated_pages.append({
-                    "page_num": page.get("page_num", 0),
-                    "text": apply_footnotes_to_text(str(page.get("text", "")), footnotes),
-                })
-            pages = updated_pages
-
         if not has_output_text(markdown, pages):
             eprint("Extraction produced empty output after fallback attempts.")
             return 2
@@ -4591,12 +4656,14 @@ def main() -> int:
             )
         else:
             heading_map = build_page_heading_map(markdown, pages, config)
+            table_map = build_page_table_map(markdown, pages, config)
             chunks = build_chunks_page(
                 args.doc_id,
                 pages,
                 config=config,
                 postprocess=postprocess_fn,
                 heading_map=heading_map,
+                table_map=table_map,
             )
     except Exception as exc:
         eprint(f"Failed to build chunks: {exc}")

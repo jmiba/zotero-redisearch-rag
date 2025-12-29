@@ -14,6 +14,7 @@ pyzotero
 tqdm
 wordfreq
 markdown
+stopwordsiso
 
 # Optional for language normalization and spellchecking
 langcodes

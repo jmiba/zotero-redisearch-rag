@@ -62,8 +62,8 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
 @dataclass
 class DoclingProcessingConfig:
     ocr_mode: str = "auto"
-    prefer_ocr_engine: str = "paddle"
-    fallback_ocr_engine: str = "tesseract"
+    prefer_ocr_engine: str = "tesseract"
+    fallback_ocr_engine: str = "paddle"
     language_hint: Optional[str] = None
     default_lang_german: str = "deu+eng"
     default_lang_english: str = "eng"
@@ -104,7 +104,6 @@ class DoclingProcessingConfig:
     page_range_max_span_ratio: float = 0.7
     max_chunk_chars: int = 3000
     chunk_overlap_chars: int = 250
-    cleanup_remove_image_tags: bool = True
     per_page_ocr_on_low_quality: bool = True
     force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
@@ -136,9 +135,9 @@ class DoclingProcessingConfig:
     paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 3500
     paddle_use_doc_orientation_classify: bool = True
-    paddle_use_doc_unwarping: bool = True
-    paddle_use_textline_orientation: bool = True
-    paddle_use_structure_v3: bool = True
+    paddle_use_doc_unwarping: bool = False
+    paddle_use_textline_orientation: bool = False
+    paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
     paddle_structure_footer_ratio: float = 0.05
@@ -201,10 +200,7 @@ def remove_image_placeholders(text: str) -> str:
 def clean_chunk_text(text: str, config: Optional[DoclingProcessingConfig]) -> str:
     if not text:
         return ""
-    cleaned = text
-    if config and config.cleanup_remove_image_tags:
-        cleaned = remove_image_placeholders(cleaned)
-    return cleaned
+    return remove_image_placeholders(text)
 
 
 def normalize_whitespace(text: str) -> str:
@@ -212,6 +208,54 @@ def normalize_whitespace(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def normalize_chunk_whitespace(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    lines = text.split("\n")
+    out_lines: List[str] = []
+    buffer: List[str] = []
+
+    def flush() -> None:
+        if buffer:
+            out_lines.append(" ".join(buffer).strip())
+            buffer.clear()
+
+    heading_re = re.compile(r"^#{1,6}\s+")
+    list_re = re.compile(
+        r"^(?:[-*+]\s+|\d+[.)]\s+|[\u2022\u2023\u25AA\u2013\u2014\u00B7\x81]\s+)"
+    )
+    table_sep_re = re.compile(r"^\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*$")
+
+    def is_table_line(line: str) -> bool:
+        if table_sep_re.match(line):
+            return True
+        return line.count("|") >= 2
+    for line in lines:
+        stripped = line.replace("\ufeff", "").strip()
+        if not stripped:
+            flush()
+            if out_lines and out_lines[-1] != "":
+                out_lines.append("")
+            continue
+        if (
+            heading_re.match(stripped)
+            or list_re.match(stripped)
+            or is_table_line(stripped)
+        ):
+            flush()
+            out_lines.append(stripped)
+            continue
+        buffer.append(stripped)
+
+    flush()
+    result = "\n".join(out_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
 
 
 def dehyphenate_text(text: str) -> str:
@@ -1796,7 +1840,7 @@ def extract_pages(doc: Any) -> List[Dict[str, Any]]:
             for idx, page in enumerate(pages_list, start=1):
                 page_num = getattr(page, "page_number", None) or getattr(page, "number", None) or idx
                 text = None
-                for attr in ("text", "content", "markdown", "md"):
+                for attr in ("markdown", "md", "text", "content"):
                     if hasattr(page, attr):
                         value = getattr(page, attr)
                         text = value() if callable(value) else value
@@ -1902,7 +1946,108 @@ def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     return sections
 
 
-_PAGE_RANGE_STOPWORDS = {
+_MARKDOWN_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*$")
+
+
+def extract_markdown_table_blocks(markdown: str) -> List[str]:
+    if not markdown:
+        return []
+    lines = markdown.splitlines()
+    blocks: List[str] = []
+    idx = 0
+    while idx < len(lines) - 1:
+        line = lines[idx]
+        if line.count("|") >= 2:
+            sep_idx: Optional[int] = None
+            if idx + 1 < len(lines) and _MARKDOWN_TABLE_SEP_RE.match(lines[idx + 1]):
+                sep_idx = idx + 1
+            elif (
+                idx + 2 < len(lines)
+                and not lines[idx + 1].strip()
+                and _MARKDOWN_TABLE_SEP_RE.match(lines[idx + 2])
+            ):
+                sep_idx = idx + 2
+
+            if sep_idx is not None:
+                block_lines = [line, lines[sep_idx]]
+                idx = sep_idx + 1
+                while idx < len(lines):
+                    row = lines[idx]
+                    if not row.strip():
+                        break
+                    if row.count("|") < 2:
+                        break
+                    block_lines.append(row)
+                    idx += 1
+                blocks.append("\n".join(block_lines).strip())
+                continue
+
+            # Fallback: headerless pipe tables (3+ consecutive pipe rows)
+            if idx + 2 < len(lines):
+                pipe_run = [line]
+                scan = idx + 1
+                while scan < len(lines):
+                    row = lines[scan]
+                    if not row.strip() or row.count("|") < 2:
+                        break
+                    pipe_run.append(row)
+                    scan += 1
+                if len(pipe_run) >= 3:
+                    blocks.append("\n".join(pipe_run).strip())
+                    idx = scan
+                    continue
+        idx += 1
+    return blocks
+
+
+def build_page_table_map(
+    markdown: str,
+    pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+) -> Dict[int, List[str]]:
+    table_blocks = extract_markdown_table_blocks(markdown)
+    if not table_blocks:
+        return {}
+    table_map: Dict[int, List[str]] = {}
+    for block in table_blocks:
+        page_start, _ = find_page_range(block, pages, config)
+        if page_start <= 0:
+            continue
+        table_map.setdefault(int(page_start), []).append(block)
+    return table_map
+
+
+def inject_markdown_tables(text: str, table_blocks: Sequence[str]) -> str:
+    if not text or not table_blocks:
+        return text
+    if any(line.count("|") >= 2 for line in text.splitlines()):
+        return text
+    row_regexes: List[re.Pattern[str]] = []
+    for block in table_blocks:
+        for line in block.splitlines():
+            if _MARKDOWN_TABLE_SEP_RE.match(line):
+                continue
+            if line.count("|") < 2:
+                continue
+            cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+            if len(cells) < 2:
+                continue
+            pattern = r"\b" + r"\b.*\b".join(re.escape(cell) for cell in cells) + r"\b"
+            row_regexes.append(re.compile(pattern, re.IGNORECASE))
+    if row_regexes:
+        kept_lines: List[str] = []
+        for line in text.splitlines():
+            if any(regex.search(line) for regex in row_regexes):
+                continue
+            kept_lines.append(line)
+        text = "\n".join(kept_lines).strip()
+    for block in table_blocks:
+        if block and block not in text:
+            text = f"{text}\n\n{block}".strip()
+    return text
+
+
+_PAGE_RANGE_STOPWORDS_EN = {
     "the", "and", "for", "with", "that", "this", "from", "into", "over",
     "under", "after", "before", "were", "was", "are", "is", "its", "their",
     "then", "than", "than", "which", "when", "where", "have", "has", "had",
@@ -1914,10 +2059,110 @@ _PAGE_RANGE_STOPWORDS = {
     "nine", "ten", "more", "most", "some", "many", "few", "each", "per",
 }
 
+_PAGE_RANGE_STOPWORDS_DE = {
+    "der", "die", "das", "und", "oder", "aber", "nicht", "ist", "sind",
+    "war", "waren", "mit", "für", "von", "zu", "im", "in", "auf", "an",
+    "als", "auch", "wie", "dass", "dem", "den", "des", "ein", "eine",
+    "einer", "eines", "einem", "einen", "ich", "du", "er", "sie", "es",
+    "wir", "ihr", "ihnen", "sein", "haben", "hat", "hatte", "hatten",
+    "wird", "werden", "kann", "können", "soll", "sollen", "diese",
+    "dieser", "dieses", "jeder", "jede", "jedes", "mehr", "weniger",
+}
 
-def tokenize_for_page_range(text: str) -> List[str]:
+_PAGE_RANGE_STOPWORDS_FR = {
+    "le", "la", "les", "de", "des", "du", "un", "une", "et", "ou",
+    "mais", "ne", "pas", "est", "sont", "été", "être", "avec", "pour",
+    "par", "sur", "dans", "ce", "ces", "cette", "son", "sa", "ses",
+    "leur", "leurs", "comme", "qui", "que", "quoi", "dont", "où",
+    "au", "aux", "plus", "moins", "se", "s", "il", "elle", "ils",
+    "elles", "nous", "vous", "je", "tu",
+}
+
+_PAGE_RANGE_STOPWORDS_ES = {
+    "el", "la", "los", "las", "de", "del", "y", "o", "pero", "no",
+    "es", "son", "fue", "fueron", "con", "para", "por", "en", "un",
+    "una", "unos", "unas", "su", "sus", "como", "que", "qué", "quien",
+    "quién", "donde", "dónde", "cuando", "cuándo", "más", "menos",
+    "al", "lo", "se", "si", "sí", "yo", "tú", "él", "ella", "ellos",
+    "ellas", "nosotros", "vosotros", "usted", "ustedes",
+}
+
+_PAGE_RANGE_STOPWORDS_PL = {
+    "i", "oraz", "a", "ale", "nie", "jest", "są", "był", "była",
+    "było", "byli", "były", "z", "ze", "do", "na", "w", "we", "o",
+    "od", "po", "przez", "dla", "u", "za", "pod", "nad", "między",
+    "się", "to", "ten", "ta", "te", "jego", "jej", "ich", "nas",
+    "was", "ja", "ty", "on", "ona", "oni", "one", "że", "jak",
+    "kiedy", "gdzie", "dlaczego", "który", "która", "które", "których",
+    "którym", "może", "można", "będzie", "będą", "być", "by",
+}
+
+
+def get_page_range_stopwords(languages: str) -> Set[str]:
+    stopwordsiso = None
+    try:
+        import stopwordsiso  # type: ignore
+    except Exception:
+        stopwordsiso = None
+
+    lang = (languages or "").lower()
+    selected: Set[str] = set()
+    tokens = [token for token in re.split(r"[+,\s]+", lang) if token]
+
+    if stopwordsiso is not None:
+        available = None
+        for attr in ("available_languages", "languages", "available"):
+            getter = getattr(stopwordsiso, attr, None)
+            if callable(getter):
+                try:
+                    available = set(getter())
+                    break
+                except Exception:
+                    available = None
+        for token in tokens:
+            codes: List[str] = []
+            try:
+                parsed = langcodes.find(token)
+                alpha2 = parsed.to_alpha2()
+                alpha3 = parsed.to_alpha3()
+                if alpha2:
+                    codes.append(alpha2)
+                if alpha3:
+                    codes.append(alpha3)
+            except Exception:
+                codes.append(token)
+            for code in codes:
+                if available is not None and code not in available:
+                    continue
+                try:
+                    selected |= set(stopwordsiso.stopwords(code))
+                except Exception:
+                    continue
+        if not selected and (available is None or "en" in available):
+            try:
+                selected |= set(stopwordsiso.stopwords("en"))
+            except Exception:
+                pass
+
+    if not selected:
+        if any(token in lang for token in ("de", "deu", "german", "deutsch")):
+            selected |= _PAGE_RANGE_STOPWORDS_DE
+        if any(token in lang for token in ("fr", "fra", "french", "francais", "français")):
+            selected |= _PAGE_RANGE_STOPWORDS_FR
+        if any(token in lang for token in ("es", "spa", "spanish", "espanol", "español")):
+            selected |= _PAGE_RANGE_STOPWORDS_ES
+        if any(token in lang for token in ("pl", "pol", "polish", "polski")):
+            selected |= _PAGE_RANGE_STOPWORDS_PL
+        if not selected or any(token in lang for token in ("en", "eng", "english")):
+            selected |= _PAGE_RANGE_STOPWORDS_EN
+
+    return selected
+
+def tokenize_for_page_range(text: str, stopwords: Optional[Set[str]] = None) -> List[str]:
     tokens = re.findall(r"[A-Za-z0-9]{3,}", text.lower())
-    return [token for token in tokens if token not in _PAGE_RANGE_STOPWORDS]
+    if not stopwords:
+        stopwords = _PAGE_RANGE_STOPWORDS_EN
+    return [token for token in tokens if token not in stopwords]
 
 
 def sample_tokens(tokens: Sequence[str], max_tokens: int) -> List[str]:
@@ -1931,8 +2176,10 @@ def compute_page_overlap(
     section_text: str,
     pages: List[Dict[str, Any]],
     config: DoclingProcessingConfig,
+    languages: Optional[str] = None,
 ) -> List[Tuple[float, int, int]]:
-    section_tokens = tokenize_for_page_range(section_text)
+    stopwords = get_page_range_stopwords(languages or "")
+    section_tokens = tokenize_for_page_range(section_text, stopwords)
     if not section_tokens:
         return []
     sample = sample_tokens(section_tokens, config.page_range_sample_tokens)
@@ -1941,7 +2188,7 @@ def compute_page_overlap(
     results: List[Tuple[float, int, int]] = []
     for page in pages:
         page_text = str(page.get("text", ""))
-        page_tokens = set(tokenize_for_page_range(page_text))
+        page_tokens = set(tokenize_for_page_range(page_text, stopwords))
         hits = len(sample_set & page_tokens)
         ratio = hits / max(1, total)
         results.append((ratio, hits, int(page.get("page_num", 0))))
@@ -2027,7 +2274,8 @@ def find_page_range(
 
     if page_start == 0 or page_end == 0:
         config = config or DoclingProcessingConfig()
-        overlap_scores = compute_page_overlap(cleaned, pages, config)
+        languages = select_language_set(config.language_hint, "", config)
+        overlap_scores = compute_page_overlap(cleaned, pages, config, languages)
         page_nums = select_overlap_cluster(overlap_scores, config)
         if page_nums:
             if page_start == 0:
@@ -3007,7 +3255,7 @@ def ocr_pages_with_paddle(
     except Exception as exc:
         raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
 
-    # Newer PaddleOCR prefers use_textline_orientation; older uses use_angle_cls
+    # PaddleOCR orientation classification uses use_textline_orientation
     ocr_kwargs: Dict[str, Any] = {"lang": languages}
     if config.paddle_target_max_side_px > 0:
         ocr_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
@@ -3018,10 +3266,7 @@ def ocr_pages_with_paddle(
         ocr_kwargs["use_doc_unwarping"] = True
 
     def _create_ocr(kwargs: Dict[str, Any], use_textline_orientation: bool) -> PaddleOCR:
-        try:
-            return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
-        except TypeError:
-            return PaddleOCR(use_angle_cls=use_textline_orientation, **kwargs)
+        return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
 
     def _try_create(kwargs: Dict[str, Any], use_textline_orientation: bool) -> Optional[PaddleOCR]:
         try:
@@ -3036,21 +3281,7 @@ def ocr_pages_with_paddle(
         reduced_kwargs.pop("use_doc_unwarping", None)
         ocr = _try_create(reduced_kwargs, config.paddle_use_textline_orientation)
     if ocr is None:
-        legacy_kwargs = dict(ocr_kwargs)
-        if "text_det_limit_side_len" in legacy_kwargs:
-            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
-        if "text_det_limit_type" in legacy_kwargs:
-            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _try_create(legacy_kwargs, config.paddle_use_textline_orientation)
-    if ocr is None:
-        legacy_kwargs = dict(ocr_kwargs)
-        legacy_kwargs.pop("use_doc_orientation_classify", None)
-        legacy_kwargs.pop("use_doc_unwarping", None)
-        if "text_det_limit_side_len" in legacy_kwargs:
-            legacy_kwargs["det_limit_side_len"] = legacy_kwargs.pop("text_det_limit_side_len")
-        if "text_det_limit_type" in legacy_kwargs:
-            legacy_kwargs["det_limit_type"] = legacy_kwargs.pop("text_det_limit_type")
-        ocr = _create_ocr(legacy_kwargs, config.paddle_use_textline_orientation)
+        ocr = _create_ocr(ocr_kwargs, config.paddle_use_textline_orientation)
     pages: List[Dict[str, Any]] = []
     confidences: List[float] = []
 
@@ -3176,12 +3407,7 @@ def ocr_pages_with_paddle(
         try:
             result = ocr.predict(image_arr)  # type: ignore[attr-defined]
         except Exception as exc:
-            LOGGER.debug("PaddleOCR predict failed; falling back to ocr: %s", exc)
-        if not result:
-            try:
-                result = ocr.ocr(image_arr, cls=True)
-            except TypeError:
-                result = ocr.ocr(image_arr)
+            LOGGER.debug("PaddleOCR predict failed: %s", exc)
         if result:
             for quad, text_val, _ in _iter_paddle_entries(result):
                 if not text_val:
@@ -3226,10 +3452,7 @@ def ocr_pages_with_paddle(
         try:
             result = ocr.predict(image_arr)  # type: ignore[attr-defined]
         except Exception:
-            try:
-                result = ocr.ocr(image_arr, cls=True)
-            except TypeError:
-                result = ocr.ocr(image_arr)
+            result = None
         blocks: List[Dict[str, Any]] = []
         fallback_lines: List[str] = []
         if result:
@@ -3966,24 +4189,78 @@ def convert_pdf_with_docling(
     return DoclingConversionResult(markdown=markdown, pages=pages, metadata=metadata)
 
 
+def build_page_heading_map(
+    markdown: str,
+    pages: List[Dict[str, Any]],
+    config: Optional[DoclingProcessingConfig] = None,
+) -> Dict[int, List[str]]:
+    headings: Dict[int, List[str]] = {}
+    if not markdown or not pages:
+        return headings
+    sections = split_markdown_sections(markdown)
+    if not sections:
+        return headings
+    for section in sections:
+        title = str(section.get("title") or "").strip()
+        text = str(section.get("text") or "").strip()
+        if not title or not text:
+            continue
+        page_start, _ = find_page_range(text, pages, config)
+        if page_start <= 0:
+            continue
+        headings.setdefault(int(page_start), []).append(title)
+    return headings
+
+
+def inject_headings_inline(text: str, titles: Sequence[str]) -> str:
+    if not text or not titles:
+        return text
+    updated = text
+    for title in titles:
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            continue
+        pattern = re.escape(clean_title).replace("\\ ", r"\s+")
+        heading_line = re.compile(rf"^\s*#+\s*{pattern}\s*$", re.IGNORECASE | re.MULTILINE)
+        if heading_line.search(updated):
+            continue
+        title_re = re.compile(rf"(?<!\w){pattern}(?!\w)", re.IGNORECASE)
+        matches = list(title_re.finditer(updated))
+        if matches:
+            match = matches[-1]
+            start, end = match.span()
+            replacement = f"\n\n## {clean_title}\n\n"
+            updated = updated[:start] + replacement + updated[end:]
+    return updated
+
+
 def build_chunks_page(
     doc_id: str,
     pages: List[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
+    heading_map: Optional[Dict[int, List[str]]] = None,
+    table_map: Optional[Dict[int, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     total_pages = len(pages)
     for page in pages:
         raw_text = str(page.get("text", ""))
+        page_num = int(page.get("page_num", 0))
         if postprocess:
-            page_num = int(page.get("page_num", 0))
             raw_text = postprocess(raw_text, f"page {page_num}/{total_pages}")
         raw_text = clean_chunk_text(raw_text, config)
-        cleaned = normalize_text(raw_text)
+        if table_map:
+            tables = table_map.get(page_num, [])
+            if tables:
+                raw_text = inject_markdown_tables(raw_text, tables)
+        if heading_map:
+            titles = heading_map.get(page_num, [])
+            if titles:
+                raw_text = inject_headings_inline(raw_text, titles)
+        cleaned = normalize_chunk_whitespace(raw_text)
         if not cleaned:
             continue
-        page_num = int(page.get("page_num", 0))
         chunk_id = f"p{page_num}"
         chunks.append({
             "chunk_id": chunk_id,
@@ -4029,7 +4306,7 @@ def build_chunks_section(
         overlap_chars = config.chunk_overlap_chars if config else 0
         segments = split_text_by_size(text, max_chars, overlap_chars)
         for seg_idx, segment in enumerate(segments, start=1):
-            cleaned = normalize_text(segment)
+            cleaned = normalize_whitespace(segment)
             if not cleaned:
                 continue
             page_start, page_end = find_page_range(cleaned, pages, config)
@@ -4084,11 +4361,6 @@ def main() -> int:
         "--chunk-overlap-chars",
         type=int,
         help="Overlap chars when splitting large section chunks.",
-    )
-    parser.add_argument(
-        "--keep-image-tags",
-        action="store_true",
-        help="Preserve '<!-- image -->' tags instead of removing them.",
     )
     parser.add_argument(
         "--force-ocr-low-quality",
@@ -4222,8 +4494,6 @@ def main() -> int:
         config.max_chunk_chars = args.max_chunk_chars
     if args.chunk_overlap_chars is not None:
         config.chunk_overlap_chars = args.chunk_overlap_chars
-    if args.keep_image_tags:
-        config.cleanup_remove_image_tags = False
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
     if args.enable_dictionary_correction:
@@ -4287,7 +4557,7 @@ def main() -> int:
         languages = conversion.metadata.get("languages", config.default_lang_english)
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        should_postprocess = config.enable_post_correction and ocr_used
+        should_postprocess = config.enable_post_correction
         if should_postprocess:
             wordlist = prepare_dictionary_words(config)
             allow_missing_space = ocr_used
@@ -4385,7 +4655,16 @@ def main() -> int:
                 postprocess=postprocess_fn,
             )
         else:
-            chunks = build_chunks_page(args.doc_id, pages, config=config)
+            heading_map = build_page_heading_map(markdown, pages, config)
+            table_map = build_page_table_map(markdown, pages, config)
+            chunks = build_chunks_page(
+                args.doc_id,
+                pages,
+                config=config,
+                postprocess=postprocess_fn,
+                heading_map=heading_map,
+                table_map=table_map,
+            )
     except Exception as exc:
         eprint(f"Failed to build chunks: {exc}")
         return 2

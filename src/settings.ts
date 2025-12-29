@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, DropdownComponent, PluginSettingTab, Setting, TextComponent } from "obsidian";
 
 export type OcrMode = "auto" | "force_low_quality" | "force";
 export type ChunkingMode = "page" | "section";
@@ -30,6 +30,8 @@ export interface ZoteroRagSettings {
   embedBaseUrl: string;
   embedApiKey: string;
   embedModel: string;
+  embedIncludeMetadata: boolean;
+  enableChunkTagging: boolean;
   chatBaseUrl: string;
   chatApiKey: string;
   chatModel: string;
@@ -39,7 +41,6 @@ export interface ZoteroRagSettings {
   chunkingMode: ChunkingMode;
   maxChunkChars: number;
   chunkOverlapChars: number;
-  removeImagePlaceholders: boolean;
   ocrQualityThreshold: number;
   enableLlmCleanup: boolean;
   llmCleanupBaseUrl: string;
@@ -71,7 +72,27 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "title: {{title_yaml}}\n" +
     "year: {{year}}\n" +
     "authors:\n{{authors_yaml}}\n" +
+    "editors:\n{{editors_yaml}}\n" +
+    "tags:\n{{tags_yaml}}\n" +
+    "collection_title: {{collection_title_yaml}}\n" +
+    "collections:\n{{collections_yaml}}\n" +
     "item_type: {{item_type}}\n" +
+    "short_title: {{short_title_yaml}}\n" +
+    "creator_summary: {{creator_summary_yaml}}\n" +
+    "publication_title: {{publication_title_yaml}}\n" +
+    "book_title: {{book_title_yaml}}\n" +
+    "journal_abbrev: {{journal_abbrev_yaml}}\n" +
+    "publisher: {{publisher_yaml}}\n" +
+    "volume: {{volume_yaml}}\n" +
+    "issue: {{issue_yaml}}\n" +
+    "pages: {{pages_yaml}}\n" +
+    "doi: {{doi_yaml}}\n" +
+    "isbn: {{isbn_yaml}}\n" +
+    "issn: {{issn_yaml}}\n" +
+    "place: {{place_yaml}}\n" +
+    "url: {{url_yaml}}\n" +
+    "language: {{language_yaml}}\n" +
+    "abstract: {{abstract_yaml}}\n" +
     "pdf_link: {{pdf_link}}\n" +
     "item_json: {{item_json}}",
   outputPdfDir: "zotero/pdfs",
@@ -85,6 +106,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   embedBaseUrl: "http://localhost:1234/v1",
   embedApiKey: "lm-studio",
   embedModel: "google/embedding-gemma-300m",
+  embedIncludeMetadata: true,
+  enableChunkTagging: false,
   chatBaseUrl: "http://127.0.0.1:1234/v1",
   chatApiKey: "",
   chatModel: "openai/gpt-oss-20b",
@@ -94,7 +117,6 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chunkingMode: "page",
   maxChunkChars: 4000,
   chunkOverlapChars: 250,
-  removeImagePlaceholders: true,
   ocrQualityThreshold: 0.5,
   enableLlmCleanup: false,
   llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
@@ -113,10 +135,15 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
   private plugin: {
     settings: ZoteroRagSettings;
     saveSettings: () => Promise<void>;
+    fetchZoteroLibraryOptions: () => Promise<Array<{ value: string; label: string }>>;
+    fetchEmbeddingModelOptions: () => Promise<Array<{ value: string; label: string }>>;
+    fetchChatModelOptions: () => Promise<Array<{ value: string; label: string }>>;
+    fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
     startRedisStack: (silent?: boolean) => Promise<void>;
     setupPythonEnv: () => Promise<void>;
     reindexRedisFromCache: () => Promise<void>;
     recreateMissingNotesFromCache: () => Promise<void>;
+    cancelRecreateMissingNotesFromCache: () => void;
     deleteChatSession?: (sessionId: string) => Promise<void>;
     openLogFile?: () => Promise<void>;
     clearLogFile?: () => Promise<void>;
@@ -127,10 +154,15 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     plugin: {
       settings: ZoteroRagSettings;
       saveSettings: () => Promise<void>;
+      fetchZoteroLibraryOptions: () => Promise<Array<{ value: string; label: string }>>;
+      fetchEmbeddingModelOptions: () => Promise<Array<{ value: string; label: string }>>;
+      fetchChatModelOptions: () => Promise<Array<{ value: string; label: string }>>;
+      fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
       startRedisStack: (silent?: boolean) => Promise<void>;
       setupPythonEnv: () => Promise<void>;
       reindexRedisFromCache: () => Promise<void>;
       recreateMissingNotesFromCache: () => Promise<void>;
+      cancelRecreateMissingNotesFromCache: () => void;
       openLogFile: () => Promise<void>;
       clearLogFile: () => Promise<void>;
     }
@@ -143,90 +175,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Zotero RAG Settings" });
-
-    new Setting(containerEl)
-      .setName("Zotero base URL")
-      .setDesc("Local Zotero API base URL, e.g. http://127.0.0.1:23119/api")
-      .addText((text) =>
-        text
-          .setPlaceholder("http://127.0.0.1:23119/api")
-          .setValue(this.plugin.settings.zoteroBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.zoteroBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Zotero user ID")
-      .setDesc("Use 0 for local library. You can also enter users/<id> or groups/<id>.")
-      .addText((text) =>
-        text
-          .setPlaceholder("123456")
-          .setValue(this.plugin.settings.zoteroUserId)
-          .onChange(async (value) => {
-            this.plugin.settings.zoteroUserId = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl("h3", { text: "Zotero Web API (optional fallback)" });
-
-    new Setting(containerEl)
-      .setName("Web API base URL")
-      .setDesc("Zotero Web API base URL for write fallback, e.g. https://api.zotero.org")
-      .addText((text) =>
-        text
-          .setPlaceholder("https://api.zotero.org")
-          .setValue(this.plugin.settings.webApiBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.webApiBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Web API library type")
-      .setDesc("Library type for Web API writes.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("user", "user")
-          .addOption("group", "group")
-          .setValue(this.plugin.settings.webApiLibraryType)
-          .onChange(async (value) => {
-            this.plugin.settings.webApiLibraryType = value as "user" | "group";
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Web API library ID")
-      .setDesc("Numeric Zotero user/group ID for Web API writes.")
-      .addText((text) =>
-        text
-          .setPlaceholder("15218")
-          .setValue(this.plugin.settings.webApiLibraryId)
-          .onChange(async (value) => {
-            this.plugin.settings.webApiLibraryId = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Web API key")
-      .setDesc("Zotero API key for write fallback (from zotero.org).")
-      .addText((text) =>
-        text
-          .setPlaceholder("your-api-key")
-          .setValue(this.plugin.settings.webApiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.webApiKey = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl("h3", { text: "Prerequisites" });
+    containerEl.createEl("h2", { text: "Prerequisites" });
 
     new Setting(containerEl)
       .setName("Python path")
@@ -283,7 +232,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Auto-assign Redis port")
-      .setDesc("When starting Redis Stack, pick a free local port and update the Redis URL.")
+      .setDesc("When starting Redis stack, pick a free local port and update the Redis URL.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.autoAssignRedisPort).onChange(async (value) => {
           this.plugin.settings.autoAssignRedisPort = value;
@@ -292,7 +241,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Auto-start Redis Stack (Docker/Podman Compose)")
+      .setName("Auto-start Redis stack (Docker/Podman Compose)")
       .setDesc("Requires Docker Desktop running and your vault path shared with Docker.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
@@ -302,14 +251,192 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Start Redis Stack now")
+      .setName("Start Redis stack now")
       .setDesc("Restarts Docker/Podman Compose with the vault data directory.")
       .addButton((button) =>
         button.setButtonText("Start").onClick(async () => {
           await this.plugin.startRedisStack();
         })
+     );
+    
+    containerEl.createEl("h2", { text: "Zotero Local API" });
+
+    new Setting(containerEl)
+      .setName("Zotero base URL")
+      .setDesc("Local Zotero API base URL, e.g. http://127.0.0.1:23119/api")
+      .addText((text) =>
+        text
+          .setPlaceholder("http://127.0.0.1:23119/api")
+          .setValue(this.plugin.settings.zoteroBaseUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.zoteroBaseUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
       );
 
+    const librarySetting = new Setting(containerEl)
+      .setName("Zotero library")
+      .setDesc("Select your local library or a Zotero group library.");
+
+    let libraryDropdown: DropdownComponent | null = null;
+
+    const applyLibraryOptions = (options: Array<{ value: string; label: string }>) => {
+      if (!libraryDropdown) {
+        return;
+      }
+      const current = (this.plugin.settings.zoteroUserId || "0").trim() || "0";
+      const values = new Set(options.map((option) => option.value));
+      if (!values.has(current)) {
+        options = options.concat([{ value: current, label: `Custom (${current})` }]);
+      }
+      libraryDropdown.selectEl.options.length = 0;
+      for (const option of options) {
+        libraryDropdown.addOption(option.value, option.label);
+      }
+      libraryDropdown.setValue(current);
+    };
+
+    const refreshLibraries = async () => {
+      if (!libraryDropdown) {
+        return;
+      }
+      libraryDropdown.setDisabled(true);
+      try {
+        const options = await this.plugin.fetchZoteroLibraryOptions();
+        applyLibraryOptions(options);
+      } finally {
+        libraryDropdown.setDisabled(false);
+      }
+    };
+
+    librarySetting.addDropdown((dropdown) => {
+      libraryDropdown = dropdown;
+      const current = (this.plugin.settings.zoteroUserId || "0").trim() || "0";
+      dropdown.addOption(current, "Loading...");
+      dropdown.setValue(current);
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.zoteroUserId = value.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+
+    librarySetting.addButton((button) => {
+      button.setButtonText("Refresh").onClick(async () => {
+        await refreshLibraries();
+      });
+    });
+
+    void refreshLibraries();
+
+    containerEl.createEl("h2", { text: "Zotero Web API" });
+
+    new Setting(containerEl)
+      .setName("Web API base URL")
+      .setDesc("Zotero Web API base URL for write fallback, e.g. https://api.zotero.org")
+      .addText((text) =>
+        text
+          .setPlaceholder("https://api.zotero.org")
+          .setValue(this.plugin.settings.webApiBaseUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiBaseUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Web API library type")
+      .setDesc("Library type for Web API writes.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("user", "user")
+          .addOption("group", "group")
+          .setValue(this.plugin.settings.webApiLibraryType)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiLibraryType = value as "user" | "group";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Web API library ID")
+      .setDesc("Numeric Zotero user/group ID for Web API writes.")
+      .addText((text) =>
+        text
+          .setPlaceholder("15218")
+          .setValue(this.plugin.settings.webApiLibraryId)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiLibraryId = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Web API key")
+      .setDesc("Zotero API key for write fallback (from zotero.org).")
+      .addText((text) =>
+        text
+          .setPlaceholder("your-api-key")
+          .setValue(this.plugin.settings.webApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.webApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+    );
+    
+    containerEl.createEl("h2", { text: "Output" });
+
+    new Setting(containerEl)
+      .setName("PDF folder")
+      .addText((text) =>
+        text
+          .setPlaceholder("zotero/pdfs")
+          .setValue(this.plugin.settings.outputPdfDir)
+          .onChange(async (value) => {
+            this.plugin.settings.outputPdfDir = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Notes folder")
+      .addText((text) =>
+        text
+          .setPlaceholder("zotero/notes")
+          .setValue(this.plugin.settings.outputNoteDir)
+          .onChange(async (value) => {
+            this.plugin.settings.outputNoteDir = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Frontmatter template")
+      .setDesc("Template for note YAML frontmatter. Use {{var}} placeholders; leave blank to omit.")
+      .addTextArea((text) => {
+        text
+          .setValue(this.plugin.settings.frontmatterTemplate)
+          .onChange(async (value) => {
+            this.plugin.settings.frontmatterTemplate = value;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 10;
+        text.inputEl.style.width = "100%";
+      });
+
+    new Setting(containerEl)
+      .setName("Saved chats folder")
+      .setDesc("Where exported chat notes are stored (vault-relative).")
+      .addText((text) =>
+        text
+          .setPlaceholder("zotero/chats")
+          .setValue(this.plugin.settings.chatOutputDir)
+          .onChange(async (value) => {
+            this.plugin.settings.chatOutputDir = value.trim() || "zotero/chats";
+            await this.plugin.saveSettings();
+          })
+      );
+    
+    
     new Setting(containerEl)
       .setName("Copy PDFs into vault")
       .setDesc(
@@ -346,61 +473,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
-
-    new Setting(containerEl)
-      .setName("Frontmatter template")
-      .setDesc(
-        "Use {{doc_id}}, {{zotero_key}}, {{title}}, {{title_yaml}}, {{year}}, {{date}}, {{authors}}, {{authors_yaml}}, {{tags}}, {{item_type}}, {{pdf_link}}"
-      )
-      .addTextArea((text) => {
-        text.inputEl.rows = 8;
-        text
-          .setValue(this.plugin.settings.frontmatterTemplate)
-          .onChange(async (value) => {
-            this.plugin.settings.frontmatterTemplate = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    containerEl.createEl("h3", { text: "Output folders (vault-relative)" });
-
-    new Setting(containerEl)
-      .setName("PDF folder")
-      .addText((text) =>
-        text
-          .setPlaceholder("zotero/pdfs")
-          .setValue(this.plugin.settings.outputPdfDir)
-          .onChange(async (value) => {
-            this.plugin.settings.outputPdfDir = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Notes folder")
-      .addText((text) =>
-        text
-          .setPlaceholder("zotero/notes")
-          .setValue(this.plugin.settings.outputNoteDir)
-          .onChange(async (value) => {
-            this.plugin.settings.outputNoteDir = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Saved chats folder")
-      .setDesc("Where exported chat notes are stored (vault-relative).")
-      .addText((text) =>
-        text
-          .setPlaceholder("zotero/chats")
-          .setValue(this.plugin.settings.chatOutputDir)
-          .onChange(async (value) => {
-            this.plugin.settings.chatOutputDir = value.trim() || "zotero/chats";
-            await this.plugin.saveSettings();
-          })
-      );
-
+    
     new Setting(containerEl)
       .setName("Prefer Obsidian note for citations")
       .setDesc("Link citations to the Obsidian note when available; otherwise use Zotero deep links.")
@@ -409,128 +482,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.preferObsidianNoteForCitations = value;
           await this.plugin.saveSettings();
         })
-      );
-
-
-    containerEl.createEl("h3", { text: "Embeddings (LM Studio)" });
-
-    new Setting(containerEl)
-      .setName("Embeddings base URL")
-      .addText((text) =>
-        text
-          .setPlaceholder("http://localhost:1234/v1")
-          .setValue(this.plugin.settings.embedBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.embedBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Embeddings API key")
-      .addText((text) =>
-        text
-          .setPlaceholder("lm-studio")
-          .setValue(this.plugin.settings.embedApiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.embedApiKey = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Embeddings model")
-      .addText((text) =>
-        text
-          .setPlaceholder("google/embedding-gemma-300m")
-          .setValue(this.plugin.settings.embedModel)
-          .onChange(async (value) => {
-            this.plugin.settings.embedModel = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl("h3", { text: "Chat LLM" });
-
-    new Setting(containerEl)
-      .setName("Chat base URL")
-      .setDesc("OpenAI-compatible chat endpoint base URL")
-      .addText((text) =>
-        text
-          .setPlaceholder("http://localhost:1234/v1")
-          .setValue(this.plugin.settings.chatBaseUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.chatBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Chat API key")
-      .addText((text) =>
-        text
-          .setPlaceholder("lm-studio")
-          .setValue(this.plugin.settings.chatApiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.chatApiKey = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Chat model")
-      .addText((text) =>
-        text
-          .setPlaceholder("meta-llama/llama-3.1-405b-instruct")
-          .setValue(this.plugin.settings.chatModel)
-          .onChange(async (value) => {
-            this.plugin.settings.chatModel = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Temperature")
-      .addText((text) =>
-        text
-          .setPlaceholder("0.2")
-          .setValue(String(this.plugin.settings.chatTemperature))
-          .onChange(async (value) => {
-            const parsed = Number.parseFloat(value);
-            this.plugin.settings.chatTemperature = Number.isFinite(parsed) ? parsed : 0.2;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Chat history messages")
-      .setDesc("Number of recent messages to include for conversational continuity (0 disables).")
-      .addText((text) =>
-        text
-          .setPlaceholder("6")
-          .setValue(String(this.plugin.settings.chatHistoryMessages))
-          .onChange(async (value) => {
-            const parsed = Number.parseInt(value, 10);
-            this.plugin.settings.chatHistoryMessages = Number.isFinite(parsed) ? Math.max(0, parsed) : 6;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Chat panel location")
-      .setDesc("Where to open the chat view by default.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("right", "Right sidebar")
-          .addOption("main", "Main window")
-          .setValue(this.plugin.settings.chatPaneLocation)
-          .onChange(async (value: string) => {
-            this.plugin.settings.chatPaneLocation = value as "right" | "main";
-            await this.plugin.saveSettings();
-          })
-      );
-
-    containerEl.createEl("h3", { text: "Docling" });
+    );
+    
+    containerEl.createEl("h2", { text: "Docling" });
 
     new Setting(containerEl)
       .setName("OCR mode")
@@ -601,19 +555,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.chunkOverlapChars = Number.isFinite(parsed) ? parsed : 250;
             await this.plugin.saveSettings();
           })
-      );
-
-    new Setting(containerEl)
-      .setName("Remove image placeholders")
-      .setDesc("Strip '<!-- image -->' tags before chunking.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.removeImagePlaceholders).onChange(async (value) => {
-          this.plugin.settings.removeImagePlaceholders = value;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    containerEl.createEl("h4", { text: "OCR cleanup (optional)" });
+    );
+    
+    containerEl.createEl("h2", { text: "OCR cleanup (optional)" });
 
     new Setting(containerEl)
       .setName("LLM cleanup for low-quality chunks")
@@ -625,18 +569,67 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         })
       );
 
+    const cleanupBaseUrlPresets = [
+      {
+        value: "http://localhost:1234/v1",
+        label: "LM Studio (http://localhost:1234/v1)",
+      },
+      {
+        value: "http://localhost:11434/v1",
+        label: "Ollama (http://localhost:11434/v1)",
+      },
+      {
+        value: "https://openrouter.ai/api/v1",
+        label: "OpenRouter (https://openrouter.ai/api/v1)",
+      },
+      {
+        value: "https://api.openai.com/v1",
+        label: "OpenAI (https://api.openai.com/v1)",
+      },
+    ];
+
+    let cleanupBaseUrlInput: TextComponent | null = null;
+
+    const applyCleanupBaseUrl = async (value: string) => {
+      const trimmed = value.trim();
+      this.plugin.settings.llmCleanupBaseUrl = trimmed;
+      if (cleanupBaseUrlInput) {
+        cleanupBaseUrlInput.setValue(trimmed);
+      }
+      await this.plugin.saveSettings();
+    };
+
+    const cleanupPresetSetting = new Setting(containerEl)
+      .setName("LLM cleanup provider preset")
+      .setDesc("Pick a provider URL or keep a custom value.");
+
+    cleanupPresetSetting.addDropdown((dropdown) => {
+      const current = (this.plugin.settings.llmCleanupBaseUrl || "").trim();
+      const options = [...cleanupBaseUrlPresets];
+      if (current && !options.some((option) => option.value === current)) {
+        options.push({ value: current, label: `Custom (${current})` });
+      }
+      for (const option of options) {
+        dropdown.addOption(option.value, option.label);
+      }
+      dropdown.setValue(current || cleanupBaseUrlPresets[0].value);
+      dropdown.onChange(async (value) => {
+        await applyCleanupBaseUrl(value);
+      });
+    });
+
     new Setting(containerEl)
       .setName("LLM cleanup base URL")
       .setDesc("OpenAI-compatible endpoint, e.g. http://127.0.0.1:1234/v1")
-      .addText((text) =>
+      .addText((text) => {
+        cleanupBaseUrlInput = text;
         text
           .setPlaceholder("http://127.0.0.1:1234/v1")
           .setValue(this.plugin.settings.llmCleanupBaseUrl)
           .onChange(async (value) => {
-            this.plugin.settings.llmCleanupBaseUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+            await applyCleanupBaseUrl(value);
+          });
+      });
 
     new Setting(containerEl)
       .setName("LLM cleanup API key")
@@ -651,18 +644,61 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(containerEl)
+    const cleanupModelSetting = new Setting(containerEl)
       .setName("LLM cleanup model")
-      .setDesc("Model to use for cleanup.")
-      .addText((text) =>
-        text
-          .setPlaceholder("openai/gpt-oss-20b")
-          .setValue(this.plugin.settings.llmCleanupModel)
-          .onChange(async (value) => {
-            this.plugin.settings.llmCleanupModel = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+      .setDesc("Select a cleanup-capable model from the provider.");
+
+    let cleanupModelDropdown: DropdownComponent | null = null;
+
+    const applyCleanupModelOptions = (options: Array<{ value: string; label: string }>) => {
+      if (!cleanupModelDropdown) {
+        return;
+      }
+      const current = (this.plugin.settings.llmCleanupModel || "").trim();
+      const values = new Set(options.map((option) => option.value));
+      if (current && !values.has(current)) {
+        options = options.concat([{ value: current, label: `Custom (${current})` }]);
+      }
+      cleanupModelDropdown.selectEl.options.length = 0;
+      for (const option of options) {
+        cleanupModelDropdown.addOption(option.value, option.label);
+      }
+      if (current) {
+        cleanupModelDropdown.setValue(current);
+      }
+    };
+
+    const refreshCleanupModels = async () => {
+      if (!cleanupModelDropdown) {
+        return;
+      }
+      cleanupModelDropdown.setDisabled(true);
+      try {
+        const options = await this.plugin.fetchCleanupModelOptions();
+        applyCleanupModelOptions(options);
+      } finally {
+        cleanupModelDropdown.setDisabled(false);
+      }
+    };
+
+    cleanupModelSetting.addDropdown((dropdown) => {
+      cleanupModelDropdown = dropdown;
+      const current = (this.plugin.settings.llmCleanupModel || "").trim();
+      dropdown.addOption(current || "loading", "Loading...");
+      dropdown.setValue(current || "loading");
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.llmCleanupModel = value.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+
+    cleanupModelSetting.addButton((button) => {
+      button.setButtonText("Refresh").onClick(async () => {
+        await refreshCleanupModels();
+      });
+    });
+
+    void refreshCleanupModels();
 
     new Setting(containerEl)
       .setName("LLM cleanup temperature")
@@ -706,7 +742,331 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "Logging" });
+    containerEl.createEl("h2", { text: "Text Embedding" });
+
+    const embedBaseUrlPresets = [
+      {
+        value: "http://localhost:1234/v1",
+        label: "LM Studio (http://localhost:1234/v1)",
+      },
+      {
+        value: "http://localhost:11434/v1",
+        label: "Ollama (http://localhost:11434/v1)",
+      },
+      {
+        value: "https://openrouter.ai/api/v1",
+        label: "OpenRouter (https://openrouter.ai/api/v1)",
+      },
+      {
+        value: "https://api.openai.com/v1",
+        label: "OpenAI (https://api.openai.com/v1)",
+      },
+    ];
+
+    let embedBaseUrlInput: TextComponent | null = null;
+
+    const applyEmbedBaseUrl = async (value: string) => {
+      const trimmed = value.trim();
+      this.plugin.settings.embedBaseUrl = trimmed;
+      if (embedBaseUrlInput) {
+        embedBaseUrlInput.setValue(trimmed);
+      }
+      await this.plugin.saveSettings();
+    };
+
+    const embedPresetSetting = new Setting(containerEl)
+      .setName("Embeddings provider preset")
+      .setDesc("Pick a provider URL or keep a custom value.");
+
+    embedPresetSetting.addDropdown((dropdown) => {
+      const current = (this.plugin.settings.embedBaseUrl || "").trim();
+      const options = [...embedBaseUrlPresets];
+      if (current && !options.some((option) => option.value === current)) {
+        options.push({ value: current, label: `Custom (${current})` });
+      }
+      for (const option of options) {
+        dropdown.addOption(option.value, option.label);
+      }
+      dropdown.setValue(current || embedBaseUrlPresets[0].value);
+      dropdown.onChange(async (value) => {
+        await applyEmbedBaseUrl(value);
+      });
+    });
+
+    new Setting(containerEl)
+      .setName("Embeddings base URL")
+      .addText((text) => {
+        embedBaseUrlInput = text;
+        text
+          .setPlaceholder("http://localhost:1234/v1")
+          .setValue(this.plugin.settings.embedBaseUrl)
+          .onChange(async (value) => {
+            await applyEmbedBaseUrl(value);
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Embeddings API key")
+      .addText((text) =>
+        text
+          .setPlaceholder("lm-studio")
+          .setValue(this.plugin.settings.embedApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.embedApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    const embeddingModelSetting = new Setting(containerEl)
+      .setName("Embeddings model")
+      .setDesc("Select an embeddings model from the provider.");
+
+    let embeddingDropdown: DropdownComponent | null = null;
+
+    const applyEmbeddingOptions = (options: Array<{ value: string; label: string }>) => {
+      if (!embeddingDropdown) {
+        return;
+      }
+      const current = (this.plugin.settings.embedModel || "").trim();
+      const values = new Set(options.map((option) => option.value));
+      if (current && !values.has(current)) {
+        options = options.concat([{ value: current, label: `Custom (${current})` }]);
+      }
+      embeddingDropdown.selectEl.options.length = 0;
+      for (const option of options) {
+        embeddingDropdown.addOption(option.value, option.label);
+      }
+      if (current) {
+        embeddingDropdown.setValue(current);
+      }
+    };
+
+    const refreshEmbeddingModels = async () => {
+      if (!embeddingDropdown) {
+        return;
+      }
+      embeddingDropdown.setDisabled(true);
+      try {
+        const options = await this.plugin.fetchEmbeddingModelOptions();
+        applyEmbeddingOptions(options);
+      } finally {
+        embeddingDropdown.setDisabled(false);
+      }
+    };
+
+    embeddingModelSetting.addDropdown((dropdown) => {
+      embeddingDropdown = dropdown;
+      const current = (this.plugin.settings.embedModel || "").trim();
+      dropdown.addOption(current || "loading", "Loading...");
+      dropdown.setValue(current || "loading");
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.embedModel = value.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+
+    embeddingModelSetting.addButton((button) => {
+      button.setButtonText("Refresh").onClick(async () => {
+        await refreshEmbeddingModels();
+      });
+    });
+
+    void refreshEmbeddingModels();
+
+    new Setting(containerEl)
+      .setName("Include metadata in embeddings")
+      .setDesc("Prepend title/authors/tags/section info before embedding chunks.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.embedIncludeMetadata).onChange(async (value) => {
+          this.plugin.settings.embedIncludeMetadata = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Generate LLM tags for chunks")
+      .setDesc("Use the OCR cleanup model to tag chunks before indexing.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableChunkTagging).onChange(async (value) => {
+          this.plugin.settings.enableChunkTagging = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    containerEl.createEl("h2", { text: "Chat LLM" });
+
+    const chatBaseUrlPresets = [
+      {
+        value: "http://localhost:1234/v1",
+        label: "LM Studio (http://localhost:1234/v1)",
+      },
+      {
+        value: "http://localhost:11434/v1",
+        label: "Ollama (http://localhost:11434/v1)",
+      },
+      {
+        value: "https://openrouter.ai/api/v1",
+        label: "OpenRouter (https://openrouter.ai/api/v1)",
+      },
+      {
+        value: "https://api.openai.com/v1",
+        label: "OpenAI (https://api.openai.com/v1)",
+      },
+    ];
+
+    let chatBaseUrlInput: TextComponent | null = null;
+
+    const applyChatBaseUrl = async (value: string) => {
+      const trimmed = value.trim();
+      this.plugin.settings.chatBaseUrl = trimmed;
+      if (chatBaseUrlInput) {
+        chatBaseUrlInput.setValue(trimmed);
+      }
+      await this.plugin.saveSettings();
+    };
+
+    const chatPresetSetting = new Setting(containerEl)
+      .setName("Chat provider preset")
+      .setDesc("Pick a provider URL or keep a custom value.");
+
+    chatPresetSetting.addDropdown((dropdown) => {
+      const current = (this.plugin.settings.chatBaseUrl || "").trim();
+      const options = [...chatBaseUrlPresets];
+      if (current && !options.some((option) => option.value === current)) {
+        options.push({ value: current, label: `Custom (${current})` });
+      }
+      for (const option of options) {
+        dropdown.addOption(option.value, option.label);
+      }
+      dropdown.setValue(current || chatBaseUrlPresets[0].value);
+      dropdown.onChange(async (value) => {
+        await applyChatBaseUrl(value);
+      });
+    });
+
+    new Setting(containerEl)
+      .setName("Chat base URL")
+      .setDesc("OpenAI-compatible base URL for chat requests.")
+      .addText((text) => {
+        chatBaseUrlInput = text;
+        text
+          .setPlaceholder("http://localhost:1234/v1")
+          .setValue(this.plugin.settings.chatBaseUrl)
+          .onChange(async (value) => {
+            await applyChatBaseUrl(value);
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Chat API key")
+      .addText((text) =>
+        text
+          .setPlaceholder("lm-studio")
+          .setValue(this.plugin.settings.chatApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.chatApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    const chatModelSetting = new Setting(containerEl)
+      .setName("Chat model")
+      .setDesc("Select a chat-capable model from the provider.");
+
+    let chatModelDropdown: DropdownComponent | null = null;
+
+    const applyChatModelOptions = (options: Array<{ value: string; label: string }>) => {
+      if (!chatModelDropdown) {
+        return;
+      }
+      const current = (this.plugin.settings.chatModel || "").trim();
+      const values = new Set(options.map((option) => option.value));
+      if (current && !values.has(current)) {
+        options = options.concat([{ value: current, label: `Custom (${current})` }]);
+      }
+      chatModelDropdown.selectEl.options.length = 0;
+      for (const option of options) {
+        chatModelDropdown.addOption(option.value, option.label);
+      }
+      if (current) {
+        chatModelDropdown.setValue(current);
+      }
+    };
+
+    const refreshChatModels = async () => {
+      if (!chatModelDropdown) {
+        return;
+      }
+      chatModelDropdown.setDisabled(true);
+      try {
+        const options = await this.plugin.fetchChatModelOptions();
+        applyChatModelOptions(options);
+      } finally {
+        chatModelDropdown.setDisabled(false);
+      }
+    };
+
+    chatModelSetting.addDropdown((dropdown) => {
+      chatModelDropdown = dropdown;
+      const current = (this.plugin.settings.chatModel || "").trim();
+      dropdown.addOption(current || "loading", "Loading...");
+      dropdown.setValue(current || "loading");
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.chatModel = value.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+
+    chatModelSetting.addButton((button) => {
+      button.setButtonText("Refresh").onClick(async () => {
+        await refreshChatModels();
+      });
+    });
+
+    void refreshChatModels();
+
+    new Setting(containerEl)
+      .setName("Temperature")
+      .addText((text) =>
+        text
+          .setPlaceholder("0.2")
+          .setValue(String(this.plugin.settings.chatTemperature))
+          .onChange(async (value) => {
+            const parsed = Number.parseFloat(value);
+            this.plugin.settings.chatTemperature = Number.isFinite(parsed) ? parsed : 0.2;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Chat history messages")
+      .setDesc("Number of recent messages to include for conversational continuity (0 disables).")
+      .addText((text) =>
+        text
+          .setPlaceholder("6")
+          .setValue(String(this.plugin.settings.chatHistoryMessages))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.chatHistoryMessages = Number.isFinite(parsed) ? Math.max(0, parsed) : 6;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Chat panel location")
+      .setDesc("Where to open the chat view by default.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("right", "Right sidebar")
+          .addOption("main", "Main window")
+          .setValue(this.plugin.settings.chatPaneLocation)
+          .onChange(async (value: string) => {
+            this.plugin.settings.chatPaneLocation = value as "right" | "main";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("h2", { text: "Logging" });
 
     new Setting(containerEl)
       .setName("Enable logging to file")
@@ -745,7 +1105,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Maintenance" });
+    containerEl.createEl("h2", { text: "Maintenance" });
 
     new Setting(containerEl)
       .setName("Reindex Redis from cached chunks")
@@ -762,6 +1122,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       .addButton((button) =>
         button.setButtonText("Recreate").onClick(async () => {
           await this.plugin.recreateMissingNotesFromCache();
+        })
+      )
+      .addButton((button) =>
+        button.setButtonText("Cancel").onClick(() => {
+          this.plugin.cancelRecreateMissingNotesFromCache();
         })
       );
   }

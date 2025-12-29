@@ -1,41 +1,49 @@
-# Ask Your Zotero Library in Obsidian
+# Zotero Redisearch RAG for Obsidian
 
-Obsidian plugin for Zotero RAG and chat using Redis Stack and LM Studio/OpenAI-compatible endpoints.
+Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis Stack, and returns answers with citations that jump straight to the relevant chunk in your note.
 
 > [!CAUTION]
 > This plugin is early and may change. Keep backups of important notes.
-
-## What is new in 0.2.5
-
-- Redis Stack now auto-selects a vault-specific port to avoid collisions across vaults.
-- Docker/Podman auto-detection runs on plugin load and repairs invalid paths.
-- Clear notices when Docker/Podman is installed but not running.
-- Recreate-from-cache can recover missing PDFs by re-downloading attachments.
 
 ## Why this plugin exists
 
 Zotero is your source of truth for references, and Obsidian is where you think. This plugin connects them so you can ask questions over your Zotero PDFs inside Obsidian and get answers with clear, clickable citations. It imports selected items, extracts text (OCR when needed), builds a local vector index in Redis, and keeps the results linked back to your notes and PDFs.
 
-## What you get
+## Highlights
 
-- Ask questions over your Zotero PDFs inside Obsidian.
-- Answers include citations that link back to your notes and Zotero PDFs (page links).
-- A chat panel with saved sessions and one-click export to notes.
-- Everything runs locally (Redis, embeddings, chat). Web API is optional.
+- Local-first RAG over your Zotero PDFs (Redis Stack + local embeddings/chat).
+- Rich Obsidian notes with chunk markers you can edit.
+- Incremental reindexing: edits update only the affected chunks.
+- Citations link back to the exact chunk in the note (or Zotero if you prefer).
+- Chat sessions saved and exportable to notes.
+
+![Chat in the right sidebar](assets/image.png)
 
 ## How it works
 
 1) Pick a Zotero item in Obsidian.  
 2) Docling extracts text (OCR when needed).  
 3) Chunks are embedded and indexed in Redis Stack.  
-4) Queries retrieve chunks and generate answers with citations.
+4) Ask questions; responses cite the chunks used.
+
+## Notes and syncing
+
+Imported notes include a sync section with chunk markers:
+
+- `<!-- zrr:sync-start doc_id=... -->`
+- `<!-- zrr:chunk id=... -->`
+
+You can edit chunk text directly in the note. On save, the plugin updates the cached JSON and reindexes only the changed chunks.
+
+- Toggle deletion for the current chunk via command palette: **Toggle ZRR chunk delete at cursor**.
+- Right-click inside a chunk for the same action.
 
 ## Requirements
 
 - Obsidian (desktop)
 - Zotero 7 (desktop)
 - Docker Desktop or Podman (for Redis Stack)
-- LM Studio (for embeddings + chat)
+- LM Studio (or any OpenAI-compatible local server)
 - Python 3.11+ (for Docling tools)
 
 ## Setup
@@ -49,7 +57,7 @@ In Zotero:
 ### 2) Install the plugin
 Option A (recommended):
 1) Download the latest release zip.
-2) Unzip to your vault:
+2) Unzip to your vault:  
    `<vault>/.obsidian/plugins/zotero-redisearch-rag/`
 3) The folder must contain `main.js`, `manifest.json`, `versions.json`, and `tools/`.
 
@@ -112,6 +120,9 @@ Key settings:
 - Embeddings model: LM Studio model ID
 - Chat base URL/model: LM Studio chat model ID
 - Saved chats folder: where exported chat notes are stored
+- Prefer Obsidian note for citations: when ON, citations jump to note chunks; when OFF, citations deep-link to Zotero
+
+![Settings panel](assets/image1.png)
 
 ## Using the plugin
 
@@ -126,8 +137,7 @@ Answers are generated from retrieved text only and include citations.
 - If "Copy PDFs into vault" is ON, the note links to the vault PDF.
 - If it is OFF, the note links to the Zotero attachment (so you can see your Zotero annotations).
 - If the local PDF path is unavailable, the plugin will temporarily copy the PDF into the vault for processing and tell you.
-- "Prefer vault PDF for citations" uses the vault copy when both are available.
-- "Create OCR-layered PDF copy" writes a new, searchable PDF (requires Tesseract + Poppler) and uses it for citations.
+- "Create OCR-layered PDF copy" writes a new, searchable PDF (requires Tesseract + Poppler) and uses it for citations when opening PDFs.
 
 ## Web API fallback (optional)
 
@@ -193,4 +203,4 @@ python3 tools/batch_index_pyzotero.py \
 
 - Answers must be grounded in retrieved context.
 - If context is insufficient, the response says it does not know.
-- Citations include doc_id and page ranges.
+- Citations point to the exact chunk (or Zotero when note preference is off).

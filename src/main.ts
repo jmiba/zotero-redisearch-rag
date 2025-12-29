@@ -2,6 +2,7 @@ import {
   App,
   FileSystemAdapter,
   Editor,
+  MarkdownRenderer,
   MarkdownView,
   Modal,
   Notice,
@@ -12,15 +13,16 @@ import {
   addIcon,
   normalizePath,
 } from "obsidian";
-import { EditorState, RangeSetBuilder } from "@codemirror/state";
+import { EditorState, RangeSetBuilder, Text } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   ViewPlugin,
+  WidgetType,
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { promises as fs, existsSync } from "fs";
 import http from "http";
 import https from "https";
@@ -102,14 +104,14 @@ const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 type ParsedChunkBlock = {
   chunkId: string;
   text: string;
-  deleteFlag: boolean;
+  excludeFlag: boolean;
 };
 
 const ZRR_SYNC_START_RE = /<!--\s*zrr:sync-start[^>]*-->/i;
 const ZRR_SYNC_END_RE = /<!--\s*zrr:sync-end\s*-->/i;
 const ZRR_CHUNK_START_RE = /<!--\s*zrr:chunk\b([^>]*)-->/i;
 const ZRR_CHUNK_END_RE = /<!--\s*zrr:chunk\s+end\s*-->/i;
-const ZRR_CHUNK_DELETE_RE = /<!--\s*zrr:delete\s*-->/i;
+const ZRR_CHUNK_EXCLUDE_ANY_RE = /<!--\s*zrr:(?:exclude|delete)\s*-->/i;
 
 class TextPromptModal extends Modal {
   private titleText: string;
@@ -165,6 +167,76 @@ class TextPromptModal extends Modal {
   }
 }
 
+class ChunkTagModal extends Modal {
+  private chunkId: string;
+  private initialTags: string[];
+  private onSubmit: (tags: string[]) => void;
+
+  constructor(app: App, chunkId: string, initialTags: string[], onSubmit: (tags: string[]) => void) {
+    super(app);
+    this.chunkId = chunkId;
+    this.initialTags = initialTags;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: `Edit tags for ${this.chunkId}` });
+
+    const input = contentEl.createEl("textarea", {
+      attr: { rows: "3" },
+    });
+    input.style.width = "100%";
+    input.placeholder = "tag1, tag2, tag3";
+    input.value = this.initialTags.join(", ");
+    input.focus();
+
+    const submit = contentEl.createEl("button", { text: "Save tags" });
+    submit.style.marginTop = "0.75rem";
+
+    const handleSubmit = (): void => {
+      const raw = input.value || "";
+      const tags = raw
+        .split(/[,;\n]+/)
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0);
+      const unique = Array.from(new Set(tags));
+      this.close();
+      this.onSubmit(unique);
+    };
+
+    submit.addEventListener("click", handleSubmit);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        handleSubmit();
+      }
+    });
+  }
+}
+
+class ChunkTextPreviewModal extends Modal {
+  private titleText: string;
+  private content: string;
+
+  constructor(app: App, titleText: string, content: string) {
+    super(app);
+    this.titleText = titleText;
+    this.content = content;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.titleText });
+    const area = contentEl.createEl("textarea", {
+      attr: { rows: "12", readonly: "true" },
+    });
+    area.style.width = "100%";
+    area.value = this.content;
+  }
+}
+
 const getLogLineClass = (text: string): string | null => {
   if (text.includes("STDERR")) {
     return "zrr-log-stderr";
@@ -217,6 +289,216 @@ const LOG_THEME = EditorView.theme({
   ".zrr-log-info": { color: "var(--text-muted)" },
   ".zrr-log-stderr": { color: "var(--text-accent)" },
 });
+
+const extractDocIdFromDoc = (doc: Text): string | null => {
+  for (let line = 1; line <= doc.lines; line += 1) {
+    const text = doc.line(line).text;
+    if (ZRR_SYNC_START_RE.test(text)) {
+      const docMatch = text.match(/doc_id=([\"']?)([^\"'\s]+)\1/i);
+      return docMatch ? docMatch[2].trim() : null;
+    }
+  }
+  return null;
+};
+
+const findChunkStartLineInDoc = (
+  doc: Text,
+  fromLine: number
+): { line: number; text: string } | null => {
+  let line = fromLine;
+  for (; line >= 1; line -= 1) {
+    const text = doc.line(line).text;
+    if (ZRR_CHUNK_START_RE.test(text)) {
+      return { line, text };
+    }
+    if (ZRR_SYNC_START_RE.test(text) || ZRR_SYNC_END_RE.test(text)) {
+      break;
+    }
+  }
+  return null;
+};
+
+const findChunkEndLineInDoc = (doc: Text, fromLine: number): number | null => {
+  for (let line = fromLine; line <= doc.lines; line += 1) {
+    const text = doc.line(line).text;
+    if (ZRR_CHUNK_END_RE.test(text)) {
+      return line;
+    }
+    if (ZRR_SYNC_END_RE.test(text)) {
+      break;
+    }
+  }
+  return null;
+};
+
+const findChunkAtCursorInDoc = (
+  doc: Text,
+  cursorLine: number
+): { startLine: number; endLine: number; text: string } | null => {
+  const start = findChunkStartLineInDoc(doc, cursorLine);
+  if (!start) {
+    return null;
+  }
+  const endLine = findChunkEndLineInDoc(doc, start.line + 1);
+  if (endLine === null || cursorLine < start.line || cursorLine > endLine) {
+    return null;
+  }
+  return { startLine: start.line, endLine, text: start.text };
+};
+
+const hasExcludeMarkerInRange = (doc: Text, startLine: number, endLine: number): boolean => {
+  if (startLine > endLine) {
+    return false;
+  }
+  for (let line = startLine; line <= endLine; line += 1) {
+    const text = doc.line(line).text;
+    if (ZRR_CHUNK_EXCLUDE_ANY_RE.test(text)) {
+      return true;
+    }
+  }
+  return false;
+};
+
+class ChunkToolsWidget extends WidgetType {
+  private plugin: ZoteroRagPlugin;
+  private docId: string;
+  private chunkId: string;
+  private startLine: number;
+  private excluded: boolean;
+
+  constructor(
+    plugin: ZoteroRagPlugin,
+    docId: string,
+    chunkId: string,
+    startLine: number,
+    excluded: boolean
+  ) {
+    super();
+    this.plugin = plugin;
+    this.docId = docId;
+    this.chunkId = chunkId;
+    this.startLine = startLine;
+    this.excluded = excluded;
+  }
+
+  eq(other: ChunkToolsWidget): boolean {
+    return (
+      this.docId === other.docId
+      && this.chunkId === other.chunkId
+      && this.startLine === other.startLine
+      && this.excluded === other.excluded
+    );
+  }
+
+  toDOM(): HTMLElement {
+    const wrap = document.createElement("span");
+    wrap.className = "zrr-chunk-toolbar";
+    wrap.setAttribute("data-chunk-id", this.chunkId);
+
+    const tags = document.createElement("button");
+    tags.type = "button";
+    tags.className = "zrr-chunk-button";
+    tags.textContent = "Tags";
+    tags.title = "Edit chunk tags";
+    tags.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.openChunkTagEditor(this.docId, this.chunkId);
+    });
+    wrap.appendChild(tags);
+
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "zrr-chunk-button";
+    preview.textContent = "Indexed";
+    preview.title = "Preview indexed chunk text";
+    preview.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.openChunkIndexedTextPreview(this.docId, this.chunkId);
+    });
+    wrap.appendChild(preview);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "zrr-chunk-button";
+    toggle.textContent = this.excluded ? "Include" : "Exclude";
+    toggle.title = this.excluded ? "Include this chunk in the index" : "Exclude this chunk from the index";
+    toggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.plugin.toggleChunkExcludeFromToolbar(this.startLine);
+    });
+    wrap.appendChild(toggle);
+
+    return wrap;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+const buildChunkToolsDecorations = (
+  view: EditorView,
+  plugin: ZoteroRagPlugin
+): DecorationSet => {
+  const doc = view.state.doc;
+  const docId = extractDocIdFromDoc(doc);
+  if (!docId) {
+    return Decoration.none;
+  }
+  const cursorPos = view.state.selection.main.head;
+  const cursorLine = doc.lineAt(cursorPos).number;
+  const chunk = findChunkAtCursorInDoc(doc, cursorLine);
+  if (!chunk) {
+    return Decoration.none;
+  }
+  const startMatch = chunk.text.match(ZRR_CHUNK_START_RE);
+  if (!startMatch) {
+    return Decoration.none;
+  }
+  const attrs = (startMatch[1] ?? "").trim();
+  const idMatch = attrs.match(/id=([\"']?)([^\"'\s]+)\1/i);
+  if (!idMatch) {
+    return Decoration.none;
+  }
+  const chunkId = idMatch[2].trim();
+  if (!chunkId) {
+    return Decoration.none;
+  }
+  const hasExcludeAttr = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
+  const hasExcludeMarker = hasExcludeMarkerInRange(doc, chunk.startLine + 1, chunk.endLine - 1);
+  const excluded = hasExcludeAttr || hasExcludeMarker;
+  const line = doc.line(chunk.startLine);
+  const widget = Decoration.widget({
+    widget: new ChunkToolsWidget(plugin, docId, chunkId, chunk.startLine, excluded),
+    side: 1,
+  });
+  return Decoration.set([widget.range(line.to)]);
+};
+
+const createChunkToolsExtension = (plugin: ZoteroRagPlugin): ViewPlugin<{
+  decorations: DecorationSet;
+}> =>
+  ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+
+      constructor(view: EditorView) {
+        this.decorations = buildChunkToolsDecorations(view, plugin);
+      }
+
+      update(update: ViewUpdate): void {
+        if (update.docChanged || update.selectionSet || update.viewportChanged) {
+          this.decorations = buildChunkToolsDecorations(update.view, plugin);
+        }
+      }
+    },
+    {
+      decorations: (value) => value.decorations,
+    }
+  );
 
 const LOG_HIGHLIGHT_PLUGIN = ViewPlugin.fromClass(
   class {
@@ -477,6 +759,10 @@ export default class ZoteroRagPlugin extends Plugin {
   private noteSyncTimers = new Map<string, number>();
   private noteSyncInFlight = new Set<string>();
   private noteSyncSuppressed = new Set<string>();
+  private collectionTitleCache = new Map<string, string>();
+  private recreateMissingNotesActive = false;
+  private recreateMissingNotesAbort = false;
+  private recreateMissingNotesProcess: ChildProcess | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -488,7 +774,8 @@ export default class ZoteroRagPlugin extends Plugin {
     this.setupStatusBar();
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
-    this.registerChunkDeleteMenu();
+    this.registerChunkExcludeMenu();
+    this.registerEditorExtension(createChunkToolsExtension(this));
 
     try {
       await this.ensureBundledTools();
@@ -558,8 +845,8 @@ export default class ZoteroRagPlugin extends Plugin {
 
     this.addCommand({
       id: "toggle-zrr-chunk-delete",
-      name: "Toggle ZRR chunk delete at cursor",
-      editorCallback: (editor) => this.toggleChunkDelete(editor),
+      name: "Toggle ZRR chunk exclude at cursor",
+      editorCallback: (editor) => this.toggleChunkExclude(editor),
     });
 
     void this.autoDetectContainerCliOnLoad();
@@ -774,25 +1061,30 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
+      const indexArgs = [
+        "--chunks-json",
+        this.getAbsoluteVaultPath(chunkPath),
+        "--redis-url",
+        this.settings.redisUrl,
+        "--index",
+        this.getRedisIndexName(),
+        "--prefix",
+        this.getRedisKeyPrefix(),
+        "--embed-base-url",
+        this.settings.embedBaseUrl,
+        "--embed-api-key",
+        this.settings.embedApiKey,
+        "--embed-model",
+        this.settings.embedModel,
+        "--progress",
+      ];
+      if (this.settings.embedIncludeMetadata) {
+        indexArgs.push("--embed-include-metadata");
+      }
+      this.appendChunkTaggingArgs(indexArgs);
       await this.runPythonStreaming(
         indexScript,
-        [
-          "--chunks-json",
-          this.getAbsoluteVaultPath(chunkPath),
-          "--redis-url",
-          this.settings.redisUrl,
-          "--index",
-          this.getRedisIndexName(),
-          "--prefix",
-          this.getRedisKeyPrefix(),
-          "--embed-base-url",
-          this.settings.embedBaseUrl,
-          "--embed-api-key",
-          this.settings.embedApiKey,
-          "--embed-model",
-          this.settings.embedModel,
-          "--progress",
-        ],
+        indexArgs,
         (payload) => {
           if (payload?.type === "progress" && payload.total) {
             const percent = Math.round((payload.current / payload.total) * 100);
@@ -820,11 +1112,12 @@ export default class ZoteroRagPlugin extends Plugin {
       const doclingMd = await this.app.vault.adapter.read(notePath);
       const chunkPayload = await this.readChunkPayload(chunkPath);
       const doclingContent = this.buildSyncedDoclingContent(docId, chunkPayload, doclingMd);
-      const noteContent = this.buildNoteMarkdown(
+      const noteContent = await this.buildNoteMarkdown(
         values,
         item.meta ?? {},
         docId,
         pdfLink,
+        attachment.key,
         itemPath,
         doclingContent
       );
@@ -1768,55 +2061,102 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   public async recreateMissingNotesFromCache(): Promise<void> {
-    const adapter = this.app.vault.adapter;
-    const itemDocIds = await this.listDocIds(ITEM_CACHE_DIR);
-    const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
-    const noteEntries = await this.scanNotesForDocIds(this.settings.outputNoteDir);
-    const noteDocIds = Object.keys(noteEntries);
-    const docIds = Array.from(new Set([...itemDocIds, ...chunkDocIds, ...noteDocIds]));
-
-    if (docIds.length === 0) {
-      new Notice("No cached items found.");
+    if (this.recreateMissingNotesActive) {
+      new Notice("Recreate missing notes is already running.");
       return;
     }
+    this.recreateMissingNotesActive = true;
+    this.recreateMissingNotesAbort = false;
+    this.recreateMissingNotesProcess = null;
+    try {
+      const adapter = this.app.vault.adapter;
+      const itemDocIds = await this.listDocIds(ITEM_CACHE_DIR);
+      const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
+      const noteEntries = await this.scanNotesForDocIds(this.settings.outputNoteDir);
+      const noteDocIds = Object.keys(noteEntries);
+      const docIds = Array.from(new Set([...itemDocIds, ...chunkDocIds, ...noteDocIds]));
 
-    const missing: string[] = [];
-    for (const docId of docIds) {
-      if (noteEntries[docId]) {
-        continue;
+      if (docIds.length === 0) {
+        new Notice("No cached items found.");
+        return;
       }
-      const existing = await this.getDocIndexEntry(docId);
-      if (existing?.note_path && (await adapter.exists(existing.note_path))) {
-        continue;
+
+      const missing: string[] = [];
+      for (const docId of docIds) {
+        if (noteEntries[docId]) {
+          continue;
+        }
+        const existing = await this.getDocIndexEntry(docId);
+        if (existing?.note_path && (await adapter.exists(existing.note_path))) {
+          continue;
+        }
+        const inferred = await this.inferNotePathFromCache(docId);
+        if (inferred && (await adapter.exists(inferred))) {
+          continue;
+        }
+        missing.push(docId);
       }
-      const inferred = await this.inferNotePathFromCache(docId);
-      if (inferred && (await adapter.exists(inferred))) {
-        continue;
+
+      if (missing.length === 0) {
+        new Notice("No missing notes detected.");
+        return;
       }
-      missing.push(docId);
+
+      this.showStatusProgress("Recreating missing notes...", 0);
+      let rebuilt = 0;
+
+      for (let i = 0; i < missing.length; i += 1) {
+        if (this.recreateMissingNotesAbort) {
+          break;
+        }
+        const docId = missing[i];
+        const percent = Math.round(((i + 1) / missing.length) * 100);
+        this.showStatusProgress(`Recreating ${i + 1}/${missing.length}`, percent);
+        const ok = await this.rebuildNoteFromCacheForDocId(docId, false);
+        if (ok) {
+          rebuilt += 1;
+        }
+      }
+
+      if (this.recreateMissingNotesAbort) {
+        this.showStatusProgress("Canceled", 100);
+        window.setTimeout(() => this.clearStatusProgress(), 1200);
+        new Notice(`Canceled after ${rebuilt}/${missing.length} notes.`);
+      } else {
+        this.showStatusProgress("Done", 100);
+        window.setTimeout(() => this.clearStatusProgress(), 1200);
+        new Notice(`Recreated ${rebuilt}/${missing.length} missing notes.`);
+      }
+    } finally {
+      this.recreateMissingNotesActive = false;
+      this.recreateMissingNotesProcess = null;
     }
+  }
 
-    if (missing.length === 0) {
-      new Notice("No missing notes detected.");
+  public cancelRecreateMissingNotesFromCache(): void {
+    if (!this.recreateMissingNotesActive) {
+      new Notice("No recreate job is running.");
       return;
     }
-
-    this.showStatusProgress("Recreating missing notes...", 0);
-    let rebuilt = 0;
-
-    for (let i = 0; i < missing.length; i += 1) {
-      const docId = missing[i];
-      const percent = Math.round(((i + 1) / missing.length) * 100);
-      this.showStatusProgress(`Recreating ${i + 1}/${missing.length}`, percent);
-      const ok = await this.rebuildNoteFromCacheForDocId(docId, false);
-      if (ok) {
-        rebuilt += 1;
+    this.recreateMissingNotesAbort = true;
+    const child = this.recreateMissingNotesProcess;
+    if (child && !child.killed) {
+      try {
+        child.kill("SIGTERM");
+      } catch (error) {
+        console.warn("Failed to terminate recreate process", error);
       }
+      window.setTimeout(() => {
+        if (child && !child.killed) {
+          try {
+            child.kill("SIGKILL");
+          } catch (err) {
+            console.warn("Failed to force-kill recreate process", err);
+          }
+        }
+      }, 2000);
     }
-
-    this.showStatusProgress("Done", 100);
-    window.setTimeout(() => this.clearStatusProgress(), 1200);
-    new Notice(`Recreated ${rebuilt}/${missing.length} missing notes.`);
+    new Notice("Canceling recreate missing notes...");
   }
 
   public async reindexRedisFromCache(): Promise<void> {
@@ -1848,7 +2188,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
       const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
       try {
-        await this.runPython(indexScript, [
+        const indexArgs = [
           "--chunks-json",
           this.getAbsoluteVaultPath(chunkPath),
           "--redis-url",
@@ -1864,7 +2204,12 @@ export default class ZoteroRagPlugin extends Plugin {
           "--embed-model",
           this.settings.embedModel,
           "--upsert",
-        ]);
+        ];
+        if (this.settings.embedIncludeMetadata) {
+          indexArgs.push("--embed-include-metadata");
+        }
+        this.appendChunkTaggingArgs(indexArgs);
+        await this.runPython(indexScript, indexArgs);
       } catch (error) {
         failures += 1;
         console.error(`Failed to reindex ${docId}`, error);
@@ -1908,6 +2253,10 @@ export default class ZoteroRagPlugin extends Plugin {
       this.settings.embedModel,
       "--upsert",
     ];
+    if (this.settings.embedIncludeMetadata) {
+      args.push("--embed-include-metadata");
+    }
+    this.appendChunkTaggingArgs(args);
     if (chunkIds.length) {
       args.push("--chunk-ids", chunkIds.join(","));
     }
@@ -2249,6 +2598,58 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async fetchZoteroCollectionTitle(collectionKey: string): Promise<string> {
+    const key = (collectionKey || "").trim();
+    if (!key) {
+      return "";
+    }
+    const cached = this.collectionTitleCache.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/collections/${key}`);
+    try {
+      const payload = await this.requestLocalApi(url, `Zotero collection fetch failed for ${url}`);
+      const parsed = JSON.parse(payload.toString("utf8"));
+      const title = String(parsed?.data?.name ?? parsed?.name ?? "").trim();
+      this.collectionTitleCache.set(key, title);
+      return title;
+    } catch (error) {
+      if (!this.canUseWebApi()) {
+        this.collectionTitleCache.set(key, "");
+        return "";
+      }
+      try {
+        const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/collections/${key}`);
+        const payload = await this.requestWebApi(webUrl, `Zotero Web API collection fetch failed for ${webUrl}`);
+        const parsed = JSON.parse(payload.toString("utf8"));
+        const title = String(parsed?.data?.name ?? parsed?.name ?? "").trim();
+        this.collectionTitleCache.set(key, title);
+        return title;
+      } catch (webError) {
+        console.warn("Failed to fetch Zotero collection title", webError);
+        this.collectionTitleCache.set(key, "");
+        return "";
+      }
+    }
+  }
+
+  private async resolveCollectionTitles(values: ZoteroItemValues): Promise<string[]> {
+    const raw = Array.isArray(values.collections) ? values.collections : [];
+    const keys = raw.map((entry) => String(entry || "").trim()).filter(Boolean);
+    if (!keys.length) {
+      return [];
+    }
+    const titles: string[] = [];
+    for (const key of keys) {
+      const title = await this.fetchZoteroCollectionTitle(key);
+      if (title) {
+        titles.push(title);
+      }
+    }
+    return titles;
+  }
+
   private async fetchZoteroItemWeb(itemKey: string): Promise<any | null> {
     try {
       const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}`);
@@ -2483,7 +2884,7 @@ export default class ZoteroRagPlugin extends Plugin {
     );
   }
 
-  private registerChunkDeleteMenu(): void {
+  private registerChunkExcludeMenu(): void {
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) => {
         const found = this.findChunkAtCursor(editor);
@@ -2492,8 +2893,8 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         menu.addItem((item) => {
           item
-            .setTitle("Toggle ZRR chunk delete")
-            .onClick(() => this.toggleChunkDelete(editor, found.startLine));
+            .setTitle("Toggle ZRR chunk exclude")
+            .onClick(() => this.toggleChunkExclude(editor, found.startLine));
         });
       })
     );
@@ -2545,7 +2946,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return { startLine: start.line, endLine, text: start.text };
   }
 
-  private toggleChunkDelete(editor: Editor, fromLine?: number): void {
+  public toggleChunkExclude(editor: Editor, fromLine?: number): void {
     const found = this.findChunkAtCursor(editor, fromLine);
     if (!found) {
       new Notice("No synced chunk found at cursor.");
@@ -2558,20 +2959,21 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     let attrs = (startMatch[1] ?? "").trim();
     const endLine = found.endLine;
-    let hasDeleteMarker = false;
+    let hasExcludeMarker = false;
     if (endLine !== null) {
       for (let line = found.startLine + 1; line < endLine; line += 1) {
-        if (ZRR_CHUNK_DELETE_RE.test(editor.getLine(line))) {
-          hasDeleteMarker = true;
+        if (ZRR_CHUNK_EXCLUDE_ANY_RE.test(editor.getLine(line))) {
+          hasExcludeMarker = true;
           break;
         }
       }
     }
-    const hasDelete = /\bdelete\b/i.test(attrs) || hasDeleteMarker;
-    if (hasDelete) {
-      attrs = attrs.replace(/\bdelete\b/gi, "").replace(/\s{2,}/g, " ").trim();
+    const hasExcludeAttr = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
+    const hasExclude = hasExcludeAttr || hasExcludeMarker;
+    if (hasExclude) {
+      attrs = attrs.replace(/\b(delete|exclude)\b/gi, "").replace(/\s{2,}/g, " ").trim();
     } else {
-      attrs = attrs ? `${attrs} delete` : "delete";
+      attrs = attrs ? `${attrs} exclude` : "exclude";
     }
     const newLine = `<!-- zrr:chunk${attrs ? " " + attrs : ""} -->`;
     if (newLine !== found.text) {
@@ -2581,10 +2983,10 @@ export default class ZoteroRagPlugin extends Plugin {
         { line: found.startLine, ch: found.text.length }
       );
     }
-    if (hasDelete && endLine !== null) {
+    if (hasExclude && endLine !== null) {
       const deleteLines: number[] = [];
       for (let line = found.startLine + 1; line < endLine; line += 1) {
-        if (ZRR_CHUNK_DELETE_RE.test(editor.getLine(line))) {
+        if (ZRR_CHUNK_EXCLUDE_ANY_RE.test(editor.getLine(line))) {
           deleteLines.push(line);
         }
       }
@@ -2598,7 +3000,112 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       }
     }
-    new Notice(hasDelete ? "Chunk restored." : "Chunk marked for deletion.");
+    new Notice(hasExclude ? "Chunk included." : "Chunk excluded from index.");
+  }
+
+  public toggleChunkExcludeFromToolbar(startLine: number): void {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      new Notice("No active editor found.");
+      return;
+    }
+    const line = Math.max(0, startLine - 1);
+    this.toggleChunkExclude(view.editor, line);
+  }
+
+  public async openChunkTagEditor(docId: string, chunkId: string): Promise<void> {
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(chunkPath))) {
+      new Notice("Chunk cache not found for this document.");
+      return;
+    }
+    const payload = await this.readChunkPayload(chunkPath);
+    if (!payload) {
+      new Notice("Failed to read chunk cache.");
+      return;
+    }
+    const chunks = Array.isArray(payload.chunks) ? payload.chunks : [];
+    const target = this.resolveChunkFromPayload(chunks, chunkId, docId);
+    if (!target) {
+      new Notice(`Chunk ${chunkId} not found in cache.`);
+      return;
+    }
+    const rawTags = target.chunk_tags ?? [];
+    const initialTags = Array.isArray(rawTags)
+      ? rawTags.map((tag) => String(tag).trim()).filter((tag) => tag)
+      : String(rawTags)
+          .split(/[|,;\n]+/)
+          .map((tag) => tag.trim())
+          .filter((tag) => tag);
+    new ChunkTagModal(this.app, chunkId, initialTags, async (tags) => {
+      if (tags.length > 0) {
+        target.chunk_tags = tags;
+      } else {
+        delete target.chunk_tags;
+      }
+      await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+      await this.reindexChunkUpdates(docId, chunkPath, [String(target.chunk_id || chunkId)], []);
+      new Notice("Chunk tags updated.");
+    }).open();
+  }
+
+  public async openChunkIndexedTextPreview(docId: string, chunkId: string): Promise<void> {
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(chunkPath))) {
+      new Notice("Chunk cache not found for this document.");
+      return;
+    }
+    const payload = await this.readChunkPayload(chunkPath);
+    if (!payload) {
+      new Notice("Failed to read chunk cache.");
+      return;
+    }
+    const chunks = Array.isArray(payload.chunks) ? payload.chunks : [];
+    const target = this.resolveChunkFromPayload(chunks, chunkId, docId);
+    if (!target) {
+      new Notice(`Chunk ${chunkId} not found in cache.`);
+      return;
+    }
+    const text = typeof target.text === "string" ? target.text : String(target.text ?? "");
+    const indexedText = await this.renderMarkdownToIndexText(text);
+    const note = this.settings.embedIncludeMetadata
+      ? "Note: metadata is prepended during embedding when enabled.\n\n"
+      : "";
+    new ChunkTextPreviewModal(
+      this.app,
+      `Indexed text for ${chunkId}`,
+      `${note}${indexedText}`
+    ).open();
+  }
+
+  private async renderMarkdownToIndexText(markdown: string): Promise<string> {
+    if (!markdown) {
+      return "";
+    }
+    const container = document.createElement("div");
+    try {
+      await MarkdownRenderer.renderMarkdown(markdown, container, "", this);
+    } catch (error) {
+      console.warn("Failed to render markdown for index preview", error);
+      return this.normalizeIndexPreviewText(markdown);
+    }
+    const html = container.innerHTML || "";
+    const withBreaks = html.replace(/<br\s*\/?>/gi, "\n");
+    const stripped = withBreaks.replace(/<[^>]+>/g, " ");
+    const decoder = document.createElement("textarea");
+    decoder.innerHTML = stripped;
+    const decoded = decoder.value || stripped;
+    return this.normalizeIndexPreviewText(decoded);
+  }
+
+  private normalizeIndexPreviewText(text: string): string {
+    return text
+      .replace(/[ \t]+/g, " ")
+      .replace(/\s*\n\s*/g, "\n")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   private scheduleNoteSync(file: TFile): void {
@@ -2700,6 +3207,8 @@ export default class ZoteroRagPlugin extends Plugin {
       const seen = new Set<string>();
       const updates = new Set<string>();
       const deletions = new Set<string>();
+      const removals = new Set<string>();
+      let payloadUpdated = false;
 
       for (const block of parsedBlocks) {
         const chunkId = block.chunkId;
@@ -2712,13 +3221,34 @@ export default class ZoteroRagPlugin extends Plugin {
           console.warn(`Sync note: chunk id not found in cache (${chunkId})`);
           continue;
         }
-        if (block.deleteFlag || !block.text.trim()) {
+        if (block.excludeFlag) {
+          if (existing.excluded !== true) {
+            existing.excluded = true;
+            payloadUpdated = true;
+          }
+          const normalized = this.normalizeChunkText(block.text);
+          if (normalized && normalized !== String(existing.text ?? "")) {
+            existing.text = normalized;
+            existing.char_count = normalized.length;
+            payloadUpdated = true;
+          }
           deletions.add(chunkId);
+          continue;
+        }
+        if (existing.excluded) {
+          existing.excluded = false;
+          payloadUpdated = true;
+          updates.add(chunkId);
+        }
+        if (!block.text.trim()) {
+          deletions.add(chunkId);
+          removals.add(chunkId);
           continue;
         }
         const normalized = this.normalizeChunkText(block.text);
         if (!normalized) {
           deletions.add(chunkId);
+          removals.add(chunkId);
           continue;
         }
         const currentText = typeof existing.text === "string" ? existing.text : String(existing.text ?? "");
@@ -2726,27 +3256,32 @@ export default class ZoteroRagPlugin extends Plugin {
           existing.text = normalized;
           existing.char_count = normalized.length;
           updates.add(chunkId);
+          payloadUpdated = true;
         }
       }
 
       for (const chunkId of chunkMap.keys()) {
         if (!seen.has(chunkId)) {
           deletions.add(chunkId);
+          removals.add(chunkId);
         }
       }
 
-      if (!updates.size && !deletions.size) {
+      if (!updates.size && !deletions.size && !removals.size && !payloadUpdated) {
         return;
       }
 
-      if (deletions.size) {
+      if (removals.size) {
         chunkPayload.chunks = chunks.filter((chunk) => {
           const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
-          return id && !deletions.has(id);
+          return id && !removals.has(id);
         });
+        payloadUpdated = true;
       }
 
-      await adapter.write(chunkPath, JSON.stringify(chunkPayload, null, 2));
+      if (payloadUpdated || removals.size) {
+        await adapter.write(chunkPath, JSON.stringify(chunkPayload, null, 2));
+      }
 
       await this.reindexChunkUpdates(
         docId,
@@ -2788,7 +3323,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const lines = section.split(/\r?\n/);
     const blocks: ParsedChunkBlock[] = [];
     let currentId = "";
-    let currentDelete = false;
+    let currentExclude = false;
     let currentLines: string[] = [];
 
     const flush = (): void => {
@@ -2798,10 +3333,10 @@ export default class ZoteroRagPlugin extends Plugin {
       blocks.push({
         chunkId: currentId,
         text: currentLines.join("\n").trim(),
-        deleteFlag: currentDelete,
+        excludeFlag: currentExclude,
       });
       currentId = "";
-      currentDelete = false;
+      currentExclude = false;
       currentLines = [];
     };
 
@@ -2816,7 +3351,7 @@ export default class ZoteroRagPlugin extends Plugin {
           continue;
         }
         currentId = chunkId;
-        currentDelete = /\bdelete\b/i.test(attrs);
+        currentExclude = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
         currentLines = [];
         continue;
       }
@@ -2827,8 +3362,8 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!currentId) {
         continue;
       }
-      if (ZRR_CHUNK_DELETE_RE.test(line)) {
-        currentDelete = true;
+      if (ZRR_CHUNK_EXCLUDE_ANY_RE.test(line)) {
+        currentExclude = true;
         continue;
       }
       currentLines.push(line);
@@ -2863,8 +3398,10 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!chunkId) {
         continue;
       }
+      const excluded = Boolean(chunk?.excluded || chunk?.exclude);
       const text = typeof chunk?.text === "string" ? chunk.text.trim() : "";
-      parts.push(`<!-- zrr:chunk id=${chunkId} -->`);
+      const attrs = excluded ? ` id=${chunkId} exclude` : ` id=${chunkId}`;
+      parts.push(`<!-- zrr:chunk${attrs} -->`);
       if (text) {
         parts.push(text);
       }
@@ -2886,6 +3423,22 @@ export default class ZoteroRagPlugin extends Plugin {
       console.warn("Failed to read cached chunks JSON", error);
       return null;
     }
+  }
+
+  private resolveChunkFromPayload(
+    chunks: Record<string, any>[],
+    chunkId: string,
+    docId: string
+  ): Record<string, any> | null {
+    const normalized = this.normalizeChunkIdForNote(chunkId, docId) || chunkId;
+    const candidates = new Set([chunkId, normalized, `${docId}:${chunkId}`]);
+    for (const chunk of chunks) {
+      const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+      if (id && candidates.has(id)) {
+        return chunk;
+      }
+    }
+    return null;
   }
 
   private async writeNoteWithSyncSuppressed(notePath: string, content: string): Promise<void> {
@@ -4002,6 +4555,11 @@ export default class ZoteroRagPlugin extends Plugin {
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
     let qualityLabel: string | null = null;
     let layeredPdfPath: string | null = null;
+    const registerRecreateProcess = (child: ChildProcess) => {
+      if (this.recreateMissingNotesActive) {
+        this.recreateMissingNotesProcess = child;
+      }
+    };
 
     try {
       qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf, doclingLanguageHint);
@@ -4019,8 +4577,10 @@ export default class ZoteroRagPlugin extends Plugin {
         ),
         (payload) => this.handleDoclingProgress(payload, qualityLabel),
         () => {},
-        doclingLogPath
+        doclingLogPath,
+        registerRecreateProcess
       );
+      this.recreateMissingNotesProcess = null;
       qualityLabel = await this.readDoclingQualityLabel(chunkPath);
       if (attachmentKey) {
         await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachmentKey);
@@ -4038,6 +4598,11 @@ export default class ZoteroRagPlugin extends Plugin {
         await this.updateChunkJsonSourcePdf(chunkPath, layeredPath);
       }
     } catch (error) {
+      if (this.recreateMissingNotesAbort) {
+        this.recreateMissingNotesProcess = null;
+        this.clearStatusProgress();
+        return false;
+      }
       if (showNotices) {
         new Notice("Docling extraction failed. See console for details.");
       }
@@ -4048,26 +4613,31 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
+      const indexArgs = [
+        "--chunks-json",
+        this.getAbsoluteVaultPath(chunkPath),
+        "--redis-url",
+        this.settings.redisUrl,
+        "--index",
+        this.getRedisIndexName(),
+        "--prefix",
+        this.getRedisKeyPrefix(),
+        "--embed-base-url",
+        this.settings.embedBaseUrl,
+        "--embed-api-key",
+        this.settings.embedApiKey,
+        "--embed-model",
+        this.settings.embedModel,
+        "--upsert",
+        "--progress",
+      ];
+      if (this.settings.embedIncludeMetadata) {
+        indexArgs.push("--embed-include-metadata");
+      }
+      this.appendChunkTaggingArgs(indexArgs);
       await this.runPythonStreaming(
         indexScript,
-        [
-          "--chunks-json",
-          this.getAbsoluteVaultPath(chunkPath),
-          "--redis-url",
-          this.settings.redisUrl,
-          "--index",
-          this.getRedisIndexName(),
-          "--prefix",
-          this.getRedisKeyPrefix(),
-          "--embed-base-url",
-          this.settings.embedBaseUrl,
-          "--embed-api-key",
-          this.settings.embedApiKey,
-          "--embed-model",
-          this.settings.embedModel,
-          "--upsert",
-          "--progress",
-        ],
+        indexArgs,
         (payload) => {
           if (payload?.type === "progress" && payload.total) {
             const percent = Math.round((payload.current / payload.total) * 100);
@@ -4082,9 +4652,17 @@ export default class ZoteroRagPlugin extends Plugin {
             this.showStatusProgress(label, percent);
           }
         },
-        () => undefined
+        () => undefined,
+        undefined,
+        registerRecreateProcess
       );
+      this.recreateMissingNotesProcess = null;
     } catch (error) {
+      if (this.recreateMissingNotesAbort) {
+        this.recreateMissingNotesProcess = null;
+        this.clearStatusProgress();
+        return false;
+      }
       if (showNotices) {
         new Notice("RedisSearch indexing failed. See console for details.");
       }
@@ -4101,11 +4679,12 @@ export default class ZoteroRagPlugin extends Plugin {
       const doclingMd = await this.app.vault.adapter.read(notePath);
       const updatedChunkPayload = await this.readChunkPayload(chunkPath);
       const doclingContent = this.buildSyncedDoclingContent(docId, updatedChunkPayload, doclingMd);
-      const noteContent = this.buildNoteMarkdown(
+      const noteContent = await this.buildNoteMarkdown(
         values,
         item.meta ?? {},
         docId,
         pdfLink,
+        attachmentKey,
         itemPath,
         doclingContent
       );
@@ -4145,6 +4724,271 @@ export default class ZoteroRagPlugin extends Plugin {
     return `users/${raw}`;
   }
 
+  async fetchZoteroLibraryOptions(): Promise<Array<{ value: string; label: string }>> {
+    const options: Array<{ value: string; label: string }> = [
+      { value: "0", label: "My Library (local)" },
+    ];
+    const groupOptions = await this.fetchZoteroGroupOptions();
+    if (groupOptions.length) {
+      options.push(...groupOptions);
+    }
+    return options;
+  }
+
+  async fetchEmbeddingModelOptions(): Promise<Array<{ value: string; label: string }>> {
+    const current = (this.settings.embedModel || "").trim();
+    const options: Array<{ value: string; label: string }> = [];
+    const baseUrl = (this.settings.embedBaseUrl || "").trim().replace(/\/$/, "");
+    if (!baseUrl) {
+      if (current) {
+        options.push({ value: current, label: current });
+      }
+      return options;
+    }
+    const apiKey = (this.settings.embedApiKey || "").trim();
+    const modelIds = await this.fetchModelIds(baseUrl, apiKey);
+    if (modelIds.length) {
+      const embeddingModels = modelIds.filter((id) => /embed/i.test(id));
+      const selected = embeddingModels.length ? embeddingModels : modelIds;
+      options.push(...selected.map((id) => ({ value: id, label: id })));
+    }
+    if (!options.length && current) {
+      options.push({ value: current, label: current });
+    }
+    return options.sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  async fetchChatModelOptions(): Promise<Array<{ value: string; label: string }>> {
+    return this.fetchLlmModelOptions(this.settings.chatBaseUrl, this.settings.chatApiKey, "chat");
+  }
+
+  async fetchCleanupModelOptions(): Promise<Array<{ value: string; label: string }>> {
+    return this.fetchLlmModelOptions(this.settings.llmCleanupBaseUrl, this.settings.llmCleanupApiKey, "cleanup");
+  }
+
+  private async fetchLlmModelOptions(
+    baseUrlRaw: string,
+    apiKeyRaw: string,
+    label: string
+  ): Promise<Array<{ value: string; label: string }>> {
+    const current = label === "cleanup"
+      ? (this.settings.llmCleanupModel || "").trim()
+      : (this.settings.chatModel || "").trim();
+    const options: Array<{ value: string; label: string }> = [];
+    const baseUrl = (baseUrlRaw || "").trim().replace(/\/$/, "");
+    if (!baseUrl) {
+      if (current) {
+        options.push({ value: current, label: current });
+      }
+      return options;
+    }
+    const apiKey = (apiKeyRaw || "").trim();
+    const modelIds = await this.fetchModelIds(baseUrl, apiKey);
+    if (modelIds.length) {
+      const nonEmbedding = modelIds.filter((id) => !/embed/i.test(id));
+      const selected = nonEmbedding.length ? nonEmbedding : modelIds;
+      options.push(...selected.map((id) => ({ value: id, label: id })));
+    }
+    if (!options.length && current) {
+      options.push({ value: current, label: current });
+    }
+    return options.sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  private detectEmbeddingProvider(baseUrl: string): "openai" | "openrouter" | "ollama" | "anthropic" | "generic" {
+    const lowered = baseUrl.toLowerCase();
+    if (lowered.includes("anthropic")) {
+      return "anthropic";
+    }
+    if (lowered.includes("openrouter")) {
+      return "openrouter";
+    }
+    if (lowered.includes("ollama") || lowered.includes(":11434")) {
+      return "ollama";
+    }
+    if (lowered.includes("openai")) {
+      return "openai";
+    }
+    return "generic";
+  }
+
+  private async fetchModelIds(baseUrl: string, apiKey: string): Promise<string[]> {
+    const provider = this.detectEmbeddingProvider(baseUrl);
+    try {
+      if (provider === "anthropic") {
+        return await this.fetchAnthropicModels(baseUrl, apiKey);
+      }
+      const modelIds = await this.fetchOpenAiCompatibleModels(baseUrl, apiKey);
+      if (!modelIds.length && provider === "ollama") {
+        return await this.fetchOllamaModels(baseUrl);
+      }
+      return modelIds;
+    } catch (error) {
+      console.warn("Failed to fetch models", error);
+      return [];
+    }
+  }
+
+  private async fetchOpenAiCompatibleModels(baseUrl: string, apiKey: string): Promise<string[]> {
+    const url = `${baseUrl}/models`;
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+    const response = await this.requestLocalApiRaw(url, { headers });
+    if (response.statusCode >= 400) {
+      throw new Error(`Model list request failed (${response.statusCode})`);
+    }
+    const parsed = JSON.parse(response.body.toString("utf8"));
+    return this.extractModelIds(parsed);
+  }
+
+  private async fetchOllamaModels(baseUrl: string): Promise<string[]> {
+    const root = baseUrl.replace(/\/v1\/?$/, "");
+    const url = `${root}/api/tags`;
+    const response = await this.requestLocalApiRaw(url);
+    if (response.statusCode >= 400) {
+      throw new Error(`Ollama tags request failed (${response.statusCode})`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response.body.toString("utf8"));
+    } catch (error) {
+      console.warn("Failed to parse Ollama tags response", error);
+      return [];
+    }
+    if (!parsed || typeof parsed !== "object") {
+      return [];
+    }
+    const list = (parsed as Record<string, unknown>).models;
+    if (!Array.isArray(list)) {
+      return [];
+    }
+    return list
+      .map((item) => this.extractModelId(item))
+      .filter((id): id is string => Boolean(id));
+  }
+
+  private async fetchAnthropicModels(baseUrl: string, apiKey: string): Promise<string[]> {
+    if (!apiKey) {
+      return [];
+    }
+    const url = `${baseUrl}/models`;
+    const headers: Record<string, string> = {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    };
+    const response = await this.requestLocalApiRaw(url, { headers });
+    if (response.statusCode >= 400) {
+      throw new Error(`Anthropic model list request failed (${response.statusCode})`);
+    }
+    const parsed = JSON.parse(response.body.toString("utf8"));
+    return this.extractModelIds(parsed);
+  }
+
+  private extractModelIds(payload: unknown): string[] {
+    if (Array.isArray(payload)) {
+      return payload.map((item) => this.extractModelId(item)).filter((id): id is string => Boolean(id));
+    }
+    if (!payload || typeof payload !== "object") {
+      return [];
+    }
+    const record = payload as Record<string, unknown>;
+    const list = (record.data ?? record.models ?? record.model ?? record.items) as unknown;
+    if (Array.isArray(list)) {
+      return list
+        .map((item) => this.extractModelId(item))
+        .filter((id): id is string => Boolean(id));
+    }
+    return [];
+  }
+
+  private extractModelId(entry: unknown): string | null {
+    if (!entry || typeof entry !== "object") {
+      return null;
+    }
+    const record = entry as Record<string, unknown>;
+    const idValue = record.id ?? record.name ?? record.model ?? record.identifier;
+    if (typeof idValue !== "string") {
+      return null;
+    }
+    const id = idValue.trim();
+    return id || null;
+  }
+
+  private async fetchZoteroGroupOptions(): Promise<Array<{ value: string; label: string }>> {
+    const options = new Map<string, string>();
+    const addOptions = (items: Array<{ value: string; label: string }>) => {
+      for (const option of items) {
+        if (!options.has(option.value)) {
+          options.set(option.value, option.label);
+        }
+      }
+    };
+
+    try {
+      const url = this.buildZoteroUrl("/users/0/groups");
+      const payload = await this.requestLocalApi(url, `Zotero groups fetch failed for ${url}`);
+      addOptions(this.parseZoteroGroupOptions(payload));
+    } catch (error) {
+      console.warn("Failed to fetch Zotero groups from local API", error);
+    }
+
+    if (this.canUseWebApi() && this.settings.webApiLibraryType === "user") {
+      const userId = (this.settings.webApiLibraryId || "").trim();
+      if (userId) {
+        try {
+          const url = this.buildWebApiUrl(`/users/${userId}/groups`);
+          const payload = await this.requestWebApi(url, `Zotero Web API groups fetch failed for ${url}`);
+          addOptions(this.parseZoteroGroupOptions(payload));
+        } catch (error) {
+          console.warn("Failed to fetch Zotero groups from Web API", error);
+        }
+      }
+    }
+
+    return Array.from(options.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  private parseZoteroGroupOptions(
+    payload: Buffer
+  ): Array<{ value: string; label: string }> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload.toString("utf8"));
+    } catch (error) {
+      console.warn("Failed to parse Zotero group payload", error);
+      return [];
+    }
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const options: Array<{ value: string; label: string }> = [];
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const record = (entry as { data?: Record<string, unknown> }).data ?? (entry as Record<string, unknown>);
+      const idValue = record.id ?? (entry as Record<string, unknown>).id ?? record.key;
+      if (!idValue) {
+        continue;
+      }
+      const id = String(idValue).trim();
+      if (!id) {
+        continue;
+      }
+      const nameValue = record.name ?? (entry as Record<string, unknown>).name ?? id;
+      const name = String(nameValue || id).trim() || id;
+      options.push({
+        value: `groups/${id}`,
+        label: `Group: ${name}`,
+      });
+    }
+    return options;
+  }
+
   private async ensureFolder(folderPath: string): Promise<void> {
     const adapter = this.app.vault.adapter;
     const parts = normalizePath(folderPath).split("/").filter(Boolean);
@@ -4157,44 +5001,57 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  private buildNoteMarkdown(
+  private async buildNoteMarkdown(
     values: ZoteroItemValues,
     meta: Record<string, any>,
     docId: string,
     pdfLink: string,
+    attachmentKey: string | undefined,
     itemPath: string,
     doclingMarkdown: string
-  ): string {
+  ): Promise<string> {
     const jsonLink = `[[${itemPath}]]`;
-    const frontmatter = this.renderFrontmatter(values, meta, docId, pdfLink, jsonLink);
+    const canEmbed = this.settings.copyPdfToVault && pdfLink.startsWith("[[");
+    const zoteroLink = attachmentKey ? this.buildZoteroDeepLink(docId, attachmentKey) : "";
+    const frontmatterPdfLink = zoteroLink || pdfLink;
+    const displayLink = canEmbed ? pdfLink : (zoteroLink || pdfLink);
+    const pdfLine = displayLink ? (canEmbed ? `PDF: !${displayLink}` : `PDF: ${displayLink}`) : "";
+    const pdfBlock = pdfLine ? `${pdfLine}\n\n` : "";
+    const frontmatter = await this.renderFrontmatter(
+      values,
+      meta,
+      docId,
+      frontmatterPdfLink,
+      jsonLink
+    );
     const frontmatterBlock = frontmatter ? `---\n${frontmatter}\n---\n\n` : "";
 
     //return `${frontmatterBlock}PDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;
-    return `${frontmatterBlock}PDF: !${pdfLink}\n\n${doclingMarkdown}`;
+    return `${frontmatterBlock}${pdfBlock}${doclingMarkdown}`;
   }
 
-  private renderFrontmatter(
+  private async renderFrontmatter(
     values: ZoteroItemValues,
     meta: Record<string, any>,
     docId: string,
     pdfLink: string,
     itemJsonLink: string
-  ): string {
+  ): Promise<string> {
     const template = this.settings.frontmatterTemplate ?? "";
     if (!template.trim()) {
       return "";
     }
-    const vars = this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
+    const vars = await this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
     return template.replace(/{{\s*([a-z0-9_]+)\s*}}/gi, (_, key) => vars[key] ?? "").trim();
   }
 
-  private buildTemplateVars(
+  private async buildTemplateVars(
     values: ZoteroItemValues,
     meta: Record<string, any>,
     docId: string,
     pdfLink: string,
     itemJsonLink: string
-  ): Record<string, string> {
+  ): Promise<Record<string, string>> {
     const title = typeof values.title === "string" ? values.title : "";
     const shortTitle = typeof values.shortTitle === "string" ? values.shortTitle : "";
     const date = typeof values.date === "string" ? values.date : "";
@@ -4203,12 +5060,32 @@ export default class ZoteroRagPlugin extends Plugin {
     const creators = Array.isArray(values.creators) ? values.creators : [];
     const authorsList = creators.filter((c) => c.creatorType === "author").map((c) => this.formatCreatorName(c));
     const authors = authorsList.join("; ");
+    const editorsList = creators
+      .filter((c) => c.creatorType === "editor" || c.creatorType === "seriesEditor")
+      .map((c) => this.formatCreatorName(c));
+    const editors = editorsList.join("; ");
     const tagsList = Array.isArray(values.tags)
       ? values.tags.map((tag: any) => (typeof tag === "string" ? tag : tag?.tag)).filter(Boolean)
       : [];
     const tags = tagsList.join("; ");
+    const collectionTitles = await this.resolveCollectionTitles(values);
+    const collectionTitle = collectionTitles.join("; ");
     const itemType = typeof values.itemType === "string" ? values.itemType : "";
     const creatorSummary = typeof meta?.creatorSummary === "string" ? meta.creatorSummary : "";
+    const publicationTitle = typeof values.publicationTitle === "string" ? values.publicationTitle : "";
+    const bookTitle = typeof values.bookTitle === "string" ? values.bookTitle : "";
+    const journalAbbrev = typeof values.journalAbbreviation === "string" ? values.journalAbbreviation : "";
+    const volume = typeof values.volume === "string" ? values.volume : "";
+    const issue = typeof values.issue === "string" ? values.issue : "";
+    const pages = typeof values.pages === "string" ? values.pages : "";
+    const doi = typeof values.DOI === "string" ? values.DOI : "";
+    const isbn = typeof values.ISBN === "string" ? values.ISBN : "";
+    const issn = typeof values.ISSN === "string" ? values.ISSN : "";
+    const publisher = typeof values.publisher === "string" ? values.publisher : "";
+    const place = typeof values.place === "string" ? values.place : "";
+    const url = typeof values.url === "string" ? values.url : "";
+    const language = typeof values.language === "string" ? values.language : "";
+    const abstractNote = typeof values.abstractNote === "string" ? values.abstractNote : "";
 
     const vars: Record<string, string> = {
       doc_id: docId,
@@ -4218,9 +5095,25 @@ export default class ZoteroRagPlugin extends Plugin {
       date,
       year,
       authors,
+      editors,
       tags,
+      collection_title: collectionTitle,
       item_type: itemType,
       creator_summary: creatorSummary,
+      publication_title: publicationTitle,
+      book_title: bookTitle,
+      journal_abbrev: journalAbbrev,
+      volume,
+      issue,
+      pages,
+      doi,
+      isbn,
+      issn,
+      publisher,
+      place,
+      url,
+      language,
+      abstract: abstractNote,
       pdf_link: this.escapeYamlString(pdfLink),
       item_json: this.escapeYamlString(itemJsonLink),
     };
@@ -4230,7 +5123,9 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     vars["authors_yaml"] = this.toYamlList(authorsList);
+    vars["editors_yaml"] = this.toYamlList(editorsList);
     vars["tags_yaml"] = this.toYamlList(tagsList);
+    vars["collections_yaml"] = this.toYamlList(collectionTitles);
 
     return vars;
   }
@@ -4257,7 +5152,11 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private escapeYamlString(value: string): string {
-    const safe = String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const normalized = String(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const safe = normalized
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n");
     return `"${safe}"`;
   }
 
@@ -4396,9 +5295,6 @@ export default class ZoteroRagPlugin extends Plugin {
     if (this.settings.chunkOverlapChars > 0) {
       args.push("--chunk-overlap-chars", String(this.settings.chunkOverlapChars));
     }
-    if (!this.settings.removeImagePlaceholders) {
-      args.push("--keep-image-tags");
-    }
     if (this.settings.enableLlmCleanup) {
       args.push("--enable-llm-cleanup");
       if (this.settings.llmCleanupBaseUrl) {
@@ -4433,6 +5329,23 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     return args;
+  }
+
+  private appendChunkTaggingArgs(args: string[]): void {
+    if (!this.settings.enableChunkTagging) {
+      return;
+    }
+    const baseUrl = (this.settings.llmCleanupBaseUrl || "").trim();
+    const model = (this.settings.llmCleanupModel || "").trim();
+    if (!baseUrl || !model) {
+      return;
+    }
+    args.push("--generate-chunk-tags", "--tag-base-url", baseUrl, "--tag-model", model);
+    const apiKey = (this.settings.llmCleanupApiKey || "").trim();
+    if (apiKey) {
+      args.push("--tag-api-key", apiKey);
+    }
+    args.push("--tag-temperature", String(this.settings.llmCleanupTemperature));
   }
 
   private getRedisDataDir(): string {
@@ -5237,13 +6150,17 @@ export default class ZoteroRagPlugin extends Plugin {
     args: string[],
     onPayload: (payload: any) => void,
     onFallbackFinal: (payload: any) => void,
-    stderrLogPath?: string | null
+    stderrLogPath?: string | null,
+    onSpawn?: (child: ChildProcess) => void
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
         env: this.buildPythonEnv(),
       });
+      if (onSpawn) {
+        onSpawn(child);
+      }
 
       let stdoutBuffer = "";
       let stderr = "";

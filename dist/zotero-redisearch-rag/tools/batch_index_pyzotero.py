@@ -63,6 +63,7 @@ def main() -> int:
     parser.add_argument("--embed-base-url", required=True)
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)
+    parser.add_argument("--embed-include-metadata", action="store_true")
     parser.add_argument("--out-dir", default="./data")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
@@ -164,25 +165,25 @@ def main() -> int:
             continue
 
         try:
-            run_script(
-                index_script,
-                [
-                    "--chunks-json",
-                    str(chunk_path),
-                    "--redis-url",
-                    args.redis_url,
-                    "--index",
-                    args.index,
-                    "--prefix",
-                    args.prefix,
-                    "--embed-base-url",
-                    args.embed_base_url,
-                    "--embed-api-key",
-                    args.embed_api_key,
-                    "--embed-model",
-                    args.embed_model,
-                ],
-            )
+            index_args = [
+                "--chunks-json",
+                str(chunk_path),
+                "--redis-url",
+                args.redis_url,
+                "--index",
+                args.index,
+                "--prefix",
+                args.prefix,
+                "--embed-base-url",
+                args.embed_base_url,
+                "--embed-api-key",
+                args.embed_api_key,
+                "--embed-model",
+                args.embed_model,
+            ]
+            if args.embed_include_metadata:
+                index_args.append("--embed-include-metadata")
+            run_script(index_script, index_args)
         except Exception as exc:
             errors.append(f"{doc_id}: redis index failed ({exc})")
             continue

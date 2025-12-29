@@ -5,10 +5,11 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
 import redis
+import requests
 
 
 def eprint(message: str) -> None:
@@ -50,6 +51,10 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         "TAG",
         "SEPARATOR",
         "|",
+        "chunk_tags",
+        "TAG",
+        "SEPARATOR",
+        "|",
         "year",
         "NUMERIC",
         "item_type",
@@ -85,6 +90,7 @@ def ensure_schema_fields(client: redis.Redis, index_name: str) -> None:
         ("title", ["TEXT"]),
         ("authors", ["TAG", "SEPARATOR", "|"]),
         ("tags", ["TAG", "SEPARATOR", "|"]),
+        ("chunk_tags", ["TAG", "SEPARATOR", "|"]),
         ("year", ["NUMERIC"]),
         ("item_type", ["TAG", "SEPARATOR", "|"]),
     ]
@@ -201,6 +207,153 @@ def normalize_index_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def normalize_meta_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return ", ".join(cleaned)
+    text = str(value).strip()
+    if not text:
+        return ""
+    return text.replace("|", ", ")
+
+
+def is_chunk_excluded(chunk: Dict[str, Any]) -> bool:
+    value = chunk.get("excluded")
+    if value is None:
+        value = chunk.get("exclude")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "exclude", "excluded"}
+    return False
+
+
+def build_embedding_text(
+    text: str,
+    chunk: Dict[str, Any],
+    item_metadata: Dict[str, Any],
+) -> str:
+    parts: List[str] = []
+    title = normalize_meta_value(item_metadata.get("title", ""))
+    if title:
+        parts.append(f"Title: {title}")
+    authors = normalize_meta_value(item_metadata.get("authors", ""))
+    if authors:
+        parts.append(f"Authors: {authors}")
+    tags = normalize_meta_value(item_metadata.get("tags", ""))
+    if tags:
+        parts.append(f"Tags: {tags}")
+    year = item_metadata.get("year")
+    if isinstance(year, (int, float)) and int(year) > 0:
+        parts.append(f"Year: {int(year)}")
+    item_type = normalize_meta_value(item_metadata.get("item_type", ""))
+    if item_type:
+        parts.append(f"Item type: {item_type}")
+    section = normalize_meta_value(chunk.get("section", ""))
+    if section:
+        parts.append(f"Section: {section}")
+    chunk_tags = normalize_meta_value(chunk.get("chunk_tags", ""))
+    if chunk_tags:
+        parts.append(f"Chunk tags: {chunk_tags}")
+    page_start = chunk.get("page_start")
+    page_end = chunk.get("page_end")
+    if isinstance(page_start, (int, float)) and isinstance(page_end, (int, float)):
+        parts.append(f"Pages: {int(page_start)}-{int(page_end)}")
+    if not parts:
+        return text
+    return "\n".join(parts) + "\n\n" + text
+
+
+def normalize_tag(tag: str) -> str:
+    cleaned = tag.strip()
+    cleaned = cleaned.strip("-,;:•")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def parse_tag_payload(content: str) -> List[str]:
+    if not content:
+        return []
+    raw = content.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [normalize_tag(str(item)) for item in parsed if normalize_tag(str(item))]
+        except Exception:
+            pass
+    parts = re.split(r"[,;\n]+", raw)
+    tags: List[str] = []
+    for part in parts:
+        cleaned = normalize_tag(part)
+        if cleaned:
+            tags.append(cleaned)
+    return tags
+
+
+def request_chunk_tags(
+    base_url: str,
+    api_key: str,
+    model: str,
+    text: str,
+    max_tags: int,
+    temperature: float,
+) -> List[str]:
+    if not base_url or not model:
+        return []
+    snippet = text.strip()
+    if len(snippet) > 2000:
+        snippet = snippet[:2000]
+    if not snippet:
+        return []
+    url = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    system_prompt = (
+        "Return 5 to {max_tags} short tags describing the text. "
+        "Output comma-separated tags only. No extra text."
+    ).format(max_tags=max_tags)
+    payload = {
+        "model": model,
+        "temperature": temperature,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": snippet},
+        ],
+    }
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Tag request failed: {response.status_code} {response.text}")
+    data = response.json()
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+    tags = parse_tag_payload(str(content))
+    deduped: List[str] = []
+    seen = set()
+    for tag in tags:
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tag)
+        if len(deduped) >= max_tags:
+            break
+    return deduped
+
+
+def tags_to_pipe(tags: Sequence[str]) -> str:
+    cleaned = [normalize_tag(tag) for tag in tags if normalize_tag(tag)]
+    return "|".join(cleaned)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Index Docling chunks into RedisSearch.")
     parser.add_argument("--chunks-json", required=True)
@@ -211,6 +364,21 @@ def main() -> int:
     parser.add_argument("--embed-base-url", required=True)
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)
+    parser.add_argument(
+        "--embed-include-metadata",
+        action="store_true",
+        help="Include title/authors/tags/section metadata in the embedding text",
+    )
+    parser.add_argument(
+        "--generate-chunk-tags",
+        action="store_true",
+        help="Generate short tags per chunk using the LLM cleanup model",
+    )
+    parser.add_argument("--tag-base-url", default="")
+    parser.add_argument("--tag-api-key", default="")
+    parser.add_argument("--tag-model", default="")
+    parser.add_argument("--tag-temperature", type=float, default=0.2)
+    parser.add_argument("--tag-max", type=int, default=8)
     parser.add_argument("--upsert", action="store_true")
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--chunk-ids", help="Comma-separated chunk IDs to index")
@@ -238,6 +406,18 @@ def main() -> int:
 
     chunk_id_filter = set(parse_chunk_id_list(args.chunk_ids, doc_id))
     delete_ids = set(parse_chunk_id_list(args.delete_chunk_ids, doc_id))
+    excluded_ids: Set[str] = set()
+    for chunk in chunks:
+        chunk_id = chunk.get("chunk_id")
+        if not chunk_id:
+            continue
+        chunk_id = str(chunk_id)
+        if doc_id and chunk_id.startswith(f"{doc_id}:"):
+            chunk_id = chunk_id.split(":", 1)[1]
+        if is_chunk_excluded(chunk):
+            excluded_ids.add(chunk_id)
+    if excluded_ids:
+        delete_ids |= excluded_ids
     incremental = bool(chunk_id_filter or delete_ids)
 
     attachment_key = None
@@ -296,6 +476,8 @@ def main() -> int:
 
     valid_chunks = []
     for chunk in chunks:
+        if is_chunk_excluded(chunk):
+            continue
         raw_text = str(chunk.get("text", ""))
         text = normalize_index_text(markdown_to_text(raw_text))
         if not text.strip():
@@ -312,12 +494,36 @@ def main() -> int:
 
     total = len(valid_chunks)
     current = 0
+    updated_chunks = False
 
     for chunk in valid_chunks:
         current += 1
         raw_text = str(chunk.get("text", ""))
         text = normalize_index_text(markdown_to_text(raw_text))
         chunk_id = chunk.get("chunk_id")
+        chunk_tags_value = ""
+        existing_tags = chunk.get("chunk_tags")
+        if isinstance(existing_tags, (list, tuple)):
+            chunk_tags_value = tags_to_pipe([str(tag) for tag in existing_tags])
+        elif isinstance(existing_tags, str) and existing_tags.strip():
+            chunk_tags_value = existing_tags.strip()
+        if args.generate_chunk_tags and args.tag_base_url and args.tag_model:
+            try:
+                tags = request_chunk_tags(
+                    args.tag_base_url,
+                    args.tag_api_key,
+                    args.tag_model,
+                    text,
+                    args.tag_max,
+                    args.tag_temperature,
+                )
+                if tags:
+                    chunk_tags_value = tags_to_pipe(tags)
+                    if chunk.get("chunk_tags") != tags:
+                        chunk["chunk_tags"] = tags
+                        updated_chunks = True
+            except Exception as exc:
+                eprint(f"Tagging failed for chunk {chunk_id}: {exc}")
 
         stable_chunk_id = f"{doc_id}:{chunk_id}"
         key = f"{args.prefix}{stable_chunk_id}"
@@ -339,7 +545,17 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-            embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, text)
+            embedding_text = (
+                build_embedding_text(text, chunk, item_metadata)
+                if args.embed_include_metadata
+                else text
+            )
+            embedding = request_embedding(
+                args.embed_base_url,
+                args.embed_api_key,
+                args.embed_model,
+                embedding_text,
+            )
             if len(embedding) != 768:
                 raise RuntimeError(f"Embedding dim mismatch: {len(embedding)}")
             embedding = normalize_vector(embedding)
@@ -354,6 +570,7 @@ def main() -> int:
             "title": str(item_metadata.get("title", "")),
             "authors": str(item_metadata.get("authors", "")),
             "tags": str(item_metadata.get("tags", "")),
+            "chunk_tags": str(chunk_tags_value),
             "year": int(item_metadata.get("year", 0)),
             "item_type": str(item_metadata.get("item_type", "")),
             "source_pdf": str(payload.get("source_pdf", "")),
@@ -383,6 +600,13 @@ def main() -> int:
                 ),
                 flush=True,
             )
+
+    if updated_chunks:
+        try:
+            with open(args.chunks_json, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception as exc:
+            eprint(f"Failed to write updated chunks JSON: {exc}")
 
     return 0
 

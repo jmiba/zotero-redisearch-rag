@@ -235,3 +235,30 @@
     transform: translateX(120%);
   }
 }
+
+.zrr-chunk-toolbar {
+  display: inline-flex;
+  gap: 0.4rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+  padding: 2px 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.zrr-chunk-button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 0 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.zrr-chunk-button:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
