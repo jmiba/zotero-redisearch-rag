@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+- Hoverbar now shows Lucide icons and tooltips on all buttons.
+- Hoverbar: clean-chunk and open-in-Zotero actions added.
+- Chunk cleanup progress is now surfaced in the status bar.
+- Frontmatter no longer emits empty tag entries when Zotero has no tags.
+
 ## 0.3.1
 - Improved Python error handling and auto-opened Settings for environment fixes.
 - Frontmatter `pdf_link` now stores raw Zotero deeplinks (no markdown wrapper).

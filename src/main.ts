@@ -11,6 +11,7 @@ import {
   TFile,
   WorkspaceLeaf,
   addIcon,
+  setIcon,
   normalizePath,
 } from "obsidian";
 import { EditorState, RangeSetBuilder, Text } from "@codemirror/state";
@@ -395,11 +396,40 @@ class ChunkToolsWidget extends WidgetType {
     wrap.className = "zrr-chunk-toolbar";
     wrap.setAttribute("data-chunk-id", this.chunkId);
 
+    const applyTooltip = (el: HTMLElement, text: string): void => {
+      el.setAttribute("title", text);
+      el.setAttribute("aria-label", text);
+      el.setAttribute("data-tooltip-position", "top");
+    };
+
+    const applyButtonIcon = (button: HTMLButtonElement, iconName: string, label: string): void => {
+      const iconEl = document.createElement("span");
+      iconEl.className = "zrr-chunk-button-icon";
+      setIcon(iconEl, iconName);
+      const textEl = document.createElement("span");
+      textEl.className = "zrr-chunk-button-label";
+      textEl.textContent = label;
+      button.appendChild(iconEl);
+      button.appendChild(textEl);
+    };
+
+    const clean = document.createElement("button");
+    clean.type = "button";
+    clean.className = "zrr-chunk-button";
+    applyButtonIcon(clean, "sparkles", "Clean");
+    applyTooltip(clean, "Clean this chunk with the OCR cleanup model");
+    clean.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.cleanChunkFromToolbar(this.startLine);
+    });
+    wrap.appendChild(clean);
+
     const tags = document.createElement("button");
     tags.type = "button";
     tags.className = "zrr-chunk-button";
-    tags.textContent = "Tags";
-    tags.title = "Edit chunk tags";
+    applyButtonIcon(tags, "tag", "Tags");
+    applyTooltip(tags, "Edit chunk tags");
     tags.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -410,8 +440,8 @@ class ChunkToolsWidget extends WidgetType {
     const preview = document.createElement("button");
     preview.type = "button";
     preview.className = "zrr-chunk-button";
-    preview.textContent = "Indexed";
-    preview.title = "Preview indexed chunk text";
+    applyButtonIcon(preview, "search", "Indexed");
+    applyTooltip(preview, "Preview indexed chunk text");
     preview.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -419,11 +449,28 @@ class ChunkToolsWidget extends WidgetType {
     });
     wrap.appendChild(preview);
 
+    const zotero = document.createElement("button");
+    zotero.type = "button";
+    zotero.className = "zrr-chunk-button";
+    applyButtonIcon(zotero, "external-link", "Zotero");
+    applyTooltip(zotero, "Open this page in Zotero");
+    zotero.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.plugin.openChunkInZotero(this.docId, this.chunkId);
+    });
+    wrap.appendChild(zotero);
+
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "zrr-chunk-button";
-    toggle.textContent = this.excluded ? "Include" : "Exclude";
-    toggle.title = this.excluded ? "Include this chunk in the index" : "Exclude this chunk from the index";
+    const toggleLabel = this.excluded ? "Include" : "Exclude";
+    const toggleIcon = this.excluded ? "check" : "ban";
+    applyButtonIcon(toggle, toggleIcon, toggleLabel);
+    applyTooltip(
+      toggle,
+      this.excluded ? "Include this chunk in the index" : "Exclude this chunk from the index"
+    );
     toggle.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -3080,6 +3127,144 @@ export default class ZoteroRagPlugin extends Plugin {
     ).open();
   }
 
+  public async openChunkInZotero(docId: string, chunkId: string): Promise<void> {
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const adapter = this.app.vault.adapter;
+    let payload: Record<string, any> | null = null;
+    if (await adapter.exists(chunkPath)) {
+      payload = await this.readChunkPayload(chunkPath);
+    }
+    const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
+    const target = this.resolveChunkFromPayload(chunks, chunkId, docId);
+    const pageStart = target?.page_start ?? target?.pageStart;
+    let attachmentKey =
+      payload?.metadata?.attachment_key ?? payload?.metadata?.attachmentKey ?? "";
+    if (!attachmentKey) {
+      const entry = await this.getDocIndexEntry(docId);
+      attachmentKey = entry?.attachment_key ?? "";
+    }
+    if (!attachmentKey) {
+      new Notice("Attachment key not found for Zotero deeplink.");
+      return;
+    }
+    const page = typeof pageStart === "number" ? String(pageStart) : "";
+    const url = this.buildZoteroDeepLink(docId, attachmentKey, page);
+    this.openExternalUrl(url);
+  }
+
+  public async cleanChunkFromToolbar(startLine: number): Promise<void> {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      new Notice("No active editor found.");
+      return;
+    }
+    const editor = view.editor;
+    const line = Math.max(0, startLine - 1);
+    const chunk = this.findChunkAtCursor(editor, line);
+    if (!chunk) {
+      new Notice("No synced chunk found at cursor.");
+      return;
+    }
+    const textLines: string[] = [];
+    for (let idx = chunk.startLine + 1; idx < chunk.endLine; idx += 1) {
+      textLines.push(editor.getLine(idx));
+    }
+    const rawText = textLines.join("\n").trim();
+    if (!rawText) {
+      new Notice("Chunk has no text to clean.");
+      return;
+    }
+    this.showStatusProgress("Cleaning chunk...", null);
+    let cleaned: string | null = null;
+    try {
+      cleaned = await this.requestOcrCleanup(rawText);
+    } finally {
+      if (!cleaned) {
+        this.clearStatusProgress();
+      }
+    }
+    if (!cleaned) {
+      return;
+    }
+    if (cleaned.trim() === rawText.trim()) {
+      new Notice("Cleanup produced no changes.");
+      this.clearStatusProgress();
+      return;
+    }
+    const insert = `${cleaned.trim()}\n`;
+    editor.replaceRange(
+      insert,
+      { line: chunk.startLine + 1, ch: 0 },
+      { line: chunk.endLine, ch: 0 }
+    );
+    this.showStatusProgress("Chunk cleaned.", 100);
+    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    new Notice("Chunk cleaned.");
+  }
+
+  private async requestOcrCleanup(text: string): Promise<string | null> {
+    const baseUrl = (this.settings.llmCleanupBaseUrl || "").trim().replace(/\/$/, "");
+    const model = (this.settings.llmCleanupModel || "").trim();
+    if (!baseUrl || !model) {
+      new Notice("OCR cleanup model is not configured.");
+      this.openPluginSettings();
+      return null;
+    }
+    const maxChars = Number(this.settings.llmCleanupMaxChars || 0);
+    if (maxChars > 0 && text.length > maxChars) {
+      new Notice("Chunk exceeds OCR cleanup max length. Adjust settings to clean it.");
+      this.openPluginSettings();
+      return null;
+    }
+    const endpoint = `${baseUrl}/chat/completions`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    const apiKey = (this.settings.llmCleanupApiKey || "").trim();
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+    const payload = {
+      model,
+      temperature: Number(this.settings.llmCleanupTemperature ?? 0),
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. Do not add content. Return corrected text only.",
+        },
+        { role: "user", content: text },
+      ],
+    };
+    try {
+      const response = await this.requestLocalApiRaw(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (response.statusCode >= 400) {
+        const details = response.body.toString("utf8");
+        throw new Error(`Cleanup request failed (${response.statusCode}): ${details || "no response body"}`);
+      }
+      const data = JSON.parse(response.body.toString("utf8"));
+      const content =
+        data?.choices?.[0]?.message?.content ??
+        data?.choices?.[0]?.text ??
+        data?.output_text ??
+        "";
+      const cleaned = String(content || "").trim();
+      if (!cleaned) {
+        new Notice("Cleanup returned empty text.");
+        return null;
+      }
+      return cleaned;
+    } catch (error) {
+      console.error("OCR cleanup failed", error);
+      new Notice("OCR cleanup failed. Check the cleanup model settings.");
+      return null;
+    }
+  }
+
   private async renderMarkdownToIndexText(markdown: string): Promise<string> {
     if (!markdown) {
       return "";
@@ -5124,7 +5309,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     vars["authors_yaml"] = this.toYamlList(authorsList);
     vars["editors_yaml"] = this.toYamlList(editorsList);
-    vars["tags_yaml"] = this.toYamlList(tagsList);
+    vars["tags_yaml"] = tagsList.length > 0 ? this.toYamlList(tagsList) : "";
     vars["collections_yaml"] = this.toYamlList(collectionTitles);
 
     return vars;
