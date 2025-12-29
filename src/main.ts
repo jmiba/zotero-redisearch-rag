@@ -5694,9 +5694,9 @@ export default class ZoteroRagPlugin extends Plugin {
     pdfLink: string,
     itemJsonLink: string
   ): Promise<Record<string, string>> {
-    const title = typeof values.title === "string" ? values.title : "";
-    let shortTitle = typeof values.shortTitle === "string" ? values.shortTitle : "";
-    const date = typeof values.date === "string" ? values.date : "";
+    const title = this.coerceString(values.title);
+    let shortTitle = this.coerceString(values.shortTitle);
+    const date = this.coerceString(values.date);
     const parsedDate = typeof meta?.parsedDate === "string" ? meta.parsedDate : "";
     const year = this.extractYear(parsedDate || date);
     const yearNumber = /^\d{4}$/.test(year) ? year : "";
@@ -5716,16 +5716,16 @@ export default class ZoteroRagPlugin extends Plugin {
     const collectionTitle = collectionTitles.join("; ");
     const collectionLinks = this.toObsidianLinks(collectionTitles);
     const collectionLinksText = collectionLinks.join("; ");
-    const itemType = typeof values.itemType === "string" ? values.itemType : "";
+    const itemType = this.coerceString(values.itemType);
     const creatorSummary = typeof meta?.creatorSummary === "string" ? meta.creatorSummary : "";
-    const publicationTitle = typeof values.publicationTitle === "string" ? values.publicationTitle : "";
-    const bookTitle = typeof values.bookTitle === "string" ? values.bookTitle : "";
-    const journalAbbrev = typeof values.journalAbbreviation === "string" ? values.journalAbbreviation : "";
-    const volume = typeof values.volume === "string" ? values.volume : "";
-    const issue = typeof values.issue === "string" ? values.issue : "";
-    const pages = typeof values.pages === "string" ? values.pages : "";
+    const publicationTitle = this.coerceString(values.publicationTitle);
+    const bookTitle = this.coerceString(values.bookTitle);
+    const journalAbbrev = this.coerceString(values.journalAbbreviation);
+    const volume = this.coerceString(values.volume);
+    const issue = this.coerceString(values.issue);
+    const pages = this.coerceString(values.pages);
     const itemKey = typeof values.key === "string" ? values.key : docId;
-    let doi = typeof values.DOI === "string" ? values.DOI : "";
+    let doi = this.coerceString(values.DOI);
     if (!doi) {
       doi = this.extractDoiFromExtra(values);
     }
@@ -5739,13 +5739,13 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!shortTitle) {
       shortTitle = this.extractShortTitleFromCsl(csl);
     }
-    const isbn = typeof values.ISBN === "string" ? values.ISBN : "";
-    const issn = typeof values.ISSN === "string" ? values.ISSN : "";
-    const publisher = typeof values.publisher === "string" ? values.publisher : "";
-    const place = typeof values.place === "string" ? values.place : "";
-    const url = typeof values.url === "string" ? values.url : "";
-    const language = typeof values.language === "string" ? values.language : "";
-    const abstractNote = typeof values.abstractNote === "string" ? values.abstractNote : "";
+    const isbn = this.coerceString(values.ISBN);
+    const issn = this.coerceString(values.ISSN);
+    const publisher = this.coerceString(values.publisher);
+    const place = this.coerceString(values.place);
+    const url = this.coerceString(values.url);
+    const language = this.coerceString(values.language);
+    const abstractNote = this.coerceString(values.abstractNote);
     const citekey = this.extractCitekey(values, meta);
     const itemLink = this.buildZoteroDeepLink(itemKey);
     const aliasesList = Array.from(
@@ -5855,8 +5855,9 @@ export default class ZoteroRagPlugin extends Plugin {
       values.betterbibtexkey,
     ];
     for (const candidate of candidates) {
-      if (typeof candidate === "string" && candidate.trim()) {
-        return candidate.trim();
+      const resolved = this.coerceString(candidate);
+      if (resolved) {
+        return resolved;
       }
     }
     const extra = typeof values.extra === "string" ? values.extra : "";
@@ -5904,6 +5905,35 @@ export default class ZoteroRagPlugin extends Plugin {
     const doi = csl.DOI ?? csl.doi;
     if (typeof doi === "string") {
       return doi.trim().replace(/[.,;]+$/, "");
+    }
+    return "";
+  }
+
+  private coerceString(value: unknown): string {
+    if (typeof value === "string") {
+      return value.trim();
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (typeof entry === "string" && entry.trim()) {
+          return entry.trim();
+        }
+        if (typeof entry === "number" && Number.isFinite(entry)) {
+          return String(entry);
+        }
+      }
+    }
+    if (value && typeof value === "object") {
+      const first = (value as { 0?: unknown })[0];
+      if (typeof first === "string" && first.trim()) {
+        return first.trim();
+      }
+      if (typeof first === "number" && Number.isFinite(first)) {
+        return String(first);
+      }
     }
     return "";
   }
