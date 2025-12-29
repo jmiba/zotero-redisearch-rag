@@ -315,7 +315,9 @@ def request_chunk_tags(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     system_prompt = (
-        "Return 5 to {max_tags} short tags describing the text. "
+        "Return 3 to {max_tags} high-signal, concrete noun-phrase tags. "
+        "Avoid generic terms (study, paper, method), verbs, and filler. "
+        "Prefer specific entities, methods, datasets, and named concepts. "
         "Output comma-separated tags only. No extra text."
     ).format(max_tags=max_tags)
     payload = {
@@ -378,7 +380,7 @@ def main() -> int:
     parser.add_argument("--tag-api-key", default="")
     parser.add_argument("--tag-model", default="")
     parser.add_argument("--tag-temperature", type=float, default=0.2)
-    parser.add_argument("--tag-max", type=int, default=8)
+    parser.add_argument("--tag-max", type=int, default=5)
     parser.add_argument("--upsert", action="store_true")
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--chunk-ids", help="Comma-separated chunk IDs to index")
@@ -503,11 +505,16 @@ def main() -> int:
         chunk_id = chunk.get("chunk_id")
         chunk_tags_value = ""
         existing_tags = chunk.get("chunk_tags")
+        has_existing_tags = False
         if isinstance(existing_tags, (list, tuple)):
-            chunk_tags_value = tags_to_pipe([str(tag) for tag in existing_tags])
+            cleaned = [normalize_tag(str(tag)) for tag in existing_tags if normalize_tag(str(tag))]
+            if cleaned:
+                chunk_tags_value = tags_to_pipe(cleaned)
+                has_existing_tags = True
         elif isinstance(existing_tags, str) and existing_tags.strip():
             chunk_tags_value = existing_tags.strip()
-        if args.generate_chunk_tags and args.tag_base_url and args.tag_model:
+            has_existing_tags = True
+        if args.generate_chunk_tags and args.tag_base_url and args.tag_model and not has_existing_tags:
             try:
                 tags = request_chunk_tags(
                     args.tag_base_url,

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3
+- Tag-aware retrieval boosting and tag regeneration in the chunk editor.
+- Tag sanitization options for Obsidian (replace spaces or camelCase).
+- Note body template is now editable (with PDF/docling placeholders).
+- Frontmatter template: clarified YAML-safe suffixes and added item link/citekey defaults.
+- Fix: Chat title generation avoids incompatible OpenAI calls.
+
 ## 0.3.2
 - Hoverbar now shows Lucide icons and tooltips on all buttons.
 - Hoverbar: clean-chunk and open-in-Zotero actions added.

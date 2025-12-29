@@ -172,12 +172,20 @@ class ChunkTagModal extends Modal {
   private chunkId: string;
   private initialTags: string[];
   private onSubmit: (tags: string[]) => void;
+  private onRegenerate?: () => Promise<string[] | null>;
 
-  constructor(app: App, chunkId: string, initialTags: string[], onSubmit: (tags: string[]) => void) {
+  constructor(
+    app: App,
+    chunkId: string,
+    initialTags: string[],
+    onSubmit: (tags: string[]) => void,
+    onRegenerate?: () => Promise<string[] | null>
+  ) {
     super(app);
     this.chunkId = chunkId;
     this.initialTags = initialTags;
     this.onSubmit = onSubmit;
+    this.onRegenerate = onRegenerate;
   }
 
   onOpen(): void {
@@ -193,8 +201,12 @@ class ChunkTagModal extends Modal {
     input.value = this.initialTags.join(", ");
     input.focus();
 
-    const submit = contentEl.createEl("button", { text: "Save tags" });
-    submit.style.marginTop = "0.75rem";
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+
+    const submit = actions.createEl("button", { text: "Save tags" });
 
     const handleSubmit = (): void => {
       const raw = input.value || "";
@@ -206,6 +218,25 @@ class ChunkTagModal extends Modal {
       this.close();
       this.onSubmit(unique);
     };
+
+    if (this.onRegenerate) {
+      const regenerate = actions.createEl("button", { text: "Regenerate" });
+      regenerate.addEventListener("click", async () => {
+        regenerate.setAttribute("disabled", "true");
+        submit.setAttribute("disabled", "true");
+        try {
+          const tags = await this.onRegenerate?.();
+          if (tags && tags.length > 0) {
+            input.value = tags.join(", ");
+          } else if (tags) {
+            new Notice("No tags were generated.");
+          }
+        } finally {
+          regenerate.removeAttribute("disabled");
+          submit.removeAttribute("disabled");
+        }
+      });
+    }
 
     submit.addEventListener("click", handleSubmit);
     input.addEventListener("keydown", (event) => {
@@ -1547,8 +1578,18 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!baseUrl || !model) {
       return null;
     }
+    const normalizedBase = baseUrl.replace(/\/$/, "");
+    const isOpenAi = normalizedBase.toLowerCase().includes("api.openai.com");
+    if (isOpenAi) {
+      if (!this.settings.chatApiKey) {
+        return null;
+      }
+      if (model.includes("/")) {
+        return null;
+      }
+    }
     try {
-      const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+      const url = `${normalizedBase}/chat/completions`;
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (this.settings.chatApiKey) {
         headers["Authorization"] = `Bearer ${this.settings.chatApiKey}`;
@@ -3085,16 +3126,30 @@ export default class ZoteroRagPlugin extends Plugin {
           .split(/[|,;\n]+/)
           .map((tag) => tag.trim())
           .filter((tag) => tag);
-    new ChunkTagModal(this.app, chunkId, initialTags, async (tags) => {
-      if (tags.length > 0) {
-        target.chunk_tags = tags;
-      } else {
-        delete target.chunk_tags;
+    const chunkText = typeof target.text === "string" ? target.text : String(target.text ?? "");
+    new ChunkTagModal(
+      this.app,
+      chunkId,
+      initialTags,
+      async (tags) => {
+        if (tags.length > 0) {
+          target.chunk_tags = tags;
+        } else {
+          delete target.chunk_tags;
+        }
+        await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+        await this.reindexChunkUpdates(docId, chunkPath, [String(target.chunk_id || chunkId)], []);
+        new Notice("Chunk tags updated.");
+      },
+      async () => {
+        if (!chunkText.trim()) {
+          new Notice("Chunk has no text to tag.");
+          return null;
+        }
+        const indexText = await this.renderMarkdownToIndexText(chunkText);
+        return this.requestChunkTags(indexText);
       }
-      await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
-      await this.reindexChunkUpdates(docId, chunkPath, [String(target.chunk_id || chunkId)], []);
-      new Notice("Chunk tags updated.");
-    }).open();
+    ).open();
   }
 
   public async openChunkIndexedTextPreview(docId: string, chunkId: string): Promise<void> {
@@ -3262,6 +3317,113 @@ export default class ZoteroRagPlugin extends Plugin {
       console.error("OCR cleanup failed", error);
       new Notice("OCR cleanup failed. Check the cleanup model settings.");
       return null;
+    }
+  }
+
+  private parseChunkTags(content: string, maxTags: number): string[] {
+    if (!content) {
+      return [];
+    }
+    const raw = content.trim();
+    let parts: string[] = [];
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          parts = parsed.map((item) => String(item));
+        }
+      } catch {
+        parts = [];
+      }
+    }
+    if (parts.length === 0) {
+      parts = raw.split(/[,;\n]+/);
+    }
+    const seen = new Set<string>();
+    const tags: string[] = [];
+    for (const part of parts) {
+      let tag = part.trim();
+      tag = tag.replace(/^[-•\d.\)\s]+/, "");
+      tag = tag.replace(/\s+/g, " ").trim();
+      if (!tag || tag.length < 2) {
+        continue;
+      }
+      const key = tag.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      tags.push(tag);
+      if (tags.length >= maxTags) {
+        break;
+      }
+    }
+    return tags;
+  }
+
+  private async requestChunkTags(text: string): Promise<string[] | null> {
+    const baseUrl = (this.settings.llmCleanupBaseUrl || "").trim().replace(/\/$/, "");
+    const model = (this.settings.llmCleanupModel || "").trim();
+    if (!baseUrl || !model) {
+      new Notice("OCR cleanup model is not configured.");
+      this.openPluginSettings();
+      return null;
+    }
+    const snippet = text.trim().slice(0, 2000);
+    if (!snippet) {
+      return [];
+    }
+    const endpoint = `${baseUrl}/chat/completions`;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    const apiKey = (this.settings.llmCleanupApiKey || "").trim();
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+    const maxTags = 5;
+    const systemPrompt = (
+      "Return 3 to 5 high-signal, concrete noun-phrase tags. "
+      + "Avoid generic terms (study, paper, method), verbs, and filler. "
+      + "Prefer specific entities, methods, datasets, and named concepts. "
+      + "Output comma-separated tags only. No extra text."
+    );
+    const payload = {
+      model,
+      temperature: Number(this.settings.llmCleanupTemperature ?? 0),
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: snippet },
+      ],
+    };
+    this.showStatusProgress("Generating tags...", null);
+    try {
+      const response = await this.requestLocalApiRaw(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (response.statusCode >= 400) {
+        const details = response.body.toString("utf8");
+        throw new Error(`Tag request failed (${response.statusCode}): ${details || "no response body"}`);
+      }
+      const data = JSON.parse(response.body.toString("utf8"));
+      const content =
+        data?.choices?.[0]?.message?.content ??
+        data?.choices?.[0]?.text ??
+        data?.output_text ??
+        "";
+      const tags = this.parseChunkTags(String(content || ""), maxTags);
+      if (!tags.length) {
+        new Notice("Tag generation returned no tags.");
+      }
+      return tags;
+    } catch (error) {
+      console.error("Tag generation failed", error);
+      new Notice("Tag generation failed. Check the cleanup model settings.");
+      return null;
+    } finally {
+      this.clearStatusProgress();
     }
   }
 
@@ -5202,17 +5364,26 @@ export default class ZoteroRagPlugin extends Plugin {
     const displayLink = canEmbed ? pdfLink : (zoteroLink || pdfLink);
     const pdfLine = displayLink ? (canEmbed ? `PDF: !${displayLink}` : `PDF: ${displayLink}`) : "";
     const pdfBlock = pdfLine ? `${pdfLine}\n\n` : "";
+    const vars = await this.buildTemplateVars(values, meta, docId, frontmatterPdfLink, jsonLink);
+    vars["pdf_block"] = pdfBlock;
+    vars["pdf_line"] = pdfLine;
+    vars["docling_markdown"] = doclingMarkdown;
     const frontmatter = await this.renderFrontmatter(
       values,
       meta,
       docId,
       frontmatterPdfLink,
-      jsonLink
+      jsonLink,
+      vars
     );
     const frontmatterBlock = frontmatter ? `---\n${frontmatter}\n---\n\n` : "";
 
-    //return `${frontmatterBlock}PDF: ${pdfLink}\n\nItem JSON: ${jsonLink}\n\n${doclingMarkdown}`;
-    return `${frontmatterBlock}${pdfBlock}${doclingMarkdown}`;
+    const bodyTemplate = (this.settings.noteBodyTemplate || "").trim();
+    const defaultBody = `${pdfBlock}${doclingMarkdown}`;
+    const body = bodyTemplate
+      ? this.renderTemplate(bodyTemplate, vars, defaultBody, { appendDocling: true })
+      : defaultBody;
+    return `${frontmatterBlock}${body}`;
   }
 
   private async renderFrontmatter(
@@ -5220,14 +5391,31 @@ export default class ZoteroRagPlugin extends Plugin {
     meta: Record<string, any>,
     docId: string,
     pdfLink: string,
-    itemJsonLink: string
+    itemJsonLink: string,
+    vars?: Record<string, string>
   ): Promise<string> {
     const template = this.settings.frontmatterTemplate ?? "";
     if (!template.trim()) {
       return "";
     }
-    const vars = await this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
-    return template.replace(/{{\s*([a-z0-9_]+)\s*}}/gi, (_, key) => vars[key] ?? "").trim();
+    const resolved = vars ?? await this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
+    return this.renderTemplate(template, resolved, "", { appendDocling: false }).trim();
+  }
+
+  private renderTemplate(
+    template: string,
+    vars: Record<string, string>,
+    fallback: string,
+    options: { appendDocling?: boolean } = {}
+  ): string {
+    let rendered = template.replace(/{{\s*([a-z0-9_]+)\s*}}/gi, (_, key) => vars[key] ?? "");
+    if (options.appendDocling && !template.includes("{{docling_markdown}}") && vars["docling_markdown"]) {
+      rendered = `${rendered}\n\n${vars["docling_markdown"]}`;
+    }
+    if (!rendered.trim()) {
+      return fallback;
+    }
+    return rendered;
   }
 
   private async buildTemplateVars(
@@ -5249,12 +5437,15 @@ export default class ZoteroRagPlugin extends Plugin {
       .filter((c) => c.creatorType === "editor" || c.creatorType === "seriesEditor")
       .map((c) => this.formatCreatorName(c));
     const editors = editorsList.join("; ");
-    const tagsList = Array.isArray(values.tags)
+    const rawTagsList = Array.isArray(values.tags)
       ? values.tags.map((tag: any) => (typeof tag === "string" ? tag : tag?.tag)).filter(Boolean)
       : [];
+    const tagsList = this.sanitizeObsidianTags(rawTagsList);
     const tags = tagsList.join("; ");
     const collectionTitles = await this.resolveCollectionTitles(values);
     const collectionTitle = collectionTitles.join("; ");
+    const collectionLinks = this.toObsidianLinks(collectionTitles);
+    const collectionLinksText = collectionLinks.join("; ");
     const itemType = typeof values.itemType === "string" ? values.itemType : "";
     const creatorSummary = typeof meta?.creatorSummary === "string" ? meta.creatorSummary : "";
     const publicationTitle = typeof values.publicationTitle === "string" ? values.publicationTitle : "";
@@ -5271,10 +5462,15 @@ export default class ZoteroRagPlugin extends Plugin {
     const url = typeof values.url === "string" ? values.url : "";
     const language = typeof values.language === "string" ? values.language : "";
     const abstractNote = typeof values.abstractNote === "string" ? values.abstractNote : "";
+    const citekey = this.extractCitekey(values);
+    const itemKey = typeof values.key === "string" ? values.key : docId;
+    const itemLink = this.buildZoteroDeepLink(itemKey);
 
     const vars: Record<string, string> = {
       doc_id: docId,
       zotero_key: typeof values.key === "string" ? values.key : docId,
+      item_link: itemLink,
+      citekey,
       title,
       short_title: shortTitle,
       date,
@@ -5283,6 +5479,8 @@ export default class ZoteroRagPlugin extends Plugin {
       editors,
       tags,
       collection_title: collectionTitle,
+      collection_titles: collectionTitle,
+      collections_links: collectionLinksText,
       item_type: itemType,
       creator_summary: creatorSummary,
       publication_title: publicationTitle,
@@ -5299,18 +5497,30 @@ export default class ZoteroRagPlugin extends Plugin {
       url,
       language,
       abstract: abstractNote,
-      pdf_link: this.escapeYamlString(pdfLink),
-      item_json: this.escapeYamlString(itemJsonLink),
+      pdf_link: pdfLink,
+      item_json: itemJsonLink,
     };
 
     for (const [key, value] of Object.entries(vars)) {
-      vars[`${key}_yaml`] = this.escapeYamlString(value);
+      const safe = this.escapeYamlString(value);
+      vars[`${key}_yaml`] = safe;
+      vars[`${key}_quoted`] = safe;
+      vars[`${key}_text`] = safe;
     }
 
-    vars["authors_yaml"] = this.toYamlList(authorsList);
-    vars["editors_yaml"] = this.toYamlList(editorsList);
-    vars["tags_yaml"] = tagsList.length > 0 ? this.toYamlList(tagsList) : "";
-    vars["collections_yaml"] = this.toYamlList(collectionTitles);
+    vars["authors_yaml_list"] = this.toYamlList(authorsList);
+    vars["editors_yaml_list"] = this.toYamlList(editorsList);
+    vars["tags_yaml_list"] = tagsList.length > 0 ? this.toYamlList(tagsList) : "";
+    vars["collections_yaml_list"] = this.toYamlList(collectionTitles);
+    vars["collections_links_yaml_list"] = this.toYamlList(collectionLinks);
+    vars["tags_raw"] = rawTagsList.join("; ");
+    vars["tags_raw_yaml"] = this.escapeYamlString(vars["tags_raw"]);
+    vars["tags_raw_yaml_list"] = rawTagsList.length > 0 ? this.toYamlList(rawTagsList) : "";
+    vars["authors_list"] = vars["authors_yaml_list"];
+    vars["editors_list"] = vars["editors_yaml_list"];
+    vars["tags_list"] = vars["tags_yaml_list"];
+    vars["collections_list"] = vars["collections_yaml_list"];
+    vars["collections_links_list"] = vars["collections_links_yaml_list"];
 
     return vars;
   }
@@ -5336,6 +5546,33 @@ export default class ZoteroRagPlugin extends Plugin {
     return combined || `${first} ${last}`.trim();
   }
 
+  private extractCitekey(values: ZoteroItemValues): string {
+    const candidates = [
+      values.citationKey,
+      values.citekey,
+      values.citeKey,
+      values.betterBibtexKey,
+      values.betterbibtexkey,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+    const extra = typeof values.extra === "string" ? values.extra : "";
+    if (!extra) {
+      return "";
+    }
+    const lines = extra.split(/\r?\n/);
+    for (const line of lines) {
+      const match = line.match(/^\s*(citation key|citekey|bibtex key|bibtexkey)\s*:\s*(.+)\s*$/i);
+      if (match && match[2]) {
+        return match[2].trim();
+      }
+    }
+    return "";
+  }
+
   private escapeYamlString(value: string): string {
     const normalized = String(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const safe = normalized
@@ -5350,6 +5587,53 @@ export default class ZoteroRagPlugin extends Plugin {
       return "  - \"\"";
     }
     return items.map((item) => `  - ${this.escapeYamlString(item)}`).join("\n");
+  }
+
+  private sanitizeObsidianTags(tags: string[]): string[] {
+    const mode = this.settings.tagSanitizeMode || "replace";
+    const replacement = this.settings.tagSanitizeReplacement || "-";
+    return tags
+      .map((tag) => this.sanitizeObsidianTag(tag, mode, replacement))
+      .filter((tag) => tag.length > 0);
+  }
+
+  private sanitizeObsidianTag(
+    tag: string,
+    mode: "none" | "replace" | "camel",
+    replacement: string
+  ): string {
+    const raw = String(tag || "").trim();
+    if (!raw) {
+      return "";
+    }
+    const cleaned = raw.replace(/^#+/, "");
+    if (mode === "none") {
+      return cleaned;
+    }
+    if (mode === "camel") {
+      const parts = cleaned
+        .split(/[\s\-_/.:;,+]+/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+      if (!parts.length) {
+        return "";
+      }
+      const [first, ...rest] = parts;
+      return [
+        first.charAt(0).toLowerCase() + first.slice(1),
+        ...rest.map((part) => part.charAt(0).toUpperCase() + part.slice(1)),
+      ].join("");
+    }
+    const repl = replacement || "-";
+    const escaped = this.escapeRegExp(repl);
+    return cleaned.replace(/\s+/g, repl).replace(new RegExp(`${escaped}+`, "g"), repl).trim();
+  }
+
+  private toObsidianLinks(items: string[]): string[] {
+    return items
+      .map((item) => String(item || "").trim())
+      .filter((item) => item.length > 0)
+      .map((item) => (item.startsWith("[[") && item.endsWith("]]") ? item : `[[${item}]]`));
   }
 
   private getVaultBasePath(): string {

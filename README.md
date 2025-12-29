@@ -38,6 +38,51 @@ You can edit chunk text directly in the note. On save, the plugin updates the ca
 - Toggle deletion for the current chunk via command palette: **Toggle ZRR chunk delete at cursor**.
 - Right-click inside a chunk for the same action.
 
+## Frontmatter template (editable)
+
+You can edit the note frontmatter template in Settings → Output → Frontmatter template.  
+Placeholders use `{{var}}` and are filled from the cached Zotero item metadata (local API or web API).
+
+Common placeholders:
+- `doc_id`, `zotero_key`, `item_link` (zotero://select link), `citekey`
+- `title_quoted`, `short_title_quoted`, `publication_title_quoted`, `book_title_quoted`
+- `year`, `item_type_quoted`, `doi_quoted`, `isbn_quoted`, `issn_quoted`
+- `authors_list`, `editors_list`, `tags_list`, `collections_list`
+- `collection_titles_quoted` (all collection titles joined with `; `)
+- `collections_links_list` (collections as `[[Obsidian Links]]`)
+- `pdf_link`, `item_json`
+
+Template guidance:
+- In YAML frontmatter, prefer `*_yaml` and `*_yaml_list` placeholders to avoid broken quoting.
+- Use raw variables (no suffix) in the note body unless you need YAML escaping.
+
+Suffixes:
+- `*_yaml` = YAML-safe quoted string (recommended in frontmatter).
+- `*_yaml_list` = YAML list (`- "item"` per line).
+
+Obsidian links in YAML:
+- Use `*_links_yaml_list` (or any `*_yaml_list` built from links) so each `[[link]]` is quoted.
+
+Tag sanitization:
+- Zotero tags can be normalized for Obsidian (replace spaces or camelCase). See Settings → Output → Tag sanitization.
+
+Example (collections as links):
+```yaml
+collections:
+{{collections_links_list}}
+```
+
+## Note body template (editable)
+
+You can also customize the note body after frontmatter in Settings → Output → Note body template.
+
+Available placeholders:
+- `{{pdf_block}}` (renders `PDF: ![[...]]` or `PDF: zotero://...`, including trailing blank line)
+- `{{pdf_line}}` (just the `PDF: ...` line)
+- `{{docling_markdown}}` (the full synced Docling content with chunk markers)
+
+If you omit `{{docling_markdown}}`, it will be appended to avoid losing content.
+
 ## Requirements
 
 - Obsidian (desktop)

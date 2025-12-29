@@ -19,6 +19,9 @@ export interface ZoteroRagSettings {
   autoStartRedis: boolean;
   copyPdfToVault: boolean;
   frontmatterTemplate: string;
+  noteBodyTemplate: string;
+  tagSanitizeMode: "none" | "replace" | "camel";
+  tagSanitizeReplacement: string;
   outputPdfDir: string;
   outputNoteDir: string;
   chatOutputDir: string;
@@ -69,14 +72,16 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   frontmatterTemplate:
     "doc_id: {{doc_id}}\n" +
     "zotero_key: {{zotero_key}}\n" +
+    "zotero_link: {{item_link_yaml}}\n" +
+    "citekey: {{citekey}}\n" +
     "title: {{title_yaml}}\n" +
     "year: {{year}}\n" +
-    "authors:\n{{authors_yaml}}\n" +
-    "editors:\n{{editors_yaml}}\n" +
-    "tags:\n{{tags_yaml}}\n" +
-    "collection_title: {{collection_title_yaml}}\n" +
-    "collections:\n{{collections_yaml}}\n" +
-    "item_type: {{item_type}}\n" +
+    "authors:\n{{authors_yaml_list}}\n" +
+    "editors:\n{{editors_yaml_list}}\n" +
+    "tags:\n{{tags_yaml_list}}\n" +
+    "collection_titles: {{collection_titles_yaml}}\n" +
+    "collections:\n{{collections_yaml_list}}\n" +
+    "item_type: {{item_type_yaml}}\n" +
     "short_title: {{short_title_yaml}}\n" +
     "creator_summary: {{creator_summary_yaml}}\n" +
     "publication_title: {{publication_title_yaml}}\n" +
@@ -93,11 +98,14 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "url: {{url_yaml}}\n" +
     "language: {{language_yaml}}\n" +
     "abstract: {{abstract_yaml}}\n" +
-    "pdf_link: {{pdf_link}}\n" +
-    "item_json: {{item_json}}",
-  outputPdfDir: "zotero/pdfs",
-  outputNoteDir: "zotero/notes",
-  chatOutputDir: "zotero/chats",
+    "pdf_link: {{pdf_link_yaml}}\n" +
+    "item_json: {{item_json_yaml}}",
+  noteBodyTemplate: "{{pdf_block}}{{docling_markdown}}",
+  tagSanitizeMode: "replace",
+  tagSanitizeReplacement: "-",
+  outputPdfDir: "Zotero/PDFs",
+  outputNoteDir: "Zotero/Notes",
+  chatOutputDir: "Zotero/Chats",
   chatPaneLocation: "right",
   redisUrl: "redis://127.0.0.1:6379",
   autoAssignRedisPort: true,
@@ -424,6 +432,46 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Tag sanitization")
+      .setDesc("Normalize Zotero tags for Obsidian (no spaces).")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("none", "No change")
+          .addOption("replace", "Replace spaces")
+          .addOption("camel", "camelCase")
+          .setValue(this.plugin.settings.tagSanitizeMode)
+          .onChange(async (value) => {
+            this.plugin.settings.tagSanitizeMode = value as "none" | "replace" | "camel";
+            await this.plugin.saveSettings();
+          })
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("-")
+          .setValue(this.plugin.settings.tagSanitizeReplacement)
+          .onChange(async (value) => {
+            this.plugin.settings.tagSanitizeReplacement = value.trim() || "-";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Note body template")
+      .setDesc(
+        "Template for the note body after frontmatter. Use {{pdf_block}} and {{docling_markdown}} placeholders."
+      )
+      .addTextArea((text) => {
+        text
+          .setValue(this.plugin.settings.noteBodyTemplate)
+          .onChange(async (value) => {
+            this.plugin.settings.noteBodyTemplate = value;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 8;
+        text.inputEl.style.width = "100%";
+      });
+
+    new Setting(containerEl)
       .setName("Saved chats folder")
       .setDesc("Where exported chat notes are stored (vault-relative).")
       .addText((text) =>
@@ -557,7 +605,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
     );
     
-    containerEl.createEl("h2", { text: "OCR cleanup (optional)" });
+    containerEl.createEl("h2", { text: "Automatic OCR cleanup" });
 
     new Setting(containerEl)
       .setName("LLM cleanup for low-quality chunks")

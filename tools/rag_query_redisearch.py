@@ -7,7 +7,7 @@ from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
 import re
 import struct
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import redis
 import requests
@@ -199,6 +199,68 @@ def extract_keywords(query: str) -> List[str]:
     return ordered
 
 
+def normalize_tag_token(tag: str) -> str:
+    cleaned = tag.strip().lower()
+    cleaned = cleaned.strip("-_,;:•")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def parse_tag_field(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item) for item in value]
+    else:
+        parts = re.split(r"[|,;]", str(value))
+    cleaned: List[str] = []
+    for part in parts:
+        token = normalize_tag_token(str(part))
+        if token:
+            cleaned.append(token)
+    return cleaned
+
+
+def tag_tokens_from_tags(tags: Sequence[str]) -> Set[str]:
+    tokens: Set[str] = set()
+    for tag in tags:
+        cleaned = normalize_tag_token(tag)
+        if not cleaned:
+            continue
+        tokens.add(cleaned)
+        tokens.update(re.findall(r"[A-Za-z0-9]+", cleaned))
+    return tokens
+
+
+def apply_tag_boosting(
+    results: List[Dict[str, Any]],
+    keywords: Sequence[str],
+) -> List[Dict[str, Any]]:
+    if not results or not keywords:
+        return results
+    keyword_set = {token.lower() for token in keywords if token}
+    if not keyword_set:
+        return results
+
+    scored: List[Tuple[int, int, Dict[str, Any]]] = []
+    max_score = 0
+    for idx, chunk in enumerate(results):
+        chunk_tags = parse_tag_field(chunk.get("chunk_tags", ""))
+        item_tags = parse_tag_field(chunk.get("tags", ""))
+        chunk_tokens = tag_tokens_from_tags(chunk_tags)
+        item_tokens = tag_tokens_from_tags(item_tags)
+        chunk_hits = len(keyword_set & chunk_tokens)
+        item_hits = len(keyword_set & item_tokens)
+        score = (chunk_hits * 2) + item_hits
+        max_score = max(max_score, score)
+        scored.append((score, idx, chunk))
+
+    if max_score <= 0:
+        return results
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored]
+
+
 def run_lexical_search(
     client: redis.Redis,
     index: str,
@@ -221,7 +283,7 @@ def run_lexical_search(
             "0",
             str(limit),
             "RETURN",
-            "9",
+            "11",
             "doc_id",
             "chunk_id",
             "attachment_key",
@@ -230,6 +292,8 @@ def run_lexical_search(
             "page_end",
             "section",
             "text",
+            "tags",
+            "chunk_tags",
             "score",
             "DIALECT",
             "2",
@@ -398,7 +462,7 @@ def main() -> int:
             "SORTBY",
             "score",
             "RETURN",
-            "9",
+            "11",
             "doc_id",
             "chunk_id",
             "attachment_key",
@@ -407,6 +471,8 @@ def main() -> int:
             "page_end",
             "section",
             "text",
+            "tags",
+            "chunk_tags",
             "score",
             "DIALECT",
             "2",
@@ -445,6 +511,7 @@ def main() -> int:
         filtered = [c for c in retrieved if is_content_chunk(c)]
 
     retrieved = filtered
+    retrieved = apply_tag_boosting(retrieved, keywords)
 
     context = build_context(retrieved)
 
