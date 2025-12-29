@@ -5695,10 +5695,11 @@ export default class ZoteroRagPlugin extends Plugin {
     itemJsonLink: string
   ): Promise<Record<string, string>> {
     const title = typeof values.title === "string" ? values.title : "";
-    const shortTitle = typeof values.shortTitle === "string" ? values.shortTitle : "";
+    let shortTitle = typeof values.shortTitle === "string" ? values.shortTitle : "";
     const date = typeof values.date === "string" ? values.date : "";
     const parsedDate = typeof meta?.parsedDate === "string" ? meta.parsedDate : "";
     const year = this.extractYear(parsedDate || date);
+    const yearNumber = /^\d{4}$/.test(year) ? year : "";
     const creators = Array.isArray(values.creators) ? values.creators : [];
     const authorsList = creators.filter((c) => c.creatorType === "author").map((c) => this.formatCreatorName(c));
     const authors = authorsList.join("; ");
@@ -5728,9 +5729,15 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!doi) {
       doi = this.extractDoiFromExtra(values);
     }
+    let csl: Record<string, any> | null = null;
+    if (!doi || !shortTitle) {
+      csl = await this.fetchZoteroItemCsl(itemKey);
+    }
     if (!doi) {
-      const csl = await this.fetchZoteroItemCsl(itemKey);
       doi = this.extractDoiFromCsl(csl);
+    }
+    if (!shortTitle) {
+      shortTitle = this.extractShortTitleFromCsl(csl);
     }
     const isbn = typeof values.ISBN === "string" ? values.ISBN : "";
     const issn = typeof values.ISSN === "string" ? values.ISSN : "";
@@ -5739,7 +5746,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const url = typeof values.url === "string" ? values.url : "";
     const language = typeof values.language === "string" ? values.language : "";
     const abstractNote = typeof values.abstractNote === "string" ? values.abstractNote : "";
-    const citekey = this.extractCitekey(values);
+    const citekey = this.extractCitekey(values, meta);
     const itemLink = this.buildZoteroDeepLink(itemKey);
     const aliasesList = Array.from(
       new Set(
@@ -5759,6 +5766,7 @@ export default class ZoteroRagPlugin extends Plugin {
       short_title: shortTitle,
       date,
       year,
+      year_number: yearNumber,
       authors,
       editors,
       aliases,
@@ -5833,8 +5841,13 @@ export default class ZoteroRagPlugin extends Plugin {
     return combined || `${first} ${last}`.trim();
   }
 
-  private extractCitekey(values: ZoteroItemValues): string {
+  private extractCitekey(values: ZoteroItemValues, meta?: Record<string, any>): string {
     const candidates = [
+      meta?.citationKey,
+      meta?.citekey,
+      meta?.citeKey,
+      meta?.betterBibtexKey,
+      meta?.betterbibtexkey,
       values.citationKey,
       values.citekey,
       values.citeKey,
@@ -5852,12 +5865,20 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const lines = extra.split(/\r?\n/);
     for (const line of lines) {
-      const match = line.match(/^\s*(citation key|citekey|bibtex key|bibtexkey)\s*:\s*(.+)\s*$/i);
+      const match = line.match(/^\s*(citation key|citekey|citation-key|bibtex key|bibtexkey)\s*:\s*(.+)\s*$/i);
       if (match && match[2]) {
         return match[2].trim();
       }
     }
     return "";
+  }
+
+  private extractShortTitleFromCsl(csl: Record<string, any> | null): string {
+    if (!csl) {
+      return "";
+    }
+    const shortTitle = csl["title-short"] ?? csl.shortTitle ?? csl.short_title;
+    return typeof shortTitle === "string" ? shortTitle.trim() : "";
   }
 
   private extractDoiFromExtra(values: ZoteroItemValues): string {

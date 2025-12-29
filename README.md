@@ -28,14 +28,17 @@ Zotero is your source of truth for references, and Obsidian is where you think. 
 
 ## Notes and syncing
 
-Imported notes include a sync section with chunk markers:
+Imported notes include a sync section with chunk markers (hidden in preview and rendered as badges):
 
 - `<!-- zrr:sync-start doc_id=... -->`
 - `<!-- zrr:chunk id=... -->`
+- `<!-- zrr:chunk end -->`
+- `<!-- zrr:sync-end -->`
 
 You can edit chunk text directly in the note. On save, the plugin updates the cached JSON and reindexes only the changed chunks.
 
-- Toggle deletion for the current chunk via command palette: **Toggle ZRR chunk delete at cursor**.
+- In Live Preview, a hover toolbar appears on the active chunk with actions (clean, tags, indexed preview, open in Zotero, exclude/include).
+- Toggle exclusion via command palette: **Toggle ZRR chunk exclude at cursor**.
 - Right-click inside a chunk for the same action.
 
 ## Frontmatter template (editable)

@@ -85,7 +85,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "zotero_link: {{item_link_yaml}}\n" +
     "citekey: {{citekey}}\n" +
     "title: {{title_yaml}}\n" +
-    "year: {{year}}\n" +
+    "year: {{year_number}}\n" +
     "authors:\n{{authors_yaml_list}}\n" +
     "editors:\n{{editors_yaml_list}}\n" +
     "aliases:\n{{aliases_yaml_list}}\n" +
