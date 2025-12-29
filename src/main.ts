@@ -171,14 +171,14 @@ class TextPromptModal extends Modal {
 class ChunkTagModal extends Modal {
   private chunkId: string;
   private initialTags: string[];
-  private onSubmit: (tags: string[]) => void;
+  private onSubmit: (tags: string[]) => Promise<void> | void;
   private onRegenerate?: () => Promise<string[] | null>;
 
   constructor(
     app: App,
     chunkId: string,
     initialTags: string[],
-    onSubmit: (tags: string[]) => void,
+    onSubmit: (tags: string[]) => Promise<void> | void,
     onRegenerate?: () => Promise<string[] | null>
   ) {
     super(app);
@@ -208,7 +208,7 @@ class ChunkTagModal extends Modal {
 
     const submit = actions.createEl("button", { text: "Save tags" });
 
-    const handleSubmit = (): void => {
+    const handleSubmit = async (): Promise<void> => {
       const raw = input.value || "";
       const tags = raw
         .split(/[,;\n]+/)
@@ -216,7 +216,7 @@ class ChunkTagModal extends Modal {
         .filter((tag) => tag.length > 0);
       const unique = Array.from(new Set(tags));
       this.close();
-      this.onSubmit(unique);
+      await Promise.resolve(this.onSubmit(unique));
     };
 
     if (this.onRegenerate) {
@@ -228,6 +228,7 @@ class ChunkTagModal extends Modal {
           const tags = await this.onRegenerate?.();
           if (tags && tags.length > 0) {
             input.value = tags.join(", ");
+            await Promise.resolve(this.onSubmit(tags));
           } else if (tags) {
             new Notice("No tags were generated.");
           }

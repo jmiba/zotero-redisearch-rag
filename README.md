@@ -83,6 +83,11 @@ Available placeholders:
 
 If you omit `{{docling_markdown}}`, it will be appended to avoid losing content.
 
+## LLM provider profiles
+
+To avoid configuring base URL + API key in multiple places, you can define provider profiles in Settings → LLM Provider Profiles.  
+Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate those fields. API keys are masked in the UI and stored in plugin settings (not encrypted).
+
 ## Requirements
 
 - Obsidian (desktop)

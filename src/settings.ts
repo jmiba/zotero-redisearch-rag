@@ -20,6 +20,10 @@ export interface ZoteroRagSettings {
   copyPdfToVault: boolean;
   frontmatterTemplate: string;
   noteBodyTemplate: string;
+  llmProviderProfiles: LlmProviderProfile[];
+  embedProviderProfileId: string;
+  chatProviderProfileId: string;
+  llmCleanupProviderProfileId: string;
   tagSanitizeMode: "none" | "replace" | "camel";
   tagSanitizeReplacement: string;
   outputPdfDir: string;
@@ -57,6 +61,13 @@ export interface ZoteroRagSettings {
   createOcrLayeredPdf: boolean;
   preferObsidianNoteForCitations: boolean;
 }
+
+export type LlmProviderProfile = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+};
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   zoteroBaseUrl: "http://127.0.0.1:23119/api",
@@ -101,6 +112,35 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "pdf_link: {{pdf_link_yaml}}\n" +
     "item_json: {{item_json_yaml}}",
   noteBodyTemplate: "{{pdf_block}}{{docling_markdown}}",
+  llmProviderProfiles: [
+    {
+      id: "lm-studio",
+      name: "LM Studio",
+      baseUrl: "http://localhost:1234/v1",
+      apiKey: "lm-studio",
+    },
+    {
+      id: "ollama",
+      name: "Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      apiKey: "",
+    },
+    {
+      id: "openrouter",
+      name: "OpenRouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "",
+    },
+    {
+      id: "openai",
+      name: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "",
+    },
+  ],
+  embedProviderProfileId: "lm-studio",
+  chatProviderProfileId: "lm-studio",
+  llmCleanupProviderProfileId: "lm-studio",
   tagSanitizeMode: "replace",
   tagSanitizeReplacement: "-",
   outputPdfDir: "Zotero/PDFs",
@@ -182,6 +222,22 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    const getProfiles = (): LlmProviderProfile[] =>
+      Array.isArray(this.plugin.settings.llmProviderProfiles)
+        ? this.plugin.settings.llmProviderProfiles
+        : [];
+
+    const saveProfiles = async (profiles: LlmProviderProfile[]) => {
+      this.plugin.settings.llmProviderProfiles = profiles;
+      await this.plugin.saveSettings();
+    };
+
+    const maskApiKeyInput = (text: TextComponent) => {
+      text.inputEl.type = "password";
+      text.inputEl.autocomplete = "off";
+      text.inputEl.spellcheck = false;
+    };
 
     containerEl.createEl("h2", { text: "Prerequisites" });
 
@@ -381,15 +437,16 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Web API key")
       .setDesc("Zotero API key for write fallback (from zotero.org).")
-      .addText((text) =>
+      .addText((text) => {
+        maskApiKeyInput(text);
         text
           .setPlaceholder("your-api-key")
           .setValue(this.plugin.settings.webApiKey)
           .onChange(async (value) => {
             this.plugin.settings.webApiKey = value.trim();
             await this.plugin.saveSettings();
-          })
-    );
+          });
+      });
     
     containerEl.createEl("h2", { text: "Output" });
 
@@ -470,6 +527,100 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         text.inputEl.rows = 8;
         text.inputEl.style.width = "100%";
       });
+
+    containerEl.createEl("h2", { text: "LLM Provider Profiles" });
+
+    const profilesContainer = containerEl.createDiv({ cls: "zrr-llm-profiles" });
+
+    const renderProfiles = () => {
+      profilesContainer.empty();
+      const profiles = getProfiles();
+      if (!profiles.length) {
+        profilesContainer.createEl("p", { text: "No profiles yet. Add one below." });
+      }
+      for (const profile of profiles) {
+        const header = profilesContainer.createEl("h6", {
+          text: profile.name || profile.id || "Profile",
+        });
+        header.addClass("zrr-profile-title");
+
+        new Setting(profilesContainer)
+          .setName("Profile name")
+          .addText((text) =>
+            text
+              .setPlaceholder("My provider")
+              .setValue(profile.name || "")
+              .onChange(async (value) => {
+                profile.name = value.trim();
+                await saveProfiles(getProfiles());
+              })
+          );
+
+        new Setting(profilesContainer)
+          .setName("Base URL")
+          .addText((text) =>
+            text
+              .setPlaceholder("http://localhost:1234/v1")
+              .setValue(profile.baseUrl || "")
+              .onChange(async (value) => {
+                profile.baseUrl = value.trim();
+                await saveProfiles(getProfiles());
+              })
+          );
+
+        new Setting(profilesContainer)
+          .setName("API key")
+          .setDesc("Stored in settings (not encrypted).")
+          .addText((text) => {
+            maskApiKeyInput(text);
+            text
+              .setPlaceholder("sk-...")
+              .setValue(profile.apiKey || "")
+              .onChange(async (value) => {
+                profile.apiKey = value.trim();
+                await saveProfiles(getProfiles());
+              });
+          })
+          ;
+
+        new Setting(profilesContainer)
+          .setName("Remove profile")
+          .setDesc("Deletes this saved profile.")
+          .addButton((button) =>
+            button.setButtonText("Delete profile").onClick(async () => {
+              const remaining = getProfiles().filter((p) => p.id !== profile.id);
+              this.plugin.settings.embedProviderProfileId =
+                this.plugin.settings.embedProviderProfileId === profile.id ? "" : this.plugin.settings.embedProviderProfileId;
+              this.plugin.settings.chatProviderProfileId =
+                this.plugin.settings.chatProviderProfileId === profile.id ? "" : this.plugin.settings.chatProviderProfileId;
+              this.plugin.settings.llmCleanupProviderProfileId =
+                this.plugin.settings.llmCleanupProviderProfileId === profile.id ? "" : this.plugin.settings.llmCleanupProviderProfileId;
+              await saveProfiles(remaining);
+              renderProfiles();
+            })
+          );
+      }
+
+      new Setting(profilesContainer)
+        .setName("Add profile")
+        .addButton((button) =>
+          button.setButtonText("Add").onClick(async () => {
+            const id = `profile-${Date.now().toString(36)}`;
+            const profiles = getProfiles().concat([
+              {
+                id,
+                name: "Custom",
+                baseUrl: "",
+                apiKey: "",
+              },
+            ]);
+            await saveProfiles(profiles);
+            renderProfiles();
+          })
+        );
+    };
+
+    renderProfiles();
 
     new Setting(containerEl)
       .setName("Saved chats folder")
@@ -617,54 +768,59 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         })
       );
 
-    const cleanupBaseUrlPresets = [
-      {
-        value: "http://localhost:1234/v1",
-        label: "LM Studio (http://localhost:1234/v1)",
-      },
-      {
-        value: "http://localhost:11434/v1",
-        label: "Ollama (http://localhost:11434/v1)",
-      },
-      {
-        value: "https://openrouter.ai/api/v1",
-        label: "OpenRouter (https://openrouter.ai/api/v1)",
-      },
-      {
-        value: "https://api.openai.com/v1",
-        label: "OpenAI (https://api.openai.com/v1)",
-      },
-    ];
-
+    let cleanupProfileDropdown: DropdownComponent | null = null;
     let cleanupBaseUrlInput: TextComponent | null = null;
+    let cleanupApiKeyInput: TextComponent | null = null;
+    let refreshCleanupModels: () => Promise<void> = async () => undefined;
 
-    const applyCleanupBaseUrl = async (value: string) => {
+    const applyCleanupBaseUrl = async (value: string, markCustom = true) => {
       const trimmed = value.trim();
       this.plugin.settings.llmCleanupBaseUrl = trimmed;
+      if (markCustom) {
+        this.plugin.settings.llmCleanupProviderProfileId = "";
+        if (cleanupProfileDropdown) {
+          cleanupProfileDropdown.setValue("custom");
+        }
+      }
       if (cleanupBaseUrlInput) {
         cleanupBaseUrlInput.setValue(trimmed);
       }
       await this.plugin.saveSettings();
     };
 
-    const cleanupPresetSetting = new Setting(containerEl)
-      .setName("LLM cleanup provider preset")
-      .setDesc("Pick a provider URL or keep a custom value.");
+    const applyCleanupProfile = async (profileId: string) => {
+      const profile = getProfiles().find((item) => item.id === profileId);
+      this.plugin.settings.llmCleanupProviderProfileId = profileId;
+      if (profile) {
+        this.plugin.settings.llmCleanupBaseUrl = profile.baseUrl;
+        this.plugin.settings.llmCleanupApiKey = profile.apiKey;
+        cleanupBaseUrlInput?.setValue(profile.baseUrl);
+        cleanupApiKeyInput?.setValue(profile.apiKey);
+      }
+      await this.plugin.saveSettings();
+      await refreshCleanupModels();
+    };
 
-    cleanupPresetSetting.addDropdown((dropdown) => {
-      const current = (this.plugin.settings.llmCleanupBaseUrl || "").trim();
-      const options = [...cleanupBaseUrlPresets];
-      if (current && !options.some((option) => option.value === current)) {
-        options.push({ value: current, label: `Custom (${current})` });
-      }
-      for (const option of options) {
-        dropdown.addOption(option.value, option.label);
-      }
-      dropdown.setValue(current || cleanupBaseUrlPresets[0].value);
-      dropdown.onChange(async (value) => {
-        await applyCleanupBaseUrl(value);
+    new Setting(containerEl)
+      .setName("LLM cleanup provider profile")
+      .setDesc("Select a profile to populate base URL and API key.")
+      .addDropdown((dropdown) => {
+        cleanupProfileDropdown = dropdown;
+        dropdown.addOption("custom", "Custom (manual)");
+        for (const profile of getProfiles()) {
+          dropdown.addOption(profile.id, profile.name || profile.id);
+        }
+        const current = this.plugin.settings.llmCleanupProviderProfileId;
+        dropdown.setValue(current && getProfiles().some((p) => p.id === current) ? current : "custom");
+        dropdown.onChange(async (value) => {
+          if (value === "custom") {
+            this.plugin.settings.llmCleanupProviderProfileId = "";
+            await this.plugin.saveSettings();
+            return;
+          }
+          await applyCleanupProfile(value);
+        });
       });
-    });
 
     new Setting(containerEl)
       .setName("LLM cleanup base URL")
@@ -682,15 +838,21 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("LLM cleanup API key")
       .setDesc("Optional API key for the cleanup endpoint.")
-      .addText((text) =>
+      .addText((text) => {
+        cleanupApiKeyInput = text;
+        maskApiKeyInput(text);
         text
           .setPlaceholder("sk-...")
           .setValue(this.plugin.settings.llmCleanupApiKey)
           .onChange(async (value) => {
             this.plugin.settings.llmCleanupApiKey = value.trim();
+            this.plugin.settings.llmCleanupProviderProfileId = "";
+            if (cleanupProfileDropdown) {
+              cleanupProfileDropdown.setValue("custom");
+            }
             await this.plugin.saveSettings();
-          })
-      );
+          });
+      });
 
     const cleanupModelSetting = new Setting(containerEl)
       .setName("LLM cleanup model")
@@ -716,7 +878,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       }
     };
 
-    const refreshCleanupModels = async () => {
+    refreshCleanupModels = async () => {
       if (!cleanupModelDropdown) {
         return;
       }
@@ -792,54 +954,59 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Text Embedding" });
 
-    const embedBaseUrlPresets = [
-      {
-        value: "http://localhost:1234/v1",
-        label: "LM Studio (http://localhost:1234/v1)",
-      },
-      {
-        value: "http://localhost:11434/v1",
-        label: "Ollama (http://localhost:11434/v1)",
-      },
-      {
-        value: "https://openrouter.ai/api/v1",
-        label: "OpenRouter (https://openrouter.ai/api/v1)",
-      },
-      {
-        value: "https://api.openai.com/v1",
-        label: "OpenAI (https://api.openai.com/v1)",
-      },
-    ];
-
+    let embedProfileDropdown: DropdownComponent | null = null;
     let embedBaseUrlInput: TextComponent | null = null;
+    let embedApiKeyInput: TextComponent | null = null;
+    let refreshEmbeddingModels: () => Promise<void> = async () => undefined;
 
-    const applyEmbedBaseUrl = async (value: string) => {
+    const applyEmbedBaseUrl = async (value: string, markCustom = true) => {
       const trimmed = value.trim();
       this.plugin.settings.embedBaseUrl = trimmed;
+      if (markCustom) {
+        this.plugin.settings.embedProviderProfileId = "";
+        if (embedProfileDropdown) {
+          embedProfileDropdown.setValue("custom");
+        }
+      }
       if (embedBaseUrlInput) {
         embedBaseUrlInput.setValue(trimmed);
       }
       await this.plugin.saveSettings();
     };
 
-    const embedPresetSetting = new Setting(containerEl)
-      .setName("Embeddings provider preset")
-      .setDesc("Pick a provider URL or keep a custom value.");
+    const applyEmbedProfile = async (profileId: string) => {
+      const profile = getProfiles().find((item) => item.id === profileId);
+      this.plugin.settings.embedProviderProfileId = profileId;
+      if (profile) {
+        this.plugin.settings.embedBaseUrl = profile.baseUrl;
+        this.plugin.settings.embedApiKey = profile.apiKey;
+        embedBaseUrlInput?.setValue(profile.baseUrl);
+        embedApiKeyInput?.setValue(profile.apiKey);
+      }
+      await this.plugin.saveSettings();
+      await refreshEmbeddingModels();
+    };
 
-    embedPresetSetting.addDropdown((dropdown) => {
-      const current = (this.plugin.settings.embedBaseUrl || "").trim();
-      const options = [...embedBaseUrlPresets];
-      if (current && !options.some((option) => option.value === current)) {
-        options.push({ value: current, label: `Custom (${current})` });
-      }
-      for (const option of options) {
-        dropdown.addOption(option.value, option.label);
-      }
-      dropdown.setValue(current || embedBaseUrlPresets[0].value);
-      dropdown.onChange(async (value) => {
-        await applyEmbedBaseUrl(value);
+    new Setting(containerEl)
+      .setName("Embeddings provider profile")
+      .setDesc("Select a profile to populate base URL and API key.")
+      .addDropdown((dropdown) => {
+        embedProfileDropdown = dropdown;
+        dropdown.addOption("custom", "Custom (manual)");
+        for (const profile of getProfiles()) {
+          dropdown.addOption(profile.id, profile.name || profile.id);
+        }
+        const current = this.plugin.settings.embedProviderProfileId;
+        dropdown.setValue(current && getProfiles().some((p) => p.id === current) ? current : "custom");
+        dropdown.onChange(async (value) => {
+          if (value === "custom") {
+            this.plugin.settings.embedProviderProfileId = "";
+            await this.plugin.saveSettings();
+            return;
+          }
+          await applyEmbedProfile(value);
+        });
       });
-    });
 
     new Setting(containerEl)
       .setName("Embeddings base URL")
@@ -855,15 +1022,21 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Embeddings API key")
-      .addText((text) =>
+      .addText((text) => {
+        embedApiKeyInput = text;
+        maskApiKeyInput(text);
         text
           .setPlaceholder("lm-studio")
           .setValue(this.plugin.settings.embedApiKey)
           .onChange(async (value) => {
             this.plugin.settings.embedApiKey = value.trim();
+            this.plugin.settings.embedProviderProfileId = "";
+            if (embedProfileDropdown) {
+              embedProfileDropdown.setValue("custom");
+            }
             await this.plugin.saveSettings();
-          })
-      );
+          });
+      });
 
     const embeddingModelSetting = new Setting(containerEl)
       .setName("Embeddings model")
@@ -889,7 +1062,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       }
     };
 
-    const refreshEmbeddingModels = async () => {
+    refreshEmbeddingModels = async () => {
       if (!embeddingDropdown) {
         return;
       }
@@ -943,54 +1116,59 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Chat LLM" });
 
-    const chatBaseUrlPresets = [
-      {
-        value: "http://localhost:1234/v1",
-        label: "LM Studio (http://localhost:1234/v1)",
-      },
-      {
-        value: "http://localhost:11434/v1",
-        label: "Ollama (http://localhost:11434/v1)",
-      },
-      {
-        value: "https://openrouter.ai/api/v1",
-        label: "OpenRouter (https://openrouter.ai/api/v1)",
-      },
-      {
-        value: "https://api.openai.com/v1",
-        label: "OpenAI (https://api.openai.com/v1)",
-      },
-    ];
-
+    let chatProfileDropdown: DropdownComponent | null = null;
     let chatBaseUrlInput: TextComponent | null = null;
+    let chatApiKeyInput: TextComponent | null = null;
+    let refreshChatModels: () => Promise<void> = async () => undefined;
 
-    const applyChatBaseUrl = async (value: string) => {
+    const applyChatBaseUrl = async (value: string, markCustom = true) => {
       const trimmed = value.trim();
       this.plugin.settings.chatBaseUrl = trimmed;
+      if (markCustom) {
+        this.plugin.settings.chatProviderProfileId = "";
+        if (chatProfileDropdown) {
+          chatProfileDropdown.setValue("custom");
+        }
+      }
       if (chatBaseUrlInput) {
         chatBaseUrlInput.setValue(trimmed);
       }
       await this.plugin.saveSettings();
     };
 
-    const chatPresetSetting = new Setting(containerEl)
-      .setName("Chat provider preset")
-      .setDesc("Pick a provider URL or keep a custom value.");
+    const applyChatProfile = async (profileId: string) => {
+      const profile = getProfiles().find((item) => item.id === profileId);
+      this.plugin.settings.chatProviderProfileId = profileId;
+      if (profile) {
+        this.plugin.settings.chatBaseUrl = profile.baseUrl;
+        this.plugin.settings.chatApiKey = profile.apiKey;
+        chatBaseUrlInput?.setValue(profile.baseUrl);
+        chatApiKeyInput?.setValue(profile.apiKey);
+      }
+      await this.plugin.saveSettings();
+      await refreshChatModels();
+    };
 
-    chatPresetSetting.addDropdown((dropdown) => {
-      const current = (this.plugin.settings.chatBaseUrl || "").trim();
-      const options = [...chatBaseUrlPresets];
-      if (current && !options.some((option) => option.value === current)) {
-        options.push({ value: current, label: `Custom (${current})` });
-      }
-      for (const option of options) {
-        dropdown.addOption(option.value, option.label);
-      }
-      dropdown.setValue(current || chatBaseUrlPresets[0].value);
-      dropdown.onChange(async (value) => {
-        await applyChatBaseUrl(value);
+    new Setting(containerEl)
+      .setName("Chat provider profile")
+      .setDesc("Select a profile to populate base URL and API key.")
+      .addDropdown((dropdown) => {
+        chatProfileDropdown = dropdown;
+        dropdown.addOption("custom", "Custom (manual)");
+        for (const profile of getProfiles()) {
+          dropdown.addOption(profile.id, profile.name || profile.id);
+        }
+        const current = this.plugin.settings.chatProviderProfileId;
+        dropdown.setValue(current && getProfiles().some((p) => p.id === current) ? current : "custom");
+        dropdown.onChange(async (value) => {
+          if (value === "custom") {
+            this.plugin.settings.chatProviderProfileId = "";
+            await this.plugin.saveSettings();
+            return;
+          }
+          await applyChatProfile(value);
+        });
       });
-    });
 
     new Setting(containerEl)
       .setName("Chat base URL")
@@ -1007,15 +1185,21 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Chat API key")
-      .addText((text) =>
+      .addText((text) => {
+        chatApiKeyInput = text;
+        maskApiKeyInput(text);
         text
           .setPlaceholder("lm-studio")
           .setValue(this.plugin.settings.chatApiKey)
           .onChange(async (value) => {
             this.plugin.settings.chatApiKey = value.trim();
+            this.plugin.settings.chatProviderProfileId = "";
+            if (chatProfileDropdown) {
+              chatProfileDropdown.setValue("custom");
+            }
             await this.plugin.saveSettings();
-          })
-      );
+          });
+      });
 
     const chatModelSetting = new Setting(containerEl)
       .setName("Chat model")
@@ -1041,7 +1225,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       }
     };
 
-    const refreshChatModels = async () => {
+    refreshChatModels = async () => {
       if (!chatModelDropdown) {
         return;
       }

@@ -6,6 +6,7 @@
 - Note body template is now editable (with PDF/docling placeholders).
 - Frontmatter template: clarified YAML-safe suffixes and added item link/citekey defaults.
 - Fix: Chat title generation avoids incompatible OpenAI calls.
+- LLM provider profiles: model lists refresh on profile switch; delete control moved into its own row.
 
 ## 0.3.2
 - Hoverbar now shows Lucide icons and tooltips on all buttons.
