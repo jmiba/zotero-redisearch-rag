@@ -5,6 +5,9 @@
 - Sync markers now render as styled badges in reading view (page/section + sync start/end).
 - Chunk end markers now render as badges in reading/live preview.
 - Retrieval now auto-broadens before the LLM when context is weak (chunk count, context length, vector score, narrative filter).
+- Indexing now derives text from a Markdown AST (table/list-aware) instead of flattening display Markdown.
+- Page chunks now reflow wrapped OCR/text-layer lines while preserving headings/lists/tables.
+- New command: delete the active Zotero note plus cached chunks/items to prevent recreation.
 - Tag sanitization now offers Obsidian-style cases (camel/pascal/snake/kebab) instead of a custom separator.
 - Frontmatter now supports `aliases` built from citekey/short title/DOI (when present).
 - Zotero picker now flags items without processable PDFs even when only non-PDF attachments exist.

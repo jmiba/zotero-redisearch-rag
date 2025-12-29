@@ -940,6 +940,54 @@ class ConfirmOverwriteModal extends Modal {
   }
 }
 
+class ConfirmDeleteNoteModal extends Modal {
+  private notePath: string;
+  private docId: string;
+  private onResolve: (confirmed: boolean) => void;
+  private resolved = false;
+
+  constructor(app: App, notePath: string, docId: string, onResolve: (confirmed: boolean) => void) {
+    super(app);
+    this.notePath = notePath;
+    this.docId = docId;
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Delete note and cached data?" });
+    contentEl.createEl("p", {
+      text: `This will delete the note and cached chunks/items for doc_id ${this.docId}.`,
+    });
+    contentEl.createEl("p", {
+      text: `Note: ${this.notePath}`,
+    });
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const confirm = actions.createEl("button", { text: "Delete" });
+    cancel.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(false);
+    });
+    confirm.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(true);
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.onResolve(false);
+    }
+  }
+}
+
 class LanguageSuggestModal extends SuggestModal<LanguageOption> {
   private resolveSelection: (value: string | null) => void;
   private resolved = false;
@@ -1024,7 +1072,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.setupStatusBar();
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
-    this.registerChunkExcludeMenu();
+    this.registerNoteDeleteMenu();
     this.registerSyncCommentBadges();
     this.registerEditorExtension(createChunkToolsExtension(this));
     this.registerEditorExtension(createSyncBadgeExtension());
@@ -1099,6 +1147,12 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "toggle-zrr-chunk-delete",
       name: "Toggle ZRR chunk exclude at cursor",
       editorCallback: (editor) => this.toggleChunkExclude(editor),
+    });
+
+    this.addCommand({
+      id: "delete-zotero-note-cache",
+      name: "Delete Zotero note and cached data",
+      callback: () => this.deleteZoteroNoteAndCache(),
     });
 
     void this.autoDetectContainerCliOnLoad();
@@ -3199,17 +3253,23 @@ export default class ZoteroRagPlugin extends Plugin {
     );
   }
 
-  private registerChunkExcludeMenu(): void {
+  private registerNoteDeleteMenu(): void {
     this.registerEvent(
-      this.app.workspace.on("editor-menu", (menu, editor) => {
-        const found = this.findChunkAtCursor(editor);
-        if (!found) {
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") {
+          return;
+        }
+        const normalizedDir = normalizePath(this.settings.outputNoteDir);
+        const normalizedPath = normalizePath(file.path);
+        const inNotesDir =
+          normalizedDir && (normalizedPath === normalizedDir || normalizedPath.startsWith(`${normalizedDir}/`));
+        if (!inNotesDir && !this.isZoteroNoteFile(file)) {
           return;
         }
         menu.addItem((item) => {
           item
-            .setTitle("Toggle ZRR chunk exclude")
-            .onClick(() => this.toggleChunkExclude(editor, found.startLine));
+            .setTitle("Delete Zotero note and cached data")
+            .onClick(() => this.deleteZoteroNoteAndCacheForFile(file));
         });
       })
     );
@@ -3702,9 +3762,11 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private normalizeIndexPreviewText(text: string): string {
     return text
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
       .replace(/[ \t]+/g, " ")
-      .replace(/\s*\n\s*/g, "\n")
-      .replace(/\s+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]*\n[ \t]*/g, "\n")
       .trim();
   }
 
@@ -4121,6 +4183,74 @@ export default class ZoteroRagPlugin extends Plugin {
       return fromScan.note_path;
     }
     return null;
+  }
+
+  private isZoteroNoteFile(file: TFile): boolean {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const frontmatter = cache?.frontmatter;
+    return Boolean(frontmatter?.doc_id || frontmatter?.zotero_key);
+  }
+
+  private async deleteZoteroNoteAndCacheForFile(file: TFile): Promise<void> {
+    const notePath = file.path;
+    const content = await this.app.vault.read(file);
+    const docId =
+      this.extractDocIdFromFrontmatter(content) ?? this.extractDocIdFromSyncMarker(content);
+    if (!docId) {
+      new Notice("No doc_id found in this note.");
+      return;
+    }
+
+    const confirmed = await new Promise<boolean>((resolve) => {
+      new ConfirmDeleteNoteModal(this.app, notePath, docId, resolve).open();
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    const adapter = this.app.vault.adapter;
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+
+    let deleteIds: string[] = [];
+    if (await adapter.exists(chunkPath)) {
+      const payload = await this.readChunkPayload(chunkPath);
+      const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
+      deleteIds = chunks
+        .map((chunk) => String(chunk?.chunk_id ?? ""))
+        .map((chunkId) => (
+          chunkId.startsWith(`${docId}:`) ? chunkId.slice(docId.length + 1) : chunkId
+        ))
+        .filter((chunkId) => chunkId);
+    }
+
+    if (deleteIds.length > 0) {
+      await this.reindexChunkUpdates(docId, chunkPath, [], deleteIds);
+    }
+
+    try {
+      if (await adapter.exists(chunkPath)) {
+        await adapter.remove(chunkPath);
+      }
+      if (await adapter.exists(itemPath)) {
+        await adapter.remove(itemPath);
+      }
+      await this.removeDocIndexEntry(docId);
+      await this.app.vault.delete(file, true);
+      new Notice(`Deleted note and cache for ${docId}.`);
+    } catch (error) {
+      console.error("Failed to delete note and cached data", error);
+      new Notice("Failed to delete note or cached data. See console for details.");
+    }
+  }
+
+  private async deleteZoteroNoteAndCache(): Promise<void> {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || !view.file) {
+      new Notice("No active Zotero note found.");
+      return;
+    }
+    await this.deleteZoteroNoteAndCacheForFile(view.file);
   }
 
   private async resolveUniqueBaseName(baseName: string, docId: string): Promise<string> {
@@ -5006,6 +5136,15 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     index[entry.doc_id] = next;
+    await this.saveDocIndex(index);
+  }
+
+  private async removeDocIndexEntry(docId: string): Promise<void> {
+    const index = await this.getDocIndex();
+    if (!index[docId]) {
+      return;
+    }
+    delete index[docId];
     await this.saveDocIndex(index);
   }
 

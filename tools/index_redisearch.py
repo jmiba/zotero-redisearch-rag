@@ -203,8 +203,139 @@ def markdown_to_text(text: str) -> str:
     return stripped.strip()
 
 
+def markdown_to_index_text(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        from markdown_it import MarkdownIt
+    except Exception:
+        return markdown_to_text(text)
+
+    def inline_text(token: Any) -> str:
+        if not getattr(token, "children", None):
+            return str(getattr(token, "content", "") or "")
+        parts: List[str] = []
+        for child in token.children:
+            t = getattr(child, "type", "")
+            if t in ("text", "code_inline"):
+                parts.append(str(child.content or ""))
+            elif t == "softbreak":
+                parts.append(" ")
+            elif t == "hardbreak":
+                parts.append("\n")
+        return "".join(parts)
+
+    def extract_table(tokens: Sequence[Any], start: int) -> Tuple[List[str], int]:
+        headers: List[str] = []
+        rows: List[List[str]] = []
+        current: List[str] = []
+        in_header = False
+        i = start + 1
+        while i < len(tokens):
+            token = tokens[i]
+            ttype = token.type
+            if ttype == "thead_open":
+                in_header = True
+            elif ttype == "tbody_open":
+                in_header = False
+            elif ttype == "tr_open":
+                current = []
+            elif ttype in ("th_open", "td_open"):
+                cell = ""
+                if i + 1 < len(tokens) and tokens[i + 1].type == "inline":
+                    cell = inline_text(tokens[i + 1]).strip()
+                current.append(cell)
+            elif ttype == "tr_close":
+                if in_header and not headers:
+                    headers = current
+                else:
+                    rows.append(current)
+            elif ttype == "table_close":
+                break
+            i += 1
+
+        lines: List[str] = []
+        for row in rows:
+            if headers:
+                pairs: List[str] = []
+                for idx, cell in enumerate(row):
+                    if not cell:
+                        continue
+                    header = headers[idx] if idx < len(headers) and headers[idx] else f"Column {idx + 1}"
+                    pairs.append(f"{header}: {cell}")
+                if pairs:
+                    lines.append("; ".join(pairs))
+            else:
+                row_line = " | ".join([cell for cell in row if cell])
+                if row_line:
+                    lines.append(row_line)
+        return lines, i
+
+    md = MarkdownIt("commonmark", {"html": False})
+    try:
+        md.enable("table")
+    except Exception:
+        pass
+    tokens = md.parse(text)
+
+    lines: List[str] = []
+    list_depth = 0
+    in_list_item = False
+    list_item_parts: List[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        ttype = token.type
+
+        if ttype == "table_open":
+            table_lines, i = extract_table(tokens, i)
+            lines.extend(table_lines)
+            i += 1
+            continue
+
+        if ttype in ("bullet_list_open", "ordered_list_open"):
+            list_depth += 1
+        elif ttype in ("bullet_list_close", "ordered_list_close"):
+            list_depth = max(0, list_depth - 1)
+        elif ttype == "list_item_open":
+            in_list_item = True
+            list_item_parts = []
+        elif ttype == "list_item_close":
+            content = " ".join(list_item_parts).strip()
+            if content:
+                indent = "  " * max(0, list_depth - 1)
+                lines.append(f"{indent}- {content}")
+            in_list_item = False
+        elif ttype == "heading_open":
+            if i + 1 < len(tokens) and tokens[i + 1].type == "inline":
+                heading = inline_text(tokens[i + 1]).strip()
+                if heading:
+                    lines.append(heading)
+            while i < len(tokens) and tokens[i].type != "heading_close":
+                i += 1
+        elif ttype == "inline":
+            text_val = inline_text(token).strip()
+            if text_val:
+                if in_list_item:
+                    list_item_parts.append(text_val)
+                else:
+                    lines.append(text_val)
+        elif ttype in ("fence", "code_block"):
+            content = str(token.content or "").strip()
+            if content:
+                lines.append(content)
+
+        i += 1
+
+    return "\n".join(lines).strip()
+
+
 def normalize_index_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    return text.strip()
 
 
 def normalize_meta_value(value: Any) -> str:
@@ -481,7 +612,7 @@ def main() -> int:
         if is_chunk_excluded(chunk):
             continue
         raw_text = str(chunk.get("text", ""))
-        text = normalize_index_text(markdown_to_text(raw_text))
+        text = normalize_index_text(markdown_to_index_text(raw_text))
         if not text.strip():
             continue
         chunk_id = chunk.get("chunk_id")
@@ -501,7 +632,7 @@ def main() -> int:
     for chunk in valid_chunks:
         current += 1
         raw_text = str(chunk.get("text", ""))
-        text = normalize_index_text(markdown_to_text(raw_text))
+        text = normalize_index_text(markdown_to_index_text(raw_text))
         chunk_id = chunk.get("chunk_id")
         chunk_tags_value = ""
         existing_tags = chunk.get("chunk_tags")

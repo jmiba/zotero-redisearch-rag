@@ -209,6 +209,15 @@ def normalize_whitespace(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+def normalize_display_markdown(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
 
 def normalize_chunk_whitespace(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", " ")
@@ -255,6 +264,91 @@ def normalize_chunk_whitespace(text: str) -> str:
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
+
+def reflow_page_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    lines = text.split("\n")
+    out_lines: List[str] = []
+    buffer: List[str] = []
+
+    def flush() -> None:
+        if buffer:
+            out_lines.append(" ".join(buffer).strip())
+            buffer.clear()
+
+    heading_re = re.compile(r"^#{1,6}\s+")
+    list_bullet_re = re.compile(r"^[-*+]\s+(.+)")
+    list_number_re = re.compile(r"^(\d+)[.)]\s+(.+)")
+    list_unicode_re = re.compile(r"^[\u2022\u2023\u25AA\u2013\u2014\u00B7\x81]\s*(.+)")
+    table_sep_re = re.compile(r"^\s*\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?\s*$")
+    url_re = re.compile(r"^(https?://|doi:)", re.IGNORECASE)
+
+    def is_table_line(line: str) -> bool:
+        if table_sep_re.match(line):
+            return True
+        return line.count("|") >= 2
+
+    list_active = False
+    list_prefix = ""
+    list_buffer: List[str] = []
+
+    def flush_list() -> None:
+        nonlocal list_active, list_prefix, list_buffer
+        if list_active and list_buffer:
+            out_lines.append(f"{list_prefix}{' '.join(list_buffer).strip()}")
+        list_active = False
+        list_prefix = ""
+        list_buffer = []
+
+    for line in lines:
+        stripped = line.replace("\ufeff", "").strip()
+        if not stripped:
+            flush_list()
+            flush()
+            if out_lines and out_lines[-1] != "":
+                out_lines.append("")
+            continue
+        bullet_match = list_bullet_re.match(stripped)
+        number_match = list_number_re.match(stripped)
+        unicode_match = list_unicode_re.match(stripped)
+        if bullet_match or number_match or unicode_match:
+            flush()
+            flush_list()
+            if number_match:
+                list_prefix = f"{number_match.group(1)}. "
+                list_buffer = [number_match.group(2).strip()]
+            else:
+                list_prefix = "- "
+                list_buffer = [(bullet_match or unicode_match).group(1).strip()]
+            list_active = True
+            continue
+        if heading_re.match(stripped) or is_table_line(stripped):
+            flush()
+            flush_list()
+            out_lines.append(stripped)
+            continue
+        if list_active and url_re.match(stripped):
+            list_buffer.append(stripped)
+            continue
+        if url_re.match(stripped):
+            flush()
+            flush_list()
+            out_lines.append(stripped)
+            continue
+        if list_active:
+            list_buffer.append(stripped)
+            continue
+        buffer.append(stripped)
+
+    flush()
+    flush_list()
+    result = "\n".join(out_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 
@@ -4258,7 +4352,8 @@ def build_chunks_page(
             titles = heading_map.get(page_num, [])
             if titles:
                 raw_text = inject_headings_inline(raw_text, titles)
-        cleaned = normalize_chunk_whitespace(raw_text)
+        cleaned = normalize_display_markdown(raw_text)
+        cleaned = reflow_page_text(cleaned)
         if not cleaned:
             continue
         chunk_id = f"p{page_num}"
@@ -4306,7 +4401,7 @@ def build_chunks_section(
         overlap_chars = config.chunk_overlap_chars if config else 0
         segments = split_text_by_size(text, max_chars, overlap_chars)
         for seg_idx, segment in enumerate(segments, start=1):
-            cleaned = normalize_whitespace(segment)
+            cleaned = normalize_display_markdown(segment)
             if not cleaned:
                 continue
             page_start, page_end = find_page_range(cleaned, pages, config)
