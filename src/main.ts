@@ -2969,26 +2969,34 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async searchZoteroItemsWeb(query: string): Promise<ZoteroLocalItem[]> {
-    const params = new URLSearchParams();
-    params.set("itemType", "-attachment");
-    params.set("limit", "25");
-    params.set("include", "data,meta");
-    if (query.trim()) {
-      params.set("q", query.trim());
+    const includeOptions = ["data,meta,children", "data,meta"];
+    for (const include of includeOptions) {
+      const params = new URLSearchParams();
+      params.set("itemType", "-attachment");
+      params.set("limit", "25");
+      params.set("include", include);
+      if (query.trim()) {
+        params.set("q", query.trim());
+      }
+      const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items?${params.toString()}`);
+      try {
+        const payload = await this.requestWebApi(url, `Zotero Web API search failed for ${url}`);
+        const parsed = JSON.parse(payload.toString("utf8"));
+        if (!Array.isArray(parsed)) {
+          return [];
+        }
+        return parsed
+          .map((entry: any) => ({
+            key: entry.key ?? entry.data?.key,
+            data: entry.data ?? {},
+            meta: entry.meta ?? {},
+          }))
+          .filter((entry: ZoteroLocalItem) => typeof entry.key === "string" && entry.key.trim().length > 0);
+      } catch (error) {
+        console.warn("Failed to search Zotero via web API", error);
+      }
     }
-    const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items?${params.toString()}`);
-    const payload = await this.requestWebApi(url, `Zotero Web API search failed for ${url}`);
-    const parsed = JSON.parse(payload.toString("utf8"));
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .map((entry: any) => ({
-        key: entry.key ?? entry.data?.key,
-        data: entry.data ?? {},
-        meta: entry.meta ?? {},
-      }))
-      .filter((entry: ZoteroLocalItem) => typeof entry.key === "string" && entry.key.trim().length > 0);
+    return [];
   }
 
   private async updateZoteroItemLanguage(
@@ -3608,26 +3616,51 @@ export default class ZoteroRagPlugin extends Plugin {
       + "Prefer specific entities, methods, datasets, and named concepts. "
       + "Output comma-separated tags only. No extra text."
     );
-    const payload = {
+    const temperatureRaw = Number(this.settings.llmCleanupTemperature ?? 0);
+    const basePayload: Record<string, any> = {
       model,
-      temperature: Number(this.settings.llmCleanupTemperature ?? 0),
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: snippet },
       ],
     };
+    if (Number.isFinite(temperatureRaw)) {
+      basePayload.temperature = temperatureRaw;
+    }
     this.showStatusProgress("Generating tags...", null);
     try {
-      const response = await this.requestLocalApiRaw(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      });
-      if (response.statusCode >= 400) {
-        const details = response.body.toString("utf8");
-        throw new Error(`Tag request failed (${response.statusCode}): ${details || "no response body"}`);
+      const send = async (payload: Record<string, any>): Promise<Buffer> => {
+        const response = await this.requestLocalApiRaw(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
+        if (response.statusCode >= 400) {
+          const details = response.body.toString("utf8");
+          throw new Error(`Tag request failed (${response.statusCode}): ${details || "no response body"}`);
+        }
+        return response.body;
+      };
+
+      let body: Buffer;
+      try {
+        body = await send(basePayload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          "temperature" in basePayload
+          && /temperature/i.test(message)
+          && /unsupported|default/i.test(message)
+        ) {
+          const retryPayload = { ...basePayload };
+          delete retryPayload.temperature;
+          body = await send(retryPayload);
+        } else {
+          throw error;
+        }
       }
-      const data = JSON.parse(response.body.toString("utf8"));
+
+      const data = JSON.parse(body.toString("utf8"));
       const content =
         data?.choices?.[0]?.message?.content ??
         data?.choices?.[0]?.text ??
@@ -4103,34 +4136,47 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   async searchZoteroItems(query: string): Promise<ZoteroLocalItem[]> {
-    const params = new URLSearchParams();
-    params.set("itemType", "-attachment");
-    params.set("limit", "25");
-    params.set("include", "data,meta");
-    if (query.trim()) {
-      params.set("q", query.trim());
-    }
-    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${params.toString()}`);
-    try {
-      const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
-      const items = JSON.parse(payload.toString("utf8"));
-      if (!Array.isArray(items)) {
-        return [];
+    const includeOptions = ["data,meta,children", "data,meta"];
+    for (const include of includeOptions) {
+      const params = new URLSearchParams();
+      params.set("itemType", "-attachment");
+      params.set("limit", "25");
+      params.set("include", include);
+      if (query.trim()) {
+        params.set("q", query.trim());
       }
-      return items
-        .map((item) => ({
-          key: item.key ?? item.data?.key,
-          data: item.data ?? {},
-          meta: item.meta ?? {},
-        }))
-        .filter((item) => typeof item.key === "string" && item.key.trim().length > 0);
-    } catch (error) {
-      console.warn("Failed to search Zotero via local API", error);
-      if (!this.canUseWebApi()) {
-        throw error;
+      const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${params.toString()}`);
+      try {
+        const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
+        const items = JSON.parse(payload.toString("utf8"));
+        if (!Array.isArray(items)) {
+          return [];
+        }
+        return items
+          .map((item) => ({
+            key: item.key ?? item.data?.key,
+            data: item.data ?? {},
+            meta: item.meta ?? {},
+          }))
+          .filter((item) => typeof item.key === "string" && item.key.trim().length > 0);
+      } catch (error) {
+        console.warn("Failed to search Zotero via local API", error);
       }
-      return this.searchZoteroItemsWeb(query);
     }
+    if (!this.canUseWebApi()) {
+      throw new Error("Zotero search failed for all include modes.");
+    }
+    return this.searchZoteroItemsWeb(query);
+  }
+
+  public async hasProcessableAttachment(item: ZoteroLocalItem): Promise<boolean> {
+    const values: ZoteroItemValues = item.data ?? item;
+    const itemKey = typeof item.key === "string" ? item.key : this.coerceString(values.key);
+    if (!itemKey) {
+      return false;
+    }
+    const attachment = await this.resolvePdfAttachment(values, itemKey);
+    return Boolean(attachment);
   }
 
   private async resolvePdfAttachment(values: ZoteroItemValues, itemKey: string): Promise<PdfAttachment | null> {
@@ -7311,6 +7357,8 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   private resolveSelection: ((item: ZoteroLocalItem | null) => void) | null;
   private lastError: string | null = null;
   private indexedDocIds: Set<string> | null = null;
+  private attachmentStatusCache = new Map<string, "yes" | "no">();
+  private attachmentChecks = new Set<string>();
 
   constructor(app: App, plugin: ZoteroRagPlugin, onSelect: (item: ZoteroLocalItem | null) => void) {
     super(app);
@@ -7368,8 +7416,21 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     }
     if (pdfStatus === "no") {
       addSeparator();
-      metaEl.createSpan({ text: "No attachment", cls: "zrr-no-pdf-flag" });
+      metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
       hasMeta = true;
+    }
+    if (pdfStatus === "unknown") {
+      const cached = docId ? this.attachmentStatusCache.get(docId) : undefined;
+      if (cached === "no") {
+        addSeparator();
+        metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
+        hasMeta = true;
+        el.addClass("zrr-no-pdf-item");
+      } else if (cached === "yes") {
+        // Nothing to render.
+      } else if (docId) {
+        void this.refreshAttachmentStatus(docId, item, el, metaEl);
+      }
     }
     el.addEventListener("click", () => {
       if (this.resolveSelection) {
@@ -7416,7 +7477,21 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   private isPdfAttachment(entry: any): boolean {
     const contentType =
       entry?.contentType ?? entry?.mimeType ?? entry?.data?.contentType ?? entry?.data?.mimeType ?? "";
-    return contentType === "application/pdf";
+    if (contentType === "application/pdf") {
+      return true;
+    }
+    const filename =
+      entry?.filename ??
+      entry?.fileName ??
+      entry?.data?.filename ??
+      entry?.data?.fileName ??
+      entry?.path ??
+      entry?.data?.path ??
+      "";
+    if (typeof filename === "string" && filename.toLowerCase().endsWith(".pdf")) {
+      return true;
+    }
+    return false;
   }
 
   private extractYear(item: ZoteroLocalItem): string {
@@ -7426,5 +7501,32 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     }
     const match = parsed.match(/\b(\d{4})\b/);
     return match ? match[1] : "";
+  }
+
+  private async refreshAttachmentStatus(
+    docId: string,
+    item: ZoteroLocalItem,
+    el: HTMLElement,
+    metaEl: HTMLElement
+  ): Promise<void> {
+    if (this.attachmentChecks.has(docId)) {
+      return;
+    }
+    this.attachmentChecks.add(docId);
+    try {
+      const hasPdf = await this.plugin.hasProcessableAttachment(item);
+      this.attachmentStatusCache.set(docId, hasPdf ? "yes" : "no");
+      if (!hasPdf && metaEl.isConnected && el.isConnected) {
+        if (!metaEl.querySelector(".zrr-no-pdf-flag")) {
+          if (metaEl.childNodes.length > 0) {
+            metaEl.createSpan({ text: " • " });
+          }
+          metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
+        }
+        el.addClass("zrr-no-pdf-item");
+      }
+    } finally {
+      this.attachmentChecks.delete(docId);
+    }
   }
 }

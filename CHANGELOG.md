@@ -6,6 +6,7 @@
 - Chunk end markers now render as badges in reading/live preview.
 - Tag sanitization now offers Obsidian-style cases (camel/pascal/snake/kebab) instead of a custom separator.
 - Frontmatter now supports `aliases` built from citekey/short title/DOI (when present).
+- Zotero picker now flags items without processable PDFs even when only non-PDF attachments exist.
 
 ## 0.3.3
 - Tag-aware retrieval boosting and tag regeneration in the chunk editor.
