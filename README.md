@@ -185,6 +185,16 @@ Key settings:
 
 Answers are generated from retrieved text only and include citations.
 
+### Retrieval fallback (auto-broadening)
+
+If retrieval looks weak, the query is broadened once before the LLM runs. This is not configurable yet; the current triggers are:
+- Fewer than 3 filtered chunks.
+- Fewer than ~1500 characters of filtered context.
+- Weak best vector match (COSINE distance > 0.4).
+- Narrative filter keeps <50% of contentful chunks (when at least 4 content chunks exist).
+
+When triggered, the search doubles `k` (minimum 12) and relaxes narrative filtering.
+
 ## PDF handling
 
 - If "Copy PDFs into vault" is ON, the note links to the vault PDF.

@@ -248,7 +248,7 @@ export class ZoteroChatView extends ItemView {
       cls: `zrr-chat-message zrr-chat-${message.role}`,
     });
     const meta = wrapper.createEl("div", { cls: "zrr-chat-meta" });
-    meta.setText(message.role === "user" ? "You" : "Assistant");
+    meta.setText(message.role === "user" ? "You" : "Zotero");
     const contentEl = wrapper.createEl("div", { cls: "zrr-chat-content" });
     const citationsEl = wrapper.createEl("div", { cls: "zrr-chat-citations" });
     this.messageEls.set(message.id, { wrapper, content: contentEl, citations: citationsEl });

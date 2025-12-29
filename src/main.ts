@@ -4201,10 +4201,7 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private pickPdfAttachment(values: ZoteroItemValues): PdfAttachment | null {
-    const attachments = values.attachments ?? values.children ?? values.items ?? [];
-    if (!Array.isArray(attachments)) {
-      return null;
-    }
+    const attachments = this.collectAttachmentCandidates(values);
     for (const attachment of attachments) {
       const pdfAttachment = this.toPdfAttachment(attachment);
       if (pdfAttachment) {
@@ -4212,6 +4209,28 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
     return null;
+  }
+
+  private collectAttachmentCandidates(values: ZoteroItemValues): any[] {
+    const buckets = [
+      values.attachments,
+      values.children,
+      values.items,
+      (values as any).attachment,
+      (values as any).allAttachments,
+    ];
+    const collected: any[] = [];
+    for (const bucket of buckets) {
+      if (!bucket) {
+        continue;
+      }
+      if (Array.isArray(bucket)) {
+        collected.push(...bucket);
+      } else if (typeof bucket === "object") {
+        collected.push(bucket);
+      }
+    }
+    return collected;
   }
 
   private toPdfAttachment(attachment: any): PdfAttachment | null {
@@ -7462,8 +7481,8 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   }
 
   private getPdfStatus(item: ZoteroLocalItem): "yes" | "no" | "unknown" {
-    const attachments = item.data?.attachments ?? item.data?.children ?? item.data?.items ?? [];
-    if (Array.isArray(attachments) && attachments.length > 0) {
+    const attachments = this.collectItemAttachments(item.data);
+    if (attachments.length > 0) {
       const hasPdf = attachments.some((entry) => this.isPdfAttachment(entry));
       return hasPdf ? "yes" : "no";
     }
@@ -7472,6 +7491,31 @@ class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
       return "no";
     }
     return "unknown";
+  }
+
+  private collectItemAttachments(data: Record<string, any> | undefined): any[] {
+    if (!data) {
+      return [];
+    }
+    const buckets = [
+      data.attachments,
+      data.children,
+      data.items,
+      (data as any).attachment,
+      (data as any).allAttachments,
+    ];
+    const collected: any[] = [];
+    for (const bucket of buckets) {
+      if (!bucket) {
+        continue;
+      }
+      if (Array.isArray(bucket)) {
+        collected.push(...bucket);
+      } else if (typeof bucket === "object") {
+        collected.push(bucket);
+      }
+    }
+    return collected;
   }
 
   private isPdfAttachment(entry: any): boolean {
