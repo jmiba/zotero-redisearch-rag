@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+- Improved Python error handling and auto-opened Settings for environment fixes.
+- Frontmatter `pdf_link` now stores raw Zotero deeplinks (no markdown wrapper).
+- Release package now includes `CHANGELOG.md`.
+
 ## 0.3.0
 - Cursor-anchored chunk toolbar with Tags, Indexed preview, and Exclude/Include.
 - Excluded chunks are removed from Redis but preserved in chunk JSON for easy re-include.

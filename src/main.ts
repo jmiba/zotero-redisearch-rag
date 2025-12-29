@@ -6094,7 +6094,11 @@ export default class ZoteroRagPlugin extends Plugin {
         env: this.buildPythonEnv(),
       });
 
+      let stdout = "";
       let stderr = "";
+      child.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
       child.stderr.on("data", (data) => {
         stderr += data.toString();
       });
@@ -6108,7 +6112,8 @@ export default class ZoteroRagPlugin extends Plugin {
         if (code === 0) {
           resolve();
         } else {
-          this.handlePythonProcessError(stderr);
+          const diagnostic = stderr.trim() ? stderr : stdout;
+          this.handlePythonProcessError(diagnostic);
           reject(new Error(stderr || `Process exited with code ${code}`));
         }
       });
@@ -6164,6 +6169,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
       let stdoutBuffer = "";
       let stderr = "";
+      let diagnostic = "";
       let lastPayload: any = null;
       let sawFinal = false;
 
@@ -6181,7 +6187,7 @@ export default class ZoteroRagPlugin extends Plugin {
           }
           onPayload(payload);
         } catch {
-          // Ignore non-JSON output.
+          diagnostic += `${line}\n`;
         }
       };
 
@@ -6216,7 +6222,8 @@ export default class ZoteroRagPlugin extends Plugin {
         if (code === 0) {
           resolve();
         } else {
-          this.handlePythonProcessError(stderr);
+          const diagnosticText = stderr.trim() ? stderr : diagnostic;
+          this.handlePythonProcessError(diagnosticText);
           reject(new Error(stderr || `Process exited with code ${code}`));
         }
       });
@@ -6271,27 +6278,30 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const missingModule = raw.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/);
     if (missingModule) {
-      const notice = `Python env missing module '${missingModule[1]}'. Run "Python environment" in settings.`;
-      this.notifyPythonEnvOnce(notice);
+      const notice = `Python env missing module '${missingModule[1]}'. Open Settings > Python environment > Create/Update.`;
+      this.notifyPythonEnvOnce(notice, true);
       return;
     }
-    if (/No module named ['"]/.test(raw)) {
-      const notice = "Python env missing required modules. Run \"Python environment\" in settings.";
-      this.notifyPythonEnvOnce(notice);
+    if (/No module named ['"]|ImportError: No module named/i.test(raw)) {
+      const notice = "Python env missing required modules. Open Settings > Python environment > Create/Update.";
+      this.notifyPythonEnvOnce(notice, true);
       return;
     }
-    if (/ENOENT|No such file or directory|not found/.test(raw)) {
-      const notice = "Python not found. Configure Python path or run \"Python environment\" in settings.";
-      this.notifyPythonEnvOnce(notice);
+    if (/ENOENT|No such file or directory|not found|command not found|spawn .* ENOENT/i.test(raw)) {
+      const notice = "Python not found. Configure the Python path or use Settings > Python environment > Create/Update.";
+      this.notifyPythonEnvOnce(notice, true);
     }
   }
 
-  private notifyPythonEnvOnce(message: string): void {
+  private notifyPythonEnvOnce(message: string, openSettings = false): void {
     if (this.lastPythonEnvNotice === message) {
       return;
     }
     this.lastPythonEnvNotice = message;
     new Notice(message);
+    if (openSettings) {
+      this.openPluginSettings();
+    }
   }
 
   private notifyContainerOnce(message: string): void {
@@ -6300,6 +6310,16 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     this.lastContainerNotice = message;
     new Notice(message);
+  }
+
+  private openPluginSettings(): void {
+    const settings = (this.app as any).setting;
+    if (settings?.open) {
+      settings.open();
+    }
+    if (settings?.openTabById) {
+      settings.openTabById(this.manifest.id);
+    }
   }
 
   // Logging helpers
@@ -6429,7 +6449,8 @@ export default class ZoteroRagPlugin extends Plugin {
         if (code === 0) {
           resolve(stdout.trim());
         } else {
-          this.handlePythonProcessError(stderr);
+          const diagnostic = stderr.trim() ? stderr : stdout;
+          this.handlePythonProcessError(diagnostic);
           reject(new Error(stderr || `Process exited with code ${code}`));
         }
       });
