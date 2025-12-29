@@ -531,12 +531,17 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         profilesContainer.createEl("p", { text: "No profiles yet. Add one below." });
       }
       for (const profile of profiles) {
-        const header = profilesContainer.createEl("h6", {
+        const details = profilesContainer.createEl("details", { cls: "zrr-profile" });
+        if (profiles.length === 1) {
+          details.open = true;
+        }
+        const summary = details.createEl("summary", {
           text: profile.name || profile.id || "Profile",
         });
-        header.addClass("zrr-profile-title");
+        summary.addClass("zrr-profile-title");
+        const body = details.createDiv({ cls: "zrr-profile-body" });
 
-        new Setting(profilesContainer)
+        new Setting(body)
           .setName("Profile name")
           .addText((text) =>
             text
@@ -544,11 +549,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               .setValue(profile.name || "")
               .onChange(async (value) => {
                 profile.name = value.trim();
+                summary.textContent = profile.name || profile.id || "Profile";
                 await saveProfiles(getProfiles());
               })
           );
 
-        new Setting(profilesContainer)
+        new Setting(body)
           .setName("Base URL")
           .addText((text) =>
             text
@@ -560,7 +566,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               })
           );
 
-        new Setting(profilesContainer)
+        new Setting(body)
           .setName("API key")
           .setDesc("Stored in settings (not encrypted).")
           .addText((text) => {
@@ -575,7 +581,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
           ;
 
-        new Setting(profilesContainer)
+        new Setting(body)
           .setName("Remove profile")
           .setDesc("Deletes this saved profile.")
           .addButton((button) =>
@@ -594,9 +600,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       }
 
       new Setting(profilesContainer)
-        .setName("Add profile")
         .addButton((button) =>
-          button.setButtonText("Add").onClick(async () => {
+          button.setButtonText("Add profile").onClick(async () => {
             const id = `profile-${Date.now().toString(36)}`;
             const profiles = getProfiles().concat([
               {
