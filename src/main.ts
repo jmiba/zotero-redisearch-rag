@@ -114,6 +114,94 @@ const ZRR_CHUNK_START_RE = /<!--\s*zrr:chunk\b([^>]*)-->/i;
 const ZRR_CHUNK_END_RE = /<!--\s*zrr:chunk\s+end\s*-->/i;
 const ZRR_CHUNK_EXCLUDE_ANY_RE = /<!--\s*zrr:(?:exclude|delete)\s*-->/i;
 
+type ZrrBadgeInfo = {
+  type: "sync-start" | "sync-end" | "chunk-start" | "chunk-end";
+  docId?: string;
+  chunkId?: string;
+  excluded?: boolean;
+  pageNumber?: number;
+  chunkKind?: "page" | "section";
+};
+
+const parseZrrBadgeInfo = (data: string): ZrrBadgeInfo | null => {
+  const trimmed = data.trim();
+  if (!trimmed.toLowerCase().startsWith("zrr:")) {
+    return null;
+  }
+  if (/^zrr:sync-start\b/i.test(trimmed)) {
+    const docMatch = trimmed.match(/\bdoc_id=(["']?)([^"'\s]+)\1/i);
+    return {
+      type: "sync-start",
+      docId: docMatch ? docMatch[2] : undefined,
+    };
+  }
+  if (/^zrr:sync-end\b/i.test(trimmed)) {
+    return { type: "sync-end" };
+  }
+  if (/^zrr:chunk\s+end\b/i.test(trimmed)) {
+    return { type: "chunk-end" };
+  }
+  const chunkMatch = trimmed.match(/^zrr:chunk\b(.*)$/i);
+  if (!chunkMatch) {
+    return null;
+  }
+  const attrs = chunkMatch[1] || "";
+  const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
+  const chunkId = idMatch ? idMatch[2] : "";
+  const pageMatch = chunkId.match(/^p(\d+)$/i);
+  const pageNumber = pageMatch ? Number.parseInt(pageMatch[1], 10) : undefined;
+  const excluded = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
+  return {
+    type: "chunk-start",
+    chunkId: chunkId || undefined,
+    excluded,
+    pageNumber: Number.isFinite(pageNumber ?? NaN) ? pageNumber : undefined,
+    chunkKind: pageNumber ? "page" : "section",
+  };
+};
+
+const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElement | null => {
+  const badge = document.createElement("div");
+  badge.classList.add("zrr-sync-badge");
+  if (info.type === "sync-start" || info.type === "sync-end") {
+    badge.classList.add("zrr-sync-badge--sync");
+    badge.classList.add(
+      info.type === "sync-start" ? "zrr-sync-badge--sync-start" : "zrr-sync-badge--sync-end"
+    );
+    if (info.type === "sync-start") {
+      badge.textContent = info.docId ? `Redis Index Sync start • ${info.docId}` : "Redis Index Sync start";
+    } else {
+      badge.textContent = "Redis Index Sync end";
+    }
+    return badge;
+  }
+  if (info.type === "chunk-end") {
+    badge.classList.add("zrr-sync-badge--chunk-end");
+    badge.textContent = info.chunkKind === "page" ? "Page end" : "Section end";
+    return badge;
+  }
+  if (info.type !== "chunk-start") {
+    return null;
+  }
+  badge.classList.add("zrr-sync-badge--chunk");
+  if (info.excluded) {
+    badge.classList.add("is-excluded");
+  }
+  if (info.pageNumber && totalPages > 0) {
+    badge.textContent = `Page ${info.pageNumber}/${totalPages}`;
+  } else if (info.pageNumber) {
+    badge.textContent = `Page ${info.pageNumber}`;
+  } else if (info.chunkId) {
+    badge.textContent = `Section ${info.chunkId}`;
+  } else {
+    badge.textContent = "Section";
+  }
+  if (info.excluded) {
+    badge.textContent = `${badge.textContent} • excluded`;
+  }
+  return badge;
+};
+
 class TextPromptModal extends Modal {
   private titleText: string;
   private placeholder: string;
@@ -251,17 +339,23 @@ class ChunkTagModal extends Modal {
 class ChunkTextPreviewModal extends Modal {
   private titleText: string;
   private content: string;
+  private noteText: string;
 
-  constructor(app: App, titleText: string, content: string) {
+  constructor(app: App, titleText: string, content: string, noteText = "") {
     super(app);
     this.titleText = titleText;
     this.content = content;
+    this.noteText = noteText;
   }
 
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h3", { text: this.titleText });
+    if (this.noteText) {
+      const note = contentEl.createEl("div", { text: this.noteText });
+      note.className = "zrr-indexed-note";
+    }
     const area = contentEl.createEl("textarea", {
       attr: { rows: "12", readonly: "true" },
     });
@@ -556,6 +650,83 @@ const buildChunkToolsDecorations = (
   });
   return Decoration.set([widget.range(line.to)]);
 };
+
+class ZrrBadgeWidget extends WidgetType {
+  private info: ZrrBadgeInfo;
+  private totalPages: number;
+
+  constructor(info: ZrrBadgeInfo, totalPages: number) {
+    super();
+    this.info = info;
+    this.totalPages = totalPages;
+  }
+
+  toDOM(): HTMLElement {
+    return createZrrBadgeElement(this.info, this.totalPages) ?? document.createElement("span");
+  }
+}
+
+const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
+  const doc = view.state.doc;
+  const builder = new RangeSetBuilder<Decoration>();
+  const entries: Array<{ from: number; to: number; info: ZrrBadgeInfo }> = [];
+  const pageNumbers: number[] = [];
+  let lastChunkKind: "page" | "section" | null = null;
+  for (let lineNo = 1; lineNo <= doc.lines; lineNo += 1) {
+    const line = doc.line(lineNo);
+    const match = line.text.match(/<!--\s*([^>]*)\s*-->/);
+    if (!match) {
+      continue;
+    }
+    const info = parseZrrBadgeInfo(match[1]);
+    if (!info) {
+      continue;
+    }
+    if (info.type === "chunk-start") {
+      lastChunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
+    } else if (info.type === "chunk-end") {
+      info.chunkKind = lastChunkKind ?? "section";
+      lastChunkKind = null;
+    }
+    entries.push({ from: line.from, to: line.to, info });
+    if (info.pageNumber) {
+      pageNumbers.push(info.pageNumber);
+    }
+  }
+  if (!entries.length) {
+    return Decoration.none;
+  }
+  const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
+  for (const entry of entries) {
+    const widget = Decoration.replace({
+      widget: new ZrrBadgeWidget(entry.info, totalPages),
+    });
+    builder.add(entry.from, entry.to, widget);
+  }
+  return builder.finish();
+};
+
+const createSyncBadgeExtension = (): ViewPlugin<{
+  decorations: DecorationSet;
+}> =>
+  ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+
+      constructor(view: EditorView) {
+        this.decorations = buildSyncBadgeDecorations(view);
+      }
+
+      update(update: ViewUpdate): void {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = buildSyncBadgeDecorations(update.view);
+        }
+      }
+    },
+    {
+      decorations: (value) => value.decorations,
+    }
+  );
 
 const createChunkToolsExtension = (plugin: ZoteroRagPlugin): ViewPlugin<{
   decorations: DecorationSet;
@@ -854,7 +1025,9 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
     this.registerChunkExcludeMenu();
+    this.registerSyncCommentBadges();
     this.registerEditorExtension(createChunkToolsExtension(this));
+    this.registerEditorExtension(createSyncBadgeExtension());
 
     try {
       await this.ensureBundledTools();
@@ -2687,6 +2860,22 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async fetchZoteroItemCsl(itemKey: string): Promise<Record<string, any> | null> {
+    try {
+      const url = this.buildZoteroUrl(
+        `/${this.getZoteroLibraryPath()}/items/${itemKey}?format=csljson`
+      );
+      const payload = await this.requestLocalApi(url, `Zotero CSL fetch failed for ${url}`);
+      return this.parseCslPayload(payload);
+    } catch (error) {
+      console.warn("Failed to fetch Zotero CSL from local API", error);
+      if (this.canUseWebApi()) {
+        return this.fetchZoteroItemCslWeb(itemKey);
+      }
+      return null;
+    }
+  }
+
   private async fetchZoteroCollectionTitle(collectionKey: string): Promise<string> {
     const key = (collectionKey || "").trim();
     if (!key) {
@@ -2746,6 +2935,35 @@ export default class ZoteroRagPlugin extends Plugin {
       return JSON.parse(payload.toString("utf8"));
     } catch (error) {
       console.warn("Failed to fetch Zotero item from Web API", error);
+      return null;
+    }
+  }
+
+  private async fetchZoteroItemCslWeb(itemKey: string): Promise<Record<string, any> | null> {
+    try {
+      const url = this.buildWebApiUrl(
+        `/${this.getWebApiLibraryPath()}/items/${itemKey}?format=csljson`
+      );
+      const payload = await this.requestWebApi(url, `Zotero Web API CSL fetch failed for ${url}`);
+      return this.parseCslPayload(payload);
+    } catch (error) {
+      console.warn("Failed to fetch Zotero CSL from Web API", error);
+      return null;
+    }
+  }
+
+  private parseCslPayload(payload: Buffer): Record<string, any> | null {
+    try {
+      const parsed = JSON.parse(payload.toString("utf8"));
+      if (Array.isArray(parsed)) {
+        return typeof parsed[0] === "object" && parsed[0] ? parsed[0] : null;
+      }
+      if (typeof parsed === "object" && parsed) {
+        return parsed as Record<string, any>;
+      }
+      return null;
+    } catch (error) {
+      console.warn("Failed to parse CSL payload", error);
       return null;
     }
   }
@@ -3174,12 +3392,13 @@ export default class ZoteroRagPlugin extends Plugin {
     const text = typeof target.text === "string" ? target.text : String(target.text ?? "");
     const indexedText = await this.renderMarkdownToIndexText(text);
     const note = this.settings.embedIncludeMetadata
-      ? "Note: metadata is prepended during embedding when enabled.\n\n"
+      ? "Note: when “Include metadata in embeddings” is enabled, the indexer prepends title/authors/tags/section info before embedding. The preview below shows only the chunk text."
       : "";
     new ChunkTextPreviewModal(
       this.app,
       `Indexed text for ${chunkId}`,
-      `${note}${indexedText}`
+      indexedText,
+      note
     ).open();
   }
 
@@ -3728,6 +3947,55 @@ export default class ZoteroRagPlugin extends Plugin {
       .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
       .join("\n")
       .trim();
+  }
+
+  private registerSyncCommentBadges(): void {
+    this.registerMarkdownPostProcessor((element) => {
+      const iterator = document.createNodeIterator(element, NodeFilter.SHOW_COMMENT);
+      const comments: Comment[] = [];
+      let node = iterator.nextNode();
+      while (node) {
+        if (node instanceof Comment) {
+          comments.push(node);
+        }
+        node = iterator.nextNode();
+      }
+      if (!comments.length) {
+        return;
+      }
+
+      const parsed = comments
+        .map((comment) => ({ comment, info: parseZrrBadgeInfo(comment.data || "") }))
+        .filter((entry) => entry.info !== null);
+      if (!parsed.length) {
+        return;
+      }
+
+      const pageNumbers = parsed
+        .filter((entry) => entry.info?.pageNumber)
+        .map((entry) => entry.info?.pageNumber || 0);
+      const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
+      let lastChunkKind: "page" | "section" | null = null;
+
+      for (const entry of parsed) {
+        const info = entry.info;
+        if (!info) {
+          continue;
+        }
+        if (info.type === "chunk-start") {
+          lastChunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
+        } else if (info.type === "chunk-end") {
+          info.chunkKind = lastChunkKind ?? "section";
+          lastChunkKind = null;
+        }
+        const badge = createZrrBadgeElement(info, totalPages);
+        if (!badge) {
+          continue;
+        }
+        entry.comment.parentNode?.insertBefore(badge, entry.comment);
+        entry.comment.remove();
+      }
+    });
   }
 
 
@@ -5455,7 +5723,15 @@ export default class ZoteroRagPlugin extends Plugin {
     const volume = typeof values.volume === "string" ? values.volume : "";
     const issue = typeof values.issue === "string" ? values.issue : "";
     const pages = typeof values.pages === "string" ? values.pages : "";
-    const doi = typeof values.DOI === "string" ? values.DOI : "";
+    const itemKey = typeof values.key === "string" ? values.key : docId;
+    let doi = typeof values.DOI === "string" ? values.DOI : "";
+    if (!doi) {
+      doi = this.extractDoiFromExtra(values);
+    }
+    if (!doi) {
+      const csl = await this.fetchZoteroItemCsl(itemKey);
+      doi = this.extractDoiFromCsl(csl);
+    }
     const isbn = typeof values.ISBN === "string" ? values.ISBN : "";
     const issn = typeof values.ISSN === "string" ? values.ISSN : "";
     const publisher = typeof values.publisher === "string" ? values.publisher : "";
@@ -5464,8 +5740,15 @@ export default class ZoteroRagPlugin extends Plugin {
     const language = typeof values.language === "string" ? values.language : "";
     const abstractNote = typeof values.abstractNote === "string" ? values.abstractNote : "";
     const citekey = this.extractCitekey(values);
-    const itemKey = typeof values.key === "string" ? values.key : docId;
     const itemLink = this.buildZoteroDeepLink(itemKey);
+    const aliasesList = Array.from(
+      new Set(
+        [citekey, shortTitle, doi]
+          .map((entry) => String(entry || "").trim())
+          .filter((entry) => entry.length > 0)
+      )
+    );
+    const aliases = aliasesList.join("; ");
 
     const vars: Record<string, string> = {
       doc_id: docId,
@@ -5478,6 +5761,7 @@ export default class ZoteroRagPlugin extends Plugin {
       year,
       authors,
       editors,
+      aliases,
       tags,
       collection_title: collectionTitle,
       collection_titles: collectionTitle,
@@ -5512,6 +5796,7 @@ export default class ZoteroRagPlugin extends Plugin {
     vars["authors_yaml_list"] = this.toYamlList(authorsList);
     vars["editors_yaml_list"] = this.toYamlList(editorsList);
     vars["tags_yaml_list"] = tagsList.length > 0 ? this.toYamlList(tagsList) : "";
+    vars["aliases_yaml_list"] = aliasesList.length > 0 ? this.toYamlList(aliasesList) : "";
     vars["collections_yaml_list"] = this.toYamlList(collectionTitles);
     vars["collections_links_yaml_list"] = this.toYamlList(collectionLinks);
     vars["tags_raw"] = rawTagsList.join("; ");
@@ -5520,6 +5805,7 @@ export default class ZoteroRagPlugin extends Plugin {
     vars["authors_list"] = vars["authors_yaml_list"];
     vars["editors_list"] = vars["editors_yaml_list"];
     vars["tags_list"] = vars["tags_yaml_list"];
+    vars["aliases_list"] = vars["aliases_yaml_list"];
     vars["collections_list"] = vars["collections_yaml_list"];
     vars["collections_links_list"] = vars["collections_links_yaml_list"];
 
@@ -5574,6 +5860,33 @@ export default class ZoteroRagPlugin extends Plugin {
     return "";
   }
 
+  private extractDoiFromExtra(values: ZoteroItemValues): string {
+    const extra = typeof values.extra === "string" ? values.extra : "";
+    if (!extra) {
+      return "";
+    }
+    const lines = extra.split(/\r?\n/);
+    for (const line of lines) {
+      const match = line.match(/^\s*doi\s*:\s*(.+)\s*$/i);
+      if (match && match[1]) {
+        return match[1].trim().replace(/[.,;]+$/, "");
+      }
+    }
+    const doiMatch = extra.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+\b/i);
+    return doiMatch ? doiMatch[0].replace(/[.,;]+$/, "") : "";
+  }
+
+  private extractDoiFromCsl(csl: Record<string, any> | null): string {
+    if (!csl) {
+      return "";
+    }
+    const doi = csl.DOI ?? csl.doi;
+    if (typeof doi === "string") {
+      return doi.trim().replace(/[.,;]+$/, "");
+    }
+    return "";
+  }
+
   private escapeYamlString(value: string): string {
     const normalized = String(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const safe = normalized
@@ -5591,17 +5904,16 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private sanitizeObsidianTags(tags: string[]): string[] {
-    const mode = this.settings.tagSanitizeMode || "replace";
-    const replacement = this.settings.tagSanitizeReplacement || "-";
+    const rawMode = this.settings.tagSanitizeMode || "kebab";
+    const mode = rawMode === "replace" ? "kebab" : rawMode;
     return tags
-      .map((tag) => this.sanitizeObsidianTag(tag, mode, replacement))
+      .map((tag) => this.sanitizeObsidianTag(tag, mode))
       .filter((tag) => tag.length > 0);
   }
 
   private sanitizeObsidianTag(
     tag: string,
-    mode: "none" | "replace" | "camel",
-    replacement: string
+    mode: "none" | "camel" | "pascal" | "snake" | "kebab"
   ): string {
     const raw = String(tag || "").trim();
     if (!raw) {
@@ -5611,23 +5923,38 @@ export default class ZoteroRagPlugin extends Plugin {
     if (mode === "none") {
       return cleaned;
     }
-    if (mode === "camel") {
-      const parts = cleaned
-        .split(/[\s\-_/.:;,+]+/)
-        .map((part) => part.trim())
+    const hasNonDigit = (value: string): boolean => !/^\d+$/.test(value);
+
+    const normalizeSegments = (format: "camel" | "pascal" | "snake" | "kebab"): string => {
+      const segments = cleaned
+        .split("/")
+        .map((segment) => {
+          const normalized = segment.replace(/[^\p{L}\p{N}]+/gu, " ");
+          const parts = normalized.split(/\s+/).filter(Boolean);
+          if (!parts.length) {
+            return "";
+          }
+          if (format === "camel" || format === "pascal") {
+            const [first, ...rest] = parts;
+            const firstWord =
+              format === "pascal"
+                ? first.charAt(0).toUpperCase() + first.slice(1)
+                : first.charAt(0).toLowerCase() + first.slice(1);
+            return [
+              firstWord,
+              ...rest.map((part) => part.charAt(0).toUpperCase() + part.slice(1)),
+            ].join("");
+          }
+          const joiner = format === "snake" ? "_" : "-";
+          return parts.join(joiner);
+        })
         .filter(Boolean);
-      if (!parts.length) {
-        return "";
-      }
-      const [first, ...rest] = parts;
-      return [
-        first.charAt(0).toLowerCase() + first.slice(1),
-        ...rest.map((part) => part.charAt(0).toUpperCase() + part.slice(1)),
-      ].join("");
-    }
-    const repl = replacement || "-";
-    const escaped = this.escapeRegExp(repl);
-    return cleaned.replace(/\s+/g, repl).replace(new RegExp(`${escaped}+`, "g"), repl).trim();
+      const merged = segments.join("/").replace(/\/{2,}/g, "/").replace(/^\/+|\/+$/g, "");
+      return merged;
+    };
+
+    const normalized = normalizeSegments(mode);
+    return normalized && hasNonDigit(normalized) ? normalized : "";
   }
 
   private toObsidianLinks(items: string[]): string[] {

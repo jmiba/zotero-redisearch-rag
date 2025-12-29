@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.4
+
+- Sync markers now render as styled badges in reading view (page/section + sync start/end).
+- Chunk end markers now render as badges in reading/live preview.
+- Tag sanitization now offers Obsidian-style cases (camel/pascal/snake/kebab) instead of a custom separator.
+- Frontmatter now supports `aliases` built from citekey/short title/DOI (when present).
+
 ## 0.3.3
 - Tag-aware retrieval boosting and tag regeneration in the chunk editor.
 - Tag sanitization options for Obsidian (replace spaces or camelCase).

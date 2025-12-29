@@ -24,8 +24,7 @@ export interface ZoteroRagSettings {
   embedProviderProfileId: string;
   chatProviderProfileId: string;
   llmCleanupProviderProfileId: string;
-  tagSanitizeMode: "none" | "replace" | "camel";
-  tagSanitizeReplacement: string;
+  tagSanitizeMode: "none" | "camel" | "pascal" | "snake" | "kebab" | "replace";
   outputPdfDir: string;
   outputNoteDir: string;
   chatOutputDir: string;
@@ -89,6 +88,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "year: {{year}}\n" +
     "authors:\n{{authors_yaml_list}}\n" +
     "editors:\n{{editors_yaml_list}}\n" +
+    "aliases:\n{{aliases_yaml_list}}\n" +
     "tags:\n{{tags_yaml_list}}\n" +
     "collection_titles: {{collection_titles_yaml}}\n" +
     "collections:\n{{collections_yaml_list}}\n" +
@@ -141,8 +141,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   embedProviderProfileId: "lm-studio",
   chatProviderProfileId: "lm-studio",
   llmCleanupProviderProfileId: "lm-studio",
-  tagSanitizeMode: "replace",
-  tagSanitizeReplacement: "-",
+  tagSanitizeMode: "kebab",
   outputPdfDir: "Zotero/PDFs",
   outputNoteDir: "Zotero/Notes",
   chatOutputDir: "Zotero/Chats",
@@ -490,24 +489,17 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Tag sanitization")
-      .setDesc("Normalize Zotero tags for Obsidian (no spaces).")
+      .setDesc("Normalize Zotero tags for Obsidian (no spaces, punctuation trimmed).")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("none", "No change")
-          .addOption("replace", "Replace spaces")
           .addOption("camel", "camelCase")
-          .setValue(this.plugin.settings.tagSanitizeMode)
+          .addOption("pascal", "PascalCase")
+          .addOption("snake", "snake_case")
+          .addOption("kebab", "kebab-case")
+          .setValue(this.plugin.settings.tagSanitizeMode === "replace" ? "kebab" : this.plugin.settings.tagSanitizeMode)
           .onChange(async (value) => {
-            this.plugin.settings.tagSanitizeMode = value as "none" | "replace" | "camel";
-            await this.plugin.saveSettings();
-          })
-      )
-      .addText((text) =>
-        text
-          .setPlaceholder("-")
-          .setValue(this.plugin.settings.tagSanitizeReplacement)
-          .onChange(async (value) => {
-            this.plugin.settings.tagSanitizeReplacement = value.trim() || "-";
+            this.plugin.settings.tagSanitizeMode = value as "none" | "camel" | "pascal" | "snake" | "kebab";
             await this.plugin.saveSettings();
           })
       );
