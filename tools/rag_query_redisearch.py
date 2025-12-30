@@ -352,6 +352,25 @@ def search_redis_knn(
     return parse_results(raw)
 
 
+def chunk_key(item: Dict[str, Any]) -> str:
+    value = item.get("chunk_id")
+    if value is None:
+        return ""
+    return str(value)
+
+
+def dedupe_by_chunk_id(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Set[str] = set()
+    deduped: List[Dict[str, Any]] = []
+    for item in items:
+        key = chunk_key(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def retrieve_chunks(
     client: redis.Redis,
     index: str,
@@ -366,22 +385,18 @@ def retrieve_chunks(
     lexical_results = run_lexical_search(client, index, keywords, lexical_limit)
     lexical_ids: Set[str] = set()
     if lexical_results:
-        seen = {item.get("chunk_id") for item in retrieved if item.get("chunk_id")}
         for item in lexical_results:
-            chunk_id = item.get("chunk_id")
-            if not chunk_id or chunk_id in seen:
-                continue
-            retrieved.append(item)
-            seen.add(chunk_id)
-            lexical_ids.add(str(chunk_id))
-        for item in lexical_results:
-            chunk_id = item.get("chunk_id")
-            if chunk_id:
-                lexical_ids.add(str(chunk_id))
+            key = chunk_key(item)
+            if key:
+                lexical_ids.add(key)
 
         max_total = k + lexical_limit
-        if len(retrieved) > max_total:
-            retrieved = retrieved[:max_total]
+        combined = lexical_results + retrieved
+        if len(combined) > max_total:
+            combined = combined[:max_total]
+        retrieved = dedupe_by_chunk_id(combined)
+    else:
+        retrieved = dedupe_by_chunk_id(retrieved)
 
     if strict:
         filtered = [
@@ -396,26 +411,25 @@ def retrieve_chunks(
             filtered = retrieved
 
     if lexical_ids:
-        seen_ids = {str(item.get("chunk_id")) for item in filtered if item.get("chunk_id")}
+        seen_ids = {chunk_key(item) for item in filtered if chunk_key(item)}
         for item in lexical_results:
-            chunk_id = item.get("chunk_id")
-            if not chunk_id:
+            key = chunk_key(item)
+            if not key:
                 continue
-            cid = str(chunk_id)
-            if cid in seen_ids:
+            if key in seen_ids:
                 continue
             text = str(item.get("text", "") or "").strip()
             if not text:
                 continue
             filtered.append(item)
-            seen_ids.add(cid)
+            seen_ids.add(key)
 
     metrics = compute_retrieval_metrics(retrieved, filtered)
     ordered = apply_tag_boosting(filtered, keywords)
     if lexical_ids:
         lexical_set = set(lexical_ids)
-        lexical_first = [item for item in ordered if str(item.get("chunk_id")) in lexical_set]
-        rest = [item for item in ordered if str(item.get("chunk_id")) not in lexical_set]
+        lexical_first = [item for item in ordered if chunk_key(item) in lexical_set]
+        rest = [item for item in ordered if chunk_key(item) not in lexical_set]
         ordered = lexical_first + rest
     return ordered, metrics
 
@@ -722,7 +736,6 @@ def main() -> int:
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--redis-url", required=True)
     parser.add_argument("--index", required=True)
-    parser.add_argument("--prefix", required=True)
     parser.add_argument("--embed-base-url", required=True)
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)

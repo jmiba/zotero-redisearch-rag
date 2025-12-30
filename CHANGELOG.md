@@ -7,6 +7,8 @@
 - Drop & rebuild now proceeds if the Redis index does not exist yet.
 - Added a command to purge Redis chunk keys that have no cached item/chunk JSON.
 - Doc index pruning now runs after reindexing/purge to remove stale entries.
+- Embedding now splits long chunks into subchunks (multi-vector) while keeping display chunks intact.
+- Embedding subchunk size/overlap is now configurable; section chunk size/overlap settings removed.
 - Chunk end markers now render as badges in reading/live preview.
 - Retrieval now auto-broadens before the LLM when context is weak (chunk count, context length, vector score, narrative filter).
 - Indexing now derives text from a Markdown AST (table/list-aware) instead of flattening display Markdown.

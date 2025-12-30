@@ -18,6 +18,8 @@ def eprint(message: str) -> None:
 
 EMBED_MAX_CHARS = 12000
 EMBED_MAX_CHARS_NON_ASCII = 8000
+EMBED_SUBCHUNK_CHARS_DEFAULT = 3500
+EMBED_SUBCHUNK_OVERLAP_DEFAULT = 200
 
 
 def truncate_for_embedding(text: str) -> Tuple[str, bool]:
@@ -221,7 +223,7 @@ def parse_item_metadata(item_payload: Dict[str, Any]) -> Dict[str, Any]:
     date_field = str(data.get("date", "")).strip()
     match = None
     if date_field:
-        match = next(iter(__import__("re").findall(r"(1[5-9]\\d{2}|20\\d{2})", date_field)), None)
+        match = next(iter(__import__("re").findall(r"(1[5-9]\d{2}|20\d{2})", date_field)), None)
     if match:
         try:
             year = int(match)
@@ -253,6 +255,34 @@ def parse_chunk_id_list(raw: Optional[str], doc_id: str) -> List[str]:
     return items
 
 
+def delete_existing_chunk_keys(
+    client: redis.Redis,
+    prefix: str,
+    doc_id: str,
+    chunk_id: str,
+) -> int:
+    deleted = 0
+    base = f"{prefix}{doc_id}:{chunk_id}"
+    try:
+        if client.exists(base):
+            client.delete(base)
+            deleted += 1
+    except Exception:
+        pass
+    pattern = f"{base}#*"
+    batch: List[bytes] = []
+    for key in client.scan_iter(match=pattern, count=500):
+        batch.append(key)
+        if len(batch) >= 500:
+            client.delete(*batch)
+            deleted += len(batch)
+            batch = []
+    if batch:
+        client.delete(*batch)
+        deleted += len(batch)
+    return deleted
+
+
 def markdown_to_text(text: str) -> str:
     if not text:
         return ""
@@ -270,6 +300,91 @@ def markdown_to_text(text: str) -> str:
     stripped = re.sub(r"[ \t]+", " ", stripped)
     stripped = re.sub(r"\s*\n\s*", "\n", stripped)
     return stripped.strip()
+
+
+def split_paragraphs(text: str) -> List[str]:
+    paragraphs = re.split(r"\n\s*\n", text)
+    return [para.strip() for para in paragraphs if para.strip()]
+
+
+def split_long_text(text: str, max_chars: int) -> List[str]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    if len(sentences) <= 1:
+        return [text[i:i + max_chars] for i in range(0, len(text), max_chars)]
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+    for sentence in sentences:
+        sent = sentence.strip()
+        if not sent:
+            continue
+        if current_len + len(sent) + 1 > max_chars and current:
+            chunks.append(" ".join(current).strip())
+            current = [sent]
+            current_len = len(sent)
+        else:
+            current.append(sent)
+            current_len += len(sent) + 1
+    if current:
+        chunks.append(" ".join(current).strip())
+    return chunks
+
+
+def split_text_by_size(text: str, max_chars: int, overlap_chars: int) -> List[str]:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return [text]
+    paragraphs = split_paragraphs(text) or [text]
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    def flush() -> None:
+        nonlocal current, current_len
+        if not current:
+            return
+        chunk = "\n\n".join(current).strip()
+        if chunk:
+            chunks.append(chunk)
+        current = []
+        current_len = 0
+
+    for para in paragraphs:
+        for piece in split_long_text(para, max_chars):
+            piece_len = len(piece)
+            if current_len + piece_len + 2 > max_chars and current:
+                flush()
+            current.append(piece)
+            current_len += piece_len + 2
+
+    flush()
+
+    if overlap_chars <= 0 or len(chunks) <= 1:
+        return chunks
+
+    overlapped: List[str] = []
+    previous = ""
+    for chunk in chunks:
+        if previous:
+            overlap = previous[-overlap_chars:]
+            combined = f"{overlap}\n{chunk}".strip()
+        else:
+            combined = chunk
+        overlapped.append(combined)
+        previous = chunk
+    return overlapped
+
+
+def split_for_embedding(text: str, max_chars: int, overlap_chars: int) -> List[str]:
+    if not text:
+        return []
+    max_chars = int(max_chars or 0)
+    overlap_chars = max(0, int(overlap_chars or 0))
+    if max_chars <= 0:
+        return [text]
+    chunks = split_text_by_size(text, max_chars, overlap_chars)
+    return chunks or [text]
 
 
 def markdown_to_index_text(text: str) -> str:
@@ -570,6 +685,18 @@ def main() -> int:
     parser.add_argument("--embed-api-key", default="")
     parser.add_argument("--embed-model", required=True)
     parser.add_argument(
+        "--embed-subchunk-chars",
+        type=int,
+        default=EMBED_SUBCHUNK_CHARS_DEFAULT,
+        help="Max chars per embedding subchunk (0 disables splitting).",
+    )
+    parser.add_argument(
+        "--embed-subchunk-overlap",
+        type=int,
+        default=EMBED_SUBCHUNK_OVERLAP_DEFAULT,
+        help="Overlap chars between embedding subchunks.",
+    )
+    parser.add_argument(
         "--embed-include-metadata",
         action="store_true",
         help="Include title/authors/tags/section metadata in the embedding text",
@@ -666,14 +793,21 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to read item JSON metadata: {exc}")
 
-    if delete_ids:
+    if delete_ids or chunk_id_filter:
         try:
-            delete_keys = [f"{args.prefix}{doc_id}:{chunk_id}" for chunk_id in delete_ids]
-            client.delete(*delete_keys)
+            to_clear = set(delete_ids) | set(chunk_id_filter)
+            deleted = 0
+            for chunk_id in to_clear:
+                deleted += delete_existing_chunk_keys(client, args.prefix, doc_id, chunk_id)
+            if deleted:
+                eprint(f"Deleted {deleted} existing chunk keys for doc_id {doc_id}")
         except Exception as exc:
             eprint(f"Failed to delete chunk keys for doc_id {doc_id}: {exc}")
 
-    valid_chunks = []
+    embed_subchunk_chars = int(args.embed_subchunk_chars or 0)
+    embed_subchunk_overlap = max(0, int(args.embed_subchunk_overlap or 0))
+
+    prepared_chunks: List[Dict[str, Any]] = []
     for chunk in chunks:
         if is_chunk_excluded(chunk):
             continue
@@ -689,14 +823,21 @@ def main() -> int:
             continue
         if chunk_id in delete_ids:
             continue
-        valid_chunks.append(chunk)
+        sub_texts = split_for_embedding(text, embed_subchunk_chars, embed_subchunk_overlap)
+        if not sub_texts:
+            sub_texts = [text]
+        prepared_chunks.append({
+            "chunk": chunk,
+            "chunk_id": chunk_id,
+            "text": text,
+            "sub_texts": sub_texts,
+        })
 
-    if not valid_chunks:
+    if not prepared_chunks:
         return 0
 
-    first_chunk = valid_chunks[0]
-    first_raw = str(first_chunk.get("text", ""))
-    first_text = normalize_index_text(markdown_to_index_text(first_raw))
+    first_chunk = prepared_chunks[0]["chunk"]
+    first_text = prepared_chunks[0]["sub_texts"][0]
     first_embedding_text = (
         build_embedding_text(first_text, first_chunk, item_metadata)
         if args.embed_include_metadata
@@ -733,15 +874,15 @@ def main() -> int:
 
     sample_embedding = normalize_vector(sample_embedding)
 
-    total = len(valid_chunks)
+    total = sum(len(entry["sub_texts"]) for entry in prepared_chunks)
     current = 0
     updated_chunks = False
 
-    for chunk in valid_chunks:
-        current += 1
-        raw_text = str(chunk.get("text", ""))
-        text = normalize_index_text(markdown_to_index_text(raw_text))
-        chunk_id = chunk.get("chunk_id")
+    for entry in prepared_chunks:
+        chunk = entry["chunk"]
+        text = entry["text"]
+        chunk_id = entry["chunk_id"]
+        sub_texts = entry["sub_texts"]
         chunk_tags_value = ""
         existing_tags = chunk.get("chunk_tags")
         has_existing_tags = False
@@ -771,93 +912,102 @@ def main() -> int:
             except Exception as exc:
                 eprint(f"Tagging failed for chunk {chunk_id}: {exc}")
 
-        stable_chunk_id = f"{doc_id}:{chunk_id}"
-        key = f"{args.prefix}{stable_chunk_id}"
+        stable_parent_id = f"{doc_id}:{chunk_id}"
+        sub_total = len(sub_texts)
+        for sub_idx, sub_text in enumerate(sub_texts, start=1):
+            current += 1
+            stable_chunk_id = (
+                stable_parent_id if sub_total <= 1 else f"{stable_parent_id}#s{sub_idx}"
+            )
+            key = f"{args.prefix}{stable_chunk_id}"
 
-        if not args.upsert and client.exists(key):
-            continue
+            if not args.upsert and client.exists(key):
+                continue
 
-        try:
+            try:
+                if args.progress:
+                    print(
+                        json.dumps(
+                            {
+                                "type": "progress",
+                                "stage": "embedding",
+                                "current": current,
+                                "total": total,
+                                "message": f"Embedding {stable_chunk_id} ({current}/{total})",
+                            }
+                        ),
+                        flush=True,
+                    )
+                if chunk is first_chunk and sub_idx == 1:
+                    embedding = sample_embedding
+                else:
+                    embedding_text = (
+                        build_embedding_text(sub_text, chunk, item_metadata)
+                        if args.embed_include_metadata
+                        else sub_text
+                    )
+                    embed_len = len(embedding_text)
+                    embedding_text, truncated = truncate_for_embedding(embedding_text)
+                    if truncated:
+                        eprint(
+                            "Embedding input truncated for chunk %s (chars=%d->%d)"
+                            % (stable_chunk_id, embed_len, len(embedding_text))
+                        )
+                    embedding = request_embedding(
+                        args.embed_base_url,
+                        args.embed_api_key,
+                        args.embed_model,
+                        embedding_text,
+                    )
+                    if len(embedding) != embedding_dim:
+                        raise RuntimeError(
+                            f"Embedding dim mismatch: expected {embedding_dim} got {len(embedding)}"
+                        )
+                    embedding = normalize_vector(embedding)
+            except Exception as exc:
+                eprint(f"Embedding failed for chunk {stable_chunk_id}: {exc}")
+                return 2
+
+            fields: Dict[str, Any] = {
+                "doc_id": str(doc_id),
+                "chunk_id": stable_parent_id,
+                "attachment_key": str(attachment_key or ""),
+                "title": str(item_metadata.get("title", "")),
+                "authors": str(item_metadata.get("authors", "")),
+                "tags": str(item_metadata.get("tags", "")),
+                "chunk_tags": str(chunk_tags_value),
+                "year": int(item_metadata.get("year", 0)),
+                "item_type": str(item_metadata.get("item_type", "")),
+                "source_pdf": str(payload.get("source_pdf", "")),
+                "page_start": int(chunk.get("page_start", 0)),
+                "page_end": int(chunk.get("page_end", 0)),
+                "section": str(chunk.get("section", "")),
+                "text": sub_text,
+                "embedding": vector_to_bytes(embedding),
+            }
+
+            if sub_total > 1:
+                fields["chunk_sub_id"] = stable_chunk_id
+
+            try:
+                client.hset(key, mapping=fields)
+            except Exception as exc:
+                eprint(f"Failed to index chunk {stable_chunk_id}: {exc}")
+                return 2
+
             if args.progress:
                 print(
                     json.dumps(
                         {
                             "type": "progress",
-                            "stage": "embedding",
+                            "stage": "index",
                             "current": current,
                             "total": total,
-                            "message": f"Embedding {stable_chunk_id} ({current}/{total})",
+                            "message": f"Indexing {stable_chunk_id} ({current}/{total})",
                         }
                     ),
                     flush=True,
                 )
-            if chunk is first_chunk:
-                embedding = sample_embedding
-            else:
-                embedding_text = (
-                    build_embedding_text(text, chunk, item_metadata)
-                    if args.embed_include_metadata
-                    else text
-                )
-                embed_len = len(embedding_text)
-                embedding_text, truncated = truncate_for_embedding(embedding_text)
-                if truncated:
-                    eprint(
-                        "Embedding input truncated for chunk %s (chars=%d->%d)"
-                        % (stable_chunk_id, embed_len, len(embedding_text))
-                    )
-                embedding = request_embedding(
-                    args.embed_base_url,
-                    args.embed_api_key,
-                    args.embed_model,
-                    embedding_text,
-                )
-                if len(embedding) != embedding_dim:
-                    raise RuntimeError(
-                        f"Embedding dim mismatch: expected {embedding_dim} got {len(embedding)}"
-                    )
-                embedding = normalize_vector(embedding)
-        except Exception as exc:
-            eprint(f"Embedding failed for chunk {stable_chunk_id}: {exc}")
-            return 2
-
-        fields: Dict[str, Any] = {
-            "doc_id": str(doc_id),
-            "chunk_id": stable_chunk_id,
-            "attachment_key": str(attachment_key or ""),
-            "title": str(item_metadata.get("title", "")),
-            "authors": str(item_metadata.get("authors", "")),
-            "tags": str(item_metadata.get("tags", "")),
-            "chunk_tags": str(chunk_tags_value),
-            "year": int(item_metadata.get("year", 0)),
-            "item_type": str(item_metadata.get("item_type", "")),
-            "source_pdf": str(payload.get("source_pdf", "")),
-            "page_start": int(chunk.get("page_start", 0)),
-            "page_end": int(chunk.get("page_end", 0)),
-            "section": str(chunk.get("section", "")),
-            "text": text,
-            "embedding": vector_to_bytes(embedding),
-        }
-
-        try:
-            client.hset(key, mapping=fields)
-        except Exception as exc:
-            eprint(f"Failed to index chunk {stable_chunk_id}: {exc}")
-            return 2
-
-        if args.progress:
-            print(
-                json.dumps(
-                    {
-                        "type": "progress",
-                        "stage": "index",
-                        "current": current,
-                        "total": total,
-                        "message": f"Indexing {stable_chunk_id} ({current}/{total})",
-                    }
-                ),
-                flush=True,
-            )
 
     if updated_chunks:
         try:

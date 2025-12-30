@@ -37,6 +37,8 @@ export interface ZoteroRagSettings {
   embedApiKey: string;
   embedModel: string;
   embedIncludeMetadata: boolean;
+  embedSubchunkChars: number;
+  embedSubchunkOverlap: number;
   enableChunkTagging: boolean;
   chatBaseUrl: string;
   chatApiKey: string;
@@ -45,8 +47,6 @@ export interface ZoteroRagSettings {
   chatHistoryMessages: number;
   ocrMode: OcrMode;
   chunkingMode: ChunkingMode;
-  maxChunkChars: number;
-  chunkOverlapChars: number;
   ocrQualityThreshold: number;
   enableLlmCleanup: boolean;
   llmCleanupBaseUrl: string;
@@ -154,6 +154,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   embedApiKey: "lm-studio",
   embedModel: "google/embedding-gemma-300m",
   embedIncludeMetadata: true,
+  embedSubchunkChars: 3500,
+  embedSubchunkOverlap: 200,
   enableChunkTagging: false,
   chatBaseUrl: "http://127.0.0.1:1234/v1",
   chatApiKey: "",
@@ -162,8 +164,6 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatHistoryMessages: 6,
   ocrMode: "auto",
   chunkingMode: "page",
-  maxChunkChars: 4000,
-  chunkOverlapChars: 250,
   ocrQualityThreshold: 0.5,
   enableLlmCleanup: false,
   llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
@@ -724,34 +724,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
-
-    new Setting(containerEl)
-      .setName("Section chunk max chars")
-      .setDesc("Split large section chunks into smaller pieces (section mode only).")
-      .addText((text) =>
-        text
-          .setPlaceholder("3000")
-          .setValue(String(this.plugin.settings.maxChunkChars))
-          .onChange(async (value) => {
-            const parsed = Number.parseInt(value, 10);
-            this.plugin.settings.maxChunkChars = Number.isFinite(parsed) ? parsed : 3000;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Section chunk overlap chars")
-      .setDesc("Number of characters to overlap when splitting section chunks.")
-      .addText((text) =>
-        text
-          .setPlaceholder("250")
-          .setValue(String(this.plugin.settings.chunkOverlapChars))
-          .onChange(async (value) => {
-            const parsed = Number.parseInt(value, 10);
-            this.plugin.settings.chunkOverlapChars = Number.isFinite(parsed) ? parsed : 250;
-            await this.plugin.saveSettings();
-          })
-    );
     
     containerEl.createEl("h2", { text: "Automatic OCR cleanup" });
 
@@ -1099,6 +1071,34 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.embedIncludeMetadata = value;
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Embedding subchunk size (chars)")
+      .setDesc("Split long chunks into smaller subchunks for embedding only (0 disables).")
+      .addText((text) =>
+        text
+          .setPlaceholder("1800")
+          .setValue(String(this.plugin.settings.embedSubchunkChars))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.embedSubchunkChars = Number.isFinite(parsed) ? Math.max(0, parsed) : 3500;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Embedding subchunk overlap (chars)")
+      .setDesc("Overlap between embedding subchunks to keep context intact.")
+      .addText((text) =>
+        text
+          .setPlaceholder("200")
+          .setValue(String(this.plugin.settings.embedSubchunkOverlap))
+          .onChange(async (value) => {
+            const parsed = Number.parseInt(value, 10);
+            this.plugin.settings.embedSubchunkOverlap = Number.isFinite(parsed) ? Math.max(0, parsed) : 200;
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)

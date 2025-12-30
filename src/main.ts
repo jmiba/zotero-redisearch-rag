@@ -780,6 +780,164 @@ type OutputModalOptions = {
   clearLabel?: string;
 };
 
+class RedisSearchModal extends Modal {
+  private plugin: ZoteroRagPlugin;
+  private initialTerm: string;
+  private editorView?: EditorView;
+  private bodyText = "";
+  private inputEl?: HTMLInputElement;
+  private statusEl?: HTMLElement;
+
+  constructor(app: App, plugin: ZoteroRagPlugin, initialTerm = "") {
+    super(app);
+    this.plugin = plugin;
+    this.initialTerm = initialTerm;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    if (this.modalEl) {
+      this.modalEl.style.width = "80vw";
+      this.modalEl.style.maxWidth = "1200px";
+      this.modalEl.style.height = "80vh";
+      this.modalEl.style.maxHeight = "90vh";
+      this.modalEl.style.resize = "both";
+      this.modalEl.style.overflow = "hidden";
+    }
+
+    contentEl.style.display = "flex";
+    contentEl.style.flexDirection = "column";
+    contentEl.style.height = "100%";
+    contentEl.style.overflow = "hidden";
+    contentEl.style.minHeight = "0";
+
+    const header = contentEl.createDiv();
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.gap = "0.5rem";
+    header.createEl("h3", { text: "Redis index search" });
+
+    const copyBtn = header.createEl("button", { text: "Copy All" });
+    copyBtn.style.marginLeft = "auto";
+    copyBtn.addEventListener("click", () => {
+      this.copyResultsToClipboard();
+    });
+
+    const searchRow = contentEl.createDiv();
+    searchRow.style.display = "flex";
+    searchRow.style.alignItems = "center";
+    searchRow.style.gap = "0.5rem";
+    searchRow.style.margin = "0.5rem 0";
+
+    const input = searchRow.createEl("input");
+    input.type = "text";
+    input.placeholder = "Search term";
+    input.value = this.initialTerm;
+    input.style.flex = "1";
+    input.style.minWidth = "0";
+    this.inputEl = input;
+
+    const button = searchRow.createEl("button", { text: "Search" });
+    button.addEventListener("click", () => {
+      void this.runSearch();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void this.runSearch();
+      }
+    });
+
+    const status = contentEl.createDiv();
+    status.style.color = "var(--text-muted)";
+    status.style.marginBottom = "0.5rem";
+    this.statusEl = status;
+
+    const editorWrap = contentEl.createDiv();
+    editorWrap.style.flex = "1 1 0";
+    editorWrap.style.minHeight = "0";
+    editorWrap.style.border = "1px solid var(--background-modifier-border)";
+    editorWrap.style.borderRadius = "6px";
+    editorWrap.style.display = "flex";
+    editorWrap.style.flexDirection = "column";
+    editorWrap.style.overflow = "auto";
+
+    const state = EditorState.create({
+      doc: this.bodyText,
+      extensions: [
+        LOG_THEME,
+        LOG_HIGHLIGHT_PLUGIN,
+        EditorView.editable.of(false),
+        EditorState.readOnly.of(true),
+        EditorView.lineWrapping,
+      ],
+    });
+
+    this.editorView = new EditorView({
+      state,
+      parent: editorWrap,
+    });
+
+    if (this.initialTerm) {
+      void this.runSearch();
+    }
+  }
+
+  onClose(): void {
+    this.editorView?.destroy();
+    this.editorView = undefined;
+  }
+
+  private async runSearch(): Promise<void> {
+    const term = (this.inputEl?.value || "").trim();
+    if (!term) {
+      if (this.statusEl) {
+        this.statusEl.textContent = "Enter a search term.";
+      }
+      return;
+    }
+    if (this.statusEl) {
+      this.statusEl.textContent = "Searching...";
+    }
+    const nextText = await this.plugin.runRedisSearch(term);
+    this.updateEditor(nextText);
+    if (this.statusEl) {
+      this.statusEl.textContent = `Results for “${term}”`;
+    }
+  }
+
+  private updateEditor(nextText: string): void {
+    if (!this.editorView) {
+      return;
+    }
+    const view = this.editorView;
+    const scrollTop = view.scrollDOM.scrollTop;
+    const selection = view.state.selection.main;
+    const maxPos = nextText.length;
+    const anchor = Math.min(selection.anchor, maxPos);
+    const head = Math.min(selection.head, maxPos);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: nextText },
+      selection: { anchor, head },
+    });
+    view.scrollDOM.scrollTop = scrollTop;
+    this.bodyText = nextText;
+  }
+
+  private copyResultsToClipboard(): void {
+    const text = this.bodyText || "";
+    if (!text) {
+      new Notice("Nothing to copy.");
+      return;
+    }
+    navigator.clipboard.writeText(text)
+      .then(() => new Notice("Results copied to clipboard."))
+      .catch(() => new Notice("Failed to copy results."));
+  }
+}
+
 class OutputModal extends Modal {
   private titleText: string;
   private bodyText: string;
@@ -1150,11 +1308,13 @@ export default class ZoteroRagPlugin extends Plugin {
   private noteSyncTimers = new Map<string, number>();
   private noteSyncInFlight = new Set<string>();
   private noteSyncSuppressed = new Set<string>();
+  private missingDocIdWarned = new Set<string>();
   private collectionTitleCache = new Map<string, string>();
   private recreateMissingNotesActive = false;
   private recreateMissingNotesAbort = false;
   private recreateMissingNotesProcess: ChildProcess | null = null;
   private reindexCacheActive = false;
+  private lastRedisSearchTerm = "";
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -1506,6 +1666,7 @@ export default class ZoteroRagPlugin extends Plugin {
         this.settings.embedModel,
         "--progress",
       ];
+      this.appendEmbedSubchunkArgs(indexArgs);
       if (this.settings.embedIncludeMetadata) {
         indexArgs.push("--embed-include-metadata");
       }
@@ -2028,8 +2189,6 @@ export default class ZoteroRagPlugin extends Plugin {
       this.settings.redisUrl,
       "--index",
       this.getRedisIndexName(),
-      "--prefix",
-      this.getRedisKeyPrefix(),
       "--embed-base-url",
       this.settings.embedBaseUrl,
       "--embed-api-key",
@@ -2968,6 +3127,7 @@ export default class ZoteroRagPlugin extends Plugin {
           "--upsert",
           "--progress",
         ];
+        this.appendEmbedSubchunkArgs(indexArgs);
         if (this.settings.embedIncludeMetadata) {
           indexArgs.push("--embed-include-metadata");
         }
@@ -3097,6 +3257,7 @@ export default class ZoteroRagPlugin extends Plugin {
       this.settings.embedModel,
       "--upsert",
     ];
+    this.appendEmbedSubchunkArgs(args);
     if (this.settings.embedIncludeMetadata) {
       args.push("--embed-include-metadata");
     }
@@ -3208,6 +3369,94 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
+  private hasDocIdFieldInFrontmatter(content: string): boolean {
+    const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (!match) {
+      return false;
+    }
+    return /^\s*doc_id\s*:/im.test(match[1]);
+  }
+
+  private ensureDocIdInFrontmatter(frontmatter: string, docId: string): string {
+    const trimmed = frontmatter.trim();
+    const docLine = `doc_id: ${this.escapeYamlString(docId)}`;
+    if (!trimmed) {
+      return docLine;
+    }
+    if (/^\s*doc_id\s*:/im.test(trimmed)) {
+      return trimmed;
+    }
+    return `${docLine}\n${trimmed}`;
+  }
+
+  private ensureDocIdInNoteContent(content: string, docId: string): string {
+    const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+    const docLine = `doc_id: ${this.escapeYamlString(docId)}`;
+    if (!match) {
+      return `---\n${docLine}\n---\n\n${content.trimStart()}`;
+    }
+    const body = match[1] ?? "";
+    const lines = body.split(/\r?\n/);
+    let replaced = false;
+    const nextLines = lines.map((line) => {
+      if (/^\s*doc_id\s*:/i.test(line)) {
+        replaced = true;
+        return docLine;
+      }
+      return line;
+    });
+    if (!replaced) {
+      nextLines.unshift(docLine);
+    }
+    const nextBody = nextLines.join("\n").trim();
+    const startIndex = match.index ?? 0;
+    const prefix = content.slice(0, startIndex);
+    const suffix = content.slice(startIndex + match[0].length).replace(/^\n+/, "");
+    return `${prefix}---\n${nextBody}\n---\n${suffix}`;
+  }
+
+  private async findDocIdByNotePath(notePath: string): Promise<string | null> {
+    const normalized = normalizePath(notePath);
+    const index = await this.getDocIndex();
+    for (const [docId, entry] of Object.entries(index)) {
+      if (!entry?.note_path) {
+        continue;
+      }
+      if (normalizePath(entry.note_path) === normalized) {
+        return docId;
+      }
+    }
+    return null;
+  }
+
+  private async resolveDocIdForNote(file: TFile, content: string): Promise<string | null> {
+    const frontmatterDocId = this.extractDocIdFromFrontmatter(content);
+    const hasDocIdField = this.hasDocIdFieldInFrontmatter(content);
+    if (frontmatterDocId && hasDocIdField) {
+      return frontmatterDocId;
+    }
+
+    const syncDocId = this.extractDocIdFromSyncMarker(content);
+    const cacheDocId = await this.findDocIdByNotePath(file.path);
+    const resolved = frontmatterDocId || syncDocId || cacheDocId;
+    if (!resolved) {
+      const hasSyncMarker = ZRR_SYNC_START_RE.test(content);
+      if (hasSyncMarker && !this.missingDocIdWarned.has(file.path)) {
+        new Notice("This Zotero note is missing a doc_id in frontmatter. Reimport or add doc_id manually.");
+        this.missingDocIdWarned.add(file.path);
+      }
+      return null;
+    }
+
+    if (!hasDocIdField || !frontmatterDocId) {
+      const updated = this.ensureDocIdInNoteContent(content, resolved);
+      if (updated !== content) {
+        await this.writeNoteWithSyncSuppressed(file.path, updated);
+      }
+    }
+    return resolved;
+  }
+
   private async scanNotesForDocIds(folderPath: string): Promise<Record<string, DocIndexEntry>> {
     const adapter = this.app.vault.adapter;
     const files = await this.listMarkdownFiles(folderPath);
@@ -3216,7 +3465,8 @@ export default class ZoteroRagPlugin extends Plugin {
     for (const file of files) {
       try {
         const content = await adapter.read(file);
-        const docId = this.extractDocIdFromFrontmatter(content);
+        const docId =
+          this.extractDocIdFromFrontmatter(content) ?? this.extractDocIdFromSyncMarker(content);
         if (!docId) {
           continue;
         }
@@ -3358,18 +3608,6 @@ export default class ZoteroRagPlugin extends Plugin {
   private async promptLanguageHint(): Promise<string | null> {
     return new Promise((resolve) => {
       new LanguageSuggestModal(this.app, resolve).open();
-    });
-  }
-
-  private async promptRedisSearchTerm(): Promise<string | null> {
-    return new Promise((resolve) => {
-      new TextPromptModal(
-        this.app,
-        "Search Redis index",
-        "Enter a word or phrase",
-        (value) => resolve(value),
-        "Search term cannot be empty."
-      ).open();
     });
   }
 
@@ -3783,7 +4021,8 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         try {
           const content = await this.app.vault.read(file);
-          const docId = this.extractDocIdFromFrontmatter(content);
+          const docId =
+            this.extractDocIdFromFrontmatter(content) ?? this.extractDocIdFromSyncMarker(content);
           if (!docId) {
             return;
           }
@@ -4397,8 +4636,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!syncSection) {
         return;
       }
-      const docId =
-        this.extractDocIdFromFrontmatter(content) ?? this.extractDocIdFromSyncMarker(content);
+      const docId = await this.resolveDocIdForNote(file, content);
       if (!docId) {
         return;
       }
@@ -4814,6 +5052,15 @@ export default class ZoteroRagPlugin extends Plugin {
     const total = typeof payload?.total === "number" ? payload.total : 0;
     const query = typeof payload?.query === "string" ? payload.query : "";
     const rawQuery = typeof payload?.raw_query === "string" ? payload.raw_query : "";
+    const fieldTypes = payload?.field_types && typeof payload.field_types === "object"
+      ? payload.field_types
+      : null;
+    const fallbackUsed = Boolean(payload?.fallback_used);
+    const fallbackReason = typeof payload?.fallback_reason === "string" ? payload.fallback_reason : "";
+    const fallbackQueries = Array.isArray(payload?.fallback_queries) ? payload.fallback_queries : [];
+    const fallbackFailed = Array.isArray(payload?.fallback_failed_fields)
+      ? payload.fallback_failed_fields
+      : [];
     const results = Array.isArray(payload?.results) ? payload.results : [];
 
     const lines: string[] = [];
@@ -4822,6 +5069,24 @@ export default class ZoteroRagPlugin extends Plugin {
       lines.push(`Expanded: ${query}`);
     }
     lines.push(`Total matches: ${total}`);
+    if (fieldTypes && Object.keys(fieldTypes).length > 0) {
+      const entries = Object.keys(fieldTypes)
+        .sort()
+        .map((key) => `${key}:${fieldTypes[key]}`);
+      lines.push(`Field types: {${entries.join(", ")}}`);
+    }
+    if (fallbackUsed) {
+      lines.push(`Fallback: ${fallbackReason || "true"}`);
+    }
+    if (fallbackQueries.length) {
+      lines.push("Fallback queries:");
+      for (const clause of fallbackQueries) {
+        lines.push(`  - ${clause}`);
+      }
+    }
+    if (fallbackFailed.length) {
+      lines.push(`Fallback failed fields: ${fallbackFailed.join(", ")}`);
+    }
     lines.push("");
 
     if (!results.length) {
@@ -4837,6 +5102,13 @@ export default class ZoteroRagPlugin extends Plugin {
       const title = String(result.title || "").trim();
       const section = String(result.section || "").trim();
       const score = String(result.score || "").trim();
+      const authors = String(result.authors || "").trim();
+      const itemType = String(result.item_type || "").trim();
+      const year = String(result.year || "").trim();
+      const tags = String(result.tags || "").trim();
+      const chunkTags = String(result.chunk_tags || "").trim();
+      const attachmentKey = String(result.attachment_key || "").trim();
+      const sourcePdf = String(result.source_pdf || "").trim();
       const text = String(result.text || "").replace(/\s+/g, " ").trim();
       const snippet = text.length > 220 ? `${text.slice(0, 220)}…` : text;
 
@@ -4854,8 +5126,29 @@ export default class ZoteroRagPlugin extends Plugin {
       if (title) {
         lines.push(`  title: ${title}`);
       }
+      if (authors) {
+        lines.push(`  authors: ${authors}`);
+      }
+      if (year) {
+        lines.push(`  year: ${year}`);
+      }
+      if (itemType) {
+        lines.push(`  item_type: ${itemType}`);
+      }
+      if (tags) {
+        lines.push(`  tags: ${tags}`);
+      }
+      if (chunkTags) {
+        lines.push(`  chunk_tags: ${chunkTags}`);
+      }
+      if (attachmentKey) {
+        lines.push(`  attachment_key: ${attachmentKey}`);
+      }
       if (section) {
         lines.push(`  section: ${section}`);
+      }
+      if (sourcePdf) {
+        lines.push(`  source_pdf: ${sourcePdf}`);
       }
       if (snippet) {
         lines.push(`  ${snippet}`);
@@ -4867,19 +5160,24 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async searchRedisIndex(): Promise<void> {
-    const term = await this.promptRedisSearchTerm();
-    if (!term) {
-      return;
+    new RedisSearchModal(this.app, this, this.lastRedisSearchTerm).open();
+  }
+
+  public async runRedisSearch(term: string): Promise<string> {
+    const trimmed = term.trim();
+    if (!trimmed) {
+      return "(no query)";
     }
+    this.lastRedisSearchTerm = trimmed;
     if (!(await this.ensureRedisAvailable("index search"))) {
-      return;
+      return "Redis is not reachable. Please start Redis Stack and try again.";
     }
 
     const pluginDir = this.getPluginDir();
     const scriptPath = path.join(pluginDir, "tools", "search_redis.py");
     const args = [
       "--query",
-      term,
+      trimmed,
       "--redis-url",
       this.settings.redisUrl,
       "--index",
@@ -4893,10 +5191,10 @@ export default class ZoteroRagPlugin extends Plugin {
       const output = await this.runPythonWithOutput(scriptPath, args);
       const payload = JSON.parse(output || "{}");
       const body = this.formatRedisSearchResults(payload);
-      new OutputModal(this.app, "Redis index search", body || "(empty)").open();
+      return body || "(no results)";
     } catch (error) {
       console.error("Redis search failed", error);
-      new Notice("Redis search failed. See console for details.");
+      return "Redis search failed. See console for details.";
     }
   }
 
@@ -6182,6 +6480,7 @@ export default class ZoteroRagPlugin extends Plugin {
           "--upsert",
           "--progress",
         ];
+        this.appendEmbedSubchunkArgs(indexArgs);
         if (this.settings.embedIncludeMetadata) {
           indexArgs.push("--embed-include-metadata");
         }
@@ -6573,13 +6872,16 @@ export default class ZoteroRagPlugin extends Plugin {
     vars["pdf_block"] = pdfBlock;
     vars["pdf_line"] = pdfLine;
     vars["docling_markdown"] = doclingMarkdown;
-    const frontmatter = await this.renderFrontmatter(
-      values,
-      meta,
-      docId,
-      frontmatterPdfLink,
-      jsonLink,
-      vars
+    const frontmatter = this.ensureDocIdInFrontmatter(
+      await this.renderFrontmatter(
+        values,
+        meta,
+        docId,
+        frontmatterPdfLink,
+        jsonLink,
+        vars
+      ),
+      docId
     );
     const frontmatterBlock = frontmatter ? `---\n${frontmatter}\n---\n\n` : "";
 
@@ -7073,12 +7375,6 @@ export default class ZoteroRagPlugin extends Plugin {
     if (languageHint) {
       args.push("--language-hint", languageHint);
     }
-    if (this.settings.maxChunkChars > 0) {
-      args.push("--max-chunk-chars", String(this.settings.maxChunkChars));
-    }
-    if (this.settings.chunkOverlapChars > 0) {
-      args.push("--chunk-overlap-chars", String(this.settings.chunkOverlapChars));
-    }
     if (this.settings.enableLlmCleanup) {
       args.push("--enable-llm-cleanup");
       if (this.settings.llmCleanupBaseUrl) {
@@ -7113,6 +7409,17 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     return args;
+  }
+
+  private appendEmbedSubchunkArgs(args: string[]): void {
+    const subchunkChars = this.settings.embedSubchunkChars;
+    if (Number.isFinite(subchunkChars)) {
+      args.push("--embed-subchunk-chars", String(Math.max(0, Math.trunc(subchunkChars))));
+    }
+    const subchunkOverlap = this.settings.embedSubchunkOverlap;
+    if (Number.isFinite(subchunkOverlap)) {
+      args.push("--embed-subchunk-overlap", String(Math.max(0, Math.trunc(subchunkOverlap))));
+    }
   }
 
   private appendChunkTaggingArgs(args: string[], options?: { allowRegenerate?: boolean }): void {

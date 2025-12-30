@@ -159,16 +159,20 @@ def run_search(
         str(max(0, offset)),
         str(max(1, limit)),
         "RETURN",
-        "13",
+        "15",
         "doc_id",
         "chunk_id",
+        "attachment_key",
         "title",
         "authors",
         "tags",
         "chunk_tags",
+        "item_type",
+        "year",
         "page_start",
         "page_end",
         "section",
+        "source_pdf",
         "text",
         "score",
         "DIALECT",
@@ -275,6 +279,11 @@ def main() -> int:
             "fallback_queries": [clause for _name, clause in parts],
             "fallback_failed_fields": failed_fields,
         }
+    payload.setdefault("field_types", field_types)
+    payload.setdefault("fallback_used", False)
+    payload.setdefault("fallback_reason", "")
+    payload.setdefault("fallback_queries", [])
+    payload.setdefault("fallback_failed_fields", [])
     print(json.dumps(payload, ensure_ascii=False))
     return 0
 
