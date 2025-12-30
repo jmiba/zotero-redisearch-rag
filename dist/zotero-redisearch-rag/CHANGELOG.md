@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.4
+
+- Sync markers now render as styled badges in reading view (page/section + sync start/end).
+- Added command to drop and rebuild the Redis index from cached chunks.
+- Drop & rebuild now proceeds if the Redis index does not exist yet.
+- Added a command to purge Redis chunk keys that have no cached item/chunk JSON.
+- Doc index pruning now runs after reindexing/purge to remove stale entries.
+- Embedding now splits long chunks into subchunks (multi-vector) while keeping display chunks intact.
+- Embedding subchunk size/overlap is now configurable; section chunk size/overlap settings removed.
+- Chunk end markers now render as badges in reading/live preview.
+- Retrieval now auto-broadens before the LLM when context is weak (chunk count, context length, vector score, narrative filter).
+- Indexing now derives text from a Markdown AST (table/list-aware) instead of flattening display Markdown.
+- Page chunks now reflow wrapped OCR/text-layer lines while preserving headings/lists/tables.
+- New command: delete the active Zotero note plus cached chunks/items to prevent recreation.
+- Lexical retrieval now searches title/authors/tags/chunk tags and preserves Unicode tokens.
+- New command: search the Redis index for a term (shows matching chunks/metadata).
+- Exact lexical hits are kept even if strict content filters would drop them.
+- Short queries now increase vector k and hyphenated terms are split for lexical matching.
+- Index reindexing now detects embedding model/provider errors and prompts to drop & rebuild the Redis index.
+- Indexing now auto-detects embedding dimensions to avoid mismatch loops after model changes.
+- GPT-5 family models now omit non-default temperatures for OCR cleanup/tagging to avoid API errors.
+- Reindexing now writes progress/error output to the log file when file logging is enabled.
+- Import/reindex/chat now warn early when Redis is unreachable to avoid half-finished notes.
+- Reindexing now uses existing chunk tags only (no tag regeneration).
+- Embedding inputs are now truncated to avoid model context overflows during reindex.
+- Reindex logs now include the current doc_id:chunk_id for embedding/index steps.
+- Recreate-missing-notes now logs doc_id progress and indexer chunk progress.
+- Tag sanitization now offers Obsidian-style cases (camel/pascal/snake/kebab) instead of a custom separator.
+- Frontmatter now supports `aliases` built from citekey/short title/DOI (when present).
+- Zotero picker now flags items without processable PDFs even when only non-PDF attachments exist.
+- Notes now auto-repair missing frontmatter `doc_id` values using sync markers or cached index entries.
+- Redis indexing now extracts years correctly from Zotero item dates.
+
 ## 0.3.3
 - Tag-aware retrieval boosting and tag regeneration in the chunk editor.
 - Tag sanitization options for Obsidian (replace spaces or camelCase).
