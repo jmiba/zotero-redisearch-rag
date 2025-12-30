@@ -14,7 +14,7 @@ import {
   setIcon,
   normalizePath,
 } from "obsidian";
-import { EditorState, RangeSetBuilder, Text } from "@codemirror/state";
+import { EditorState, RangeSetBuilder, Text as CMText } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -28,6 +28,7 @@ import { promises as fs, existsSync } from "fs";
 import http from "http";
 import https from "https";
 import net from "net";
+import tls from "tls";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { createHash } from "crypto";
@@ -417,7 +418,7 @@ const LOG_THEME = EditorView.theme({
   ".zrr-log-stderr": { color: "var(--text-accent)" },
 });
 
-const extractDocIdFromDoc = (doc: Text): string | null => {
+const extractDocIdFromDoc = (doc: CMText): string | null => {
   for (let line = 1; line <= doc.lines; line += 1) {
     const text = doc.line(line).text;
     if (ZRR_SYNC_START_RE.test(text)) {
@@ -429,7 +430,7 @@ const extractDocIdFromDoc = (doc: Text): string | null => {
 };
 
 const findChunkStartLineInDoc = (
-  doc: Text,
+  doc: CMText,
   fromLine: number
 ): { line: number; text: string } | null => {
   let line = fromLine;
@@ -445,7 +446,7 @@ const findChunkStartLineInDoc = (
   return null;
 };
 
-const findChunkEndLineInDoc = (doc: Text, fromLine: number): number | null => {
+const findChunkEndLineInDoc = (doc: CMText, fromLine: number): number | null => {
   for (let line = fromLine; line <= doc.lines; line += 1) {
     const text = doc.line(line).text;
     if (ZRR_CHUNK_END_RE.test(text)) {
@@ -459,7 +460,7 @@ const findChunkEndLineInDoc = (doc: Text, fromLine: number): number | null => {
 };
 
 const findChunkAtCursorInDoc = (
-  doc: Text,
+  doc: CMText,
   cursorLine: number
 ): { startLine: number; endLine: number; text: string } | null => {
   const start = findChunkStartLineInDoc(doc, cursorLine);
@@ -473,7 +474,7 @@ const findChunkAtCursorInDoc = (
   return { startLine: start.line, endLine, text: start.text };
 };
 
-const hasExcludeMarkerInRange = (doc: Text, startLine: number, endLine: number): boolean => {
+const hasExcludeMarkerInRange = (doc: CMText, startLine: number, endLine: number): boolean => {
   if (startLine > endLine) {
     return false;
   }
@@ -667,6 +668,10 @@ class ZrrBadgeWidget extends WidgetType {
 }
 
 const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
+  const sourceView = view.dom.closest(".markdown-source-view");
+  if (!sourceView || !sourceView.classList.contains("is-live-preview")) {
+    return Decoration.none;
+  }
   const doc = view.state.doc;
   const builder = new RangeSetBuilder<Decoration>();
   const entries: Array<{ from: number; to: number; info: ZrrBadgeInfo }> = [];
@@ -988,6 +993,94 @@ class ConfirmDeleteNoteModal extends Modal {
   }
 }
 
+class ConfirmRebuildIndexModal extends Modal {
+  private reason: string;
+  private onResolve: (confirmed: boolean) => void;
+  private resolved = false;
+
+  constructor(app: App, reason: string, onResolve: (confirmed: boolean) => void) {
+    super(app);
+    this.reason = reason;
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Rebuild Redis index?" });
+    contentEl.createEl("p", { text: this.reason });
+    contentEl.createEl("p", {
+      text: "This will drop the RedisSearch index (and embeddings) and rebuild it from cached chunks.",
+    });
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const confirm = actions.createEl("button", { text: "Drop & rebuild" });
+    cancel.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(false);
+    });
+    confirm.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(true);
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.onResolve(false);
+    }
+  }
+}
+
+class ConfirmPurgeRedisOrphansModal extends Modal {
+  private onResolve: (confirmed: boolean) => void;
+  private resolved = false;
+
+  constructor(app: App, onResolve: (confirmed: boolean) => void) {
+    super(app);
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Purge Redis orphaned chunks?" });
+    contentEl.createEl("p", {
+      text: "This removes Redis chunk keys that have no cached item.json or chunk.json on disk.",
+    });
+    contentEl.createEl("p", {
+      text: "Cache files are not deleted. Use this to clean up stale Redis data.",
+    });
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+    const cancel = actions.createEl("button", { text: "Cancel" });
+    const confirm = actions.createEl("button", { text: "Purge orphans" });
+    cancel.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(false);
+    });
+    confirm.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(true);
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.onResolve(false);
+    }
+  }
+}
+
 class LanguageSuggestModal extends SuggestModal<LanguageOption> {
   private resolveSelection: (value: string | null) => void;
   private resolved = false;
@@ -1061,6 +1154,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private recreateMissingNotesActive = false;
   private recreateMissingNotesAbort = false;
   private recreateMissingNotesProcess: ChildProcess | null = null;
+  private reindexCacheActive = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -1126,6 +1220,12 @@ export default class ZoteroRagPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "drop-rebuild-redis-index",
+      name: "Drop & rebuild Redis index",
+      callback: () => this.dropAndRebuildRedisIndex(),
+    });
+
+    this.addCommand({
       id: "start-redis-stack",
       name: "Start Redis Stack (Docker/Podman Compose)",
       callback: () => this.startRedisStack(),
@@ -1133,13 +1233,13 @@ export default class ZoteroRagPlugin extends Plugin {
 
     this.addCommand({
       id: "open-docling-log",
-      name: "Open Docling log file",
+      name: "Open log file",
       callback: () => this.openLogFile(),
     });
 
     this.addCommand({
       id: "clear-docling-log",
-      name: "Clear Docling log file",
+      name: "Clear log file",
       callback: () => this.clearLogFile(),
     });
 
@@ -1153,6 +1253,23 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "delete-zotero-note-cache",
       name: "Delete Zotero note and cached data",
       callback: () => this.deleteZoteroNoteAndCache(),
+    });
+
+    this.addCommand({
+      id: "search-redis-index",
+      name: "Search Redis index for term",
+      callback: () => this.searchRedisIndex(),
+    });
+    this.addCommand({
+      id: "redis-diagnostics",
+      name: "Show Redis diagnostics",
+      callback: () => this.showRedisDiagnostics(),
+    });
+
+    this.addCommand({
+      id: "purge-redis-orphans",
+      name: "Purge Redis orphaned chunks (missing cache files)",
+      callback: () => this.purgeRedisOrphanedKeys(),
     });
 
     void this.autoDetectContainerCliOnLoad();
@@ -1222,6 +1339,10 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     this.showStatusProgress("Preparing...", 5);
+    if (!(await this.ensureRedisAvailable("import"))) {
+      this.clearStatusProgress();
+      return;
+    }
 
     const title = typeof values.title === "string" ? values.title : "";
     const existingEntry = await this.getDocIndexEntry(docId);
@@ -1367,6 +1488,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     try {
       this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
+      const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       const indexArgs = [
         "--chunks-json",
         this.getAbsoluteVaultPath(chunkPath),
@@ -1891,6 +2013,10 @@ export default class ZoteroRagPlugin extends Plugin {
     historyMessages: ChatMessage[] = []
   ): Promise<void> {
     await this.ensureBundledTools();
+    if (!(await this.ensureRedisAvailable("chat query"))) {
+      onFinal({ answer: "Redis is not reachable. Please start Redis Stack and try again." });
+      return;
+    }
     const pluginDir = this.getPluginDir();
     const ragScript = path.join(pluginDir, "tools", "rag_query_redisearch.py");
     const args = [
@@ -2371,9 +2497,16 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     await this.saveDocIndex(index);
+    const pruneResult = await this.pruneDocIndexOrphans();
     this.showStatusProgress("Done", 100);
     window.setTimeout(() => this.clearStatusProgress(), 1200);
-    new Notice(`Rebuilt doc index for ${docIds.length} items.`);
+    if (pruneResult.removed > 0) {
+      new Notice(
+        `Rebuilt doc index for ${docIds.length} items; pruned ${pruneResult.removed} stale entries.`
+      );
+    } else {
+      new Notice(`Rebuilt doc index for ${docIds.length} items.`);
+    }
   }
 
   public async recreateMissingNotesFromCache(): Promise<void> {
@@ -2420,6 +2553,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
       this.showStatusProgress("Recreating missing notes...", 0);
       let rebuilt = 0;
+      const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
 
       for (let i = 0; i < missing.length; i += 1) {
         if (this.recreateMissingNotesAbort) {
@@ -2428,6 +2562,14 @@ export default class ZoteroRagPlugin extends Plugin {
         const docId = missing[i];
         const percent = Math.round(((i + 1) / missing.length) * 100);
         this.showStatusProgress(`Recreating ${i + 1}/${missing.length}`, percent);
+        if (logPath) {
+          void this.appendToLogFile(
+            logPath,
+            `Recreate missing note doc_id ${docId} (${i + 1}/${missing.length})`,
+            "recreate_missing_notes",
+            "INFO"
+          );
+        }
         const ok = await this.rebuildNoteFromCacheForDocId(docId, false);
         if (ok) {
           rebuilt += 1;
@@ -2475,7 +2617,229 @@ export default class ZoteroRagPlugin extends Plugin {
     new Notice("Canceling recreate missing notes...");
   }
 
-  public async reindexRedisFromCache(): Promise<void> {
+  private buildRedisCommand(args: string[]): string {
+    const parts = [`*${args.length}\r\n`];
+    for (const arg of args) {
+      const value = String(arg);
+      parts.push(`$${Buffer.byteLength(value)}\r\n${value}\r\n`);
+    }
+    return parts.join("");
+  }
+
+  private async checkRedisConnection(timeoutMs = 2000): Promise<{ ok: boolean; message?: string }> {
+    const urlRaw = (this.settings.redisUrl || "").trim();
+    if (!urlRaw) {
+      return { ok: false, message: "Redis URL is not configured." };
+    }
+    let url: URL;
+    try {
+      url = new URL(urlRaw);
+    } catch {
+      return { ok: false, message: "Redis URL is invalid." };
+    }
+    const host = url.hostname || "127.0.0.1";
+    const port =
+      Number(url.port) || (url.protocol === "rediss:" || url.protocol === "redis+tls:" ? 6380 : 6379);
+    const username = decodeURIComponent(url.username || "");
+    const password = decodeURIComponent(url.password || "");
+    const useTls = url.protocol === "rediss:" || url.protocol === "redis+tls:";
+
+    return new Promise((resolve) => {
+      const socket = useTls
+        ? tls.connect({ host, port, timeout: timeoutMs, rejectUnauthorized: false })
+        : net.createConnection({ host, port, timeout: timeoutMs });
+      let buffer = "";
+      let stage: "auth" | "ping" = password || username ? "auth" : "ping";
+      let resolved = false;
+
+      const finish = (ok: boolean, message?: string): void => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        try {
+          socket.end();
+          socket.destroy();
+        } catch {
+          // ignore
+        }
+        resolve({ ok, message });
+      };
+
+      const handleLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return;
+        }
+        if (trimmed.startsWith("-NOAUTH")) {
+          finish(false, "Redis requires authentication. Check your Redis URL credentials.");
+          return;
+        }
+        if (trimmed.startsWith("-WRONGPASS") || trimmed.toLowerCase().includes("invalid password")) {
+          finish(false, "Redis authentication failed. Check your Redis URL credentials.");
+          return;
+        }
+        if (trimmed.startsWith("-ERR")) {
+          finish(false, `Redis error: ${trimmed}`);
+          return;
+        }
+        if (stage === "auth") {
+          if (trimmed.startsWith("+OK")) {
+            stage = "ping";
+            buffer = "";
+            socket.write(this.buildRedisCommand(["PING"]));
+            return;
+          }
+          finish(false, `Redis auth failed: ${trimmed}`);
+          return;
+        }
+        if (trimmed.startsWith("+PONG")) {
+          finish(true);
+        }
+      };
+
+      socket.on("connect", () => {
+        if (stage === "auth") {
+          const authArgs = username ? ["AUTH", username, password] : ["AUTH", password];
+          socket.write(this.buildRedisCommand(authArgs));
+        } else {
+          socket.write(this.buildRedisCommand(["PING"]));
+        }
+      });
+
+      socket.on("data", (data) => {
+        buffer += data.toString();
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          handleLine(line);
+        }
+      });
+
+      socket.on("timeout", () => {
+        finish(false, "Timed out connecting to Redis.");
+      });
+
+      socket.on("error", (err) => {
+        finish(false, `Redis connection failed: ${err.message}`);
+      });
+
+      socket.on("close", () => {
+        if (!resolved) {
+          finish(false, "Redis connection closed unexpectedly.");
+        }
+      });
+    });
+  }
+
+  private async ensureRedisAvailable(context: string): Promise<boolean> {
+    const result = await this.checkRedisConnection();
+    if (result.ok) {
+      return true;
+    }
+    const message = result.message ? `Redis unavailable for ${context}: ${result.message}` : `Redis unavailable for ${context}.`;
+    this.notifyContainerOnce(message);
+    return false;
+  }
+
+  private getPythonErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message || String(error);
+    }
+    if (typeof error === "string") {
+      return error;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+
+  private classifyIndexingError(message: string): "chunks_missing" | "embed_dim_mismatch" | "embed_failure" | "unknown" {
+    const text = message.toLowerCase();
+    if (text.includes("embedding dim mismatch") || text.includes("dim mismatch")) {
+      return "embed_dim_mismatch";
+    }
+    if (text.includes("chunks json not found")) {
+      return "chunks_missing";
+    }
+    if (
+      text.includes("embedding failed") ||
+      text.includes("embedding request failed") ||
+      text.includes("model does not exist") ||
+      text.includes("failed to load model") ||
+      text.includes("connection refused") ||
+      text.includes("econnrefused") ||
+      text.includes("max retries exceeded") ||
+      text.includes("failed to establish a new connection") ||
+      text.includes("failed to fetch models")
+    ) {
+      return "embed_failure";
+    }
+    return "unknown";
+  }
+
+  private async confirmRebuildIndex(reason: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      new ConfirmRebuildIndexModal(this.app, reason, resolve).open();
+    });
+  }
+
+  private async confirmPurgeRedisOrphans(): Promise<boolean> {
+    return new Promise((resolve) => {
+      new ConfirmPurgeRedisOrphansModal(this.app, resolve).open();
+    });
+  }
+
+  private async dropRedisIndex(dropDocs = false): Promise<void> {
+    await this.ensureBundledTools();
+    const pluginDir = this.getPluginDir();
+    const script = path.join(pluginDir, "tools", "drop_redis_index.py");
+    const args = ["--redis-url", this.settings.redisUrl, "--index", this.getRedisIndexName()];
+    if (dropDocs) {
+      args.push("--drop-docs");
+    }
+    await this.runPython(script, args);
+  }
+
+  private async dropAndRebuildRedisIndex(): Promise<void> {
+    if (this.reindexCacheActive) {
+      new Notice("Reindex already running.");
+      return;
+    }
+    if (!(await this.ensureRedisAvailable("drop/rebuild"))) {
+      return;
+    }
+    const confirmed = await this.confirmRebuildIndex(
+      "This will remove the current RedisSearch index and rebuild it from cached chunks."
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await this.dropRedisIndex(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("Unknown Index name") || message.includes("Unknown index name")) {
+        console.warn("Redis index missing; skipping drop step.");
+      } else {
+        console.error("Failed to drop Redis index", error);
+        new Notice("Failed to drop Redis index. See console for details.");
+        return;
+      }
+    }
+    await this.reindexRedisFromCache();
+  }
+
+  private async purgeRedisOrphanedKeys(): Promise<void> {
+    if (!(await this.ensureRedisAvailable("purge orphans"))) {
+      return;
+    }
+    const confirmed = await this.confirmPurgeRedisOrphans();
+    if (!confirmed) {
+      return;
+    }
     try {
       await this.ensureBundledTools();
     } catch (error) {
@@ -2483,19 +2847,101 @@ export default class ZoteroRagPlugin extends Plugin {
       console.error(error);
       return;
     }
+    const pluginDir = this.getPluginDir();
+    const script = path.join(pluginDir, "tools", "purge_redis_orphans.py");
+    const args = [
+      "--redis-url",
+      this.settings.redisUrl,
+      "--key-prefix",
+      this.getRedisKeyPrefix(),
+      "--chunk-dir",
+      this.getAbsoluteVaultPath(CHUNK_CACHE_DIR),
+      "--item-dir",
+      this.getAbsoluteVaultPath(ITEM_CACHE_DIR),
+    ];
+    try {
+      const output = await this.runPythonWithOutput(script, args);
+      let payload: any = null;
+      try {
+        payload = output ? JSON.parse(output) : null;
+      } catch (error) {
+        console.warn("Failed to parse purge output", error);
+      }
+      if (!payload) {
+        new Notice("Purge completed. See console for details.");
+        return;
+      }
+      const lines = [
+        `Keys scanned: ${payload.keys_scanned ?? 0}`,
+        `Keys deleted: ${payload.keys_deleted ?? 0}`,
+        `Docs checked: ${payload.docs_checked ?? 0}`,
+        `Orphan docs: ${payload.orphan_doc_count ?? 0}`,
+      ];
+      const pruneResult = await this.pruneDocIndexOrphans();
+      lines.push(`Doc index entries removed: ${pruneResult.removed}`);
+      if (pruneResult.updated > 0) {
+        lines.push(`Doc index entries updated: ${pruneResult.updated}`);
+      }
+      const sample = Array.isArray(payload.sample_orphan_doc_ids)
+        ? payload.sample_orphan_doc_ids.filter(Boolean)
+        : [];
+      if (sample.length) {
+        lines.push("", "Sample doc_ids:", ...sample.map((docId: string) => `- ${docId}`));
+      }
+      new OutputModal(this.app, "Redis orphan purge", lines.join("\n")).open();
+      if ((payload.keys_deleted ?? 0) === 0) {
+        new Notice("No orphaned Redis keys found.");
+      } else {
+        new Notice(`Deleted ${payload.keys_deleted} Redis keys.`);
+      }
+    } catch (error) {
+      console.error("Failed to purge Redis orphans", error);
+      new Notice("Failed to purge Redis orphans. See console for details.");
+    }
+  }
+
+  public async reindexRedisFromCache(): Promise<void> {
+    if (this.reindexCacheActive) {
+      new Notice("Reindex already running.");
+      return;
+    }
+    this.reindexCacheActive = true;
+    let abortReason: { kind: "embed_dim_mismatch" | "embed_failure"; message: string } | null = null;
+    let failures = 0;
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      new Notice("Failed to sync bundled tools. See console for details.");
+      console.error(error);
+      this.reindexCacheActive = false;
+      return;
+    }
+    if (!(await this.ensureRedisAvailable("reindex"))) {
+      this.reindexCacheActive = false;
+      return;
+    }
 
     const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
     if (chunkDocIds.length === 0) {
       new Notice("No cached chunks found.");
+      this.reindexCacheActive = false;
       return;
     }
 
     const pluginDir = this.getPluginDir();
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+    const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
     let processed = 0;
-    let failures = 0;
 
     this.showStatusProgress("Reindexing cached chunks...", 0);
+    if (logPath) {
+      void this.appendToLogFile(
+        logPath,
+        `Reindex started: ${chunkDocIds.length} cached items`,
+        "index_redisearch",
+        "INFO"
+      );
+    }
 
     for (const docId of chunkDocIds) {
       processed += 1;
@@ -2520,16 +2966,89 @@ export default class ZoteroRagPlugin extends Plugin {
           "--embed-model",
           this.settings.embedModel,
           "--upsert",
+          "--progress",
         ];
         if (this.settings.embedIncludeMetadata) {
           indexArgs.push("--embed-include-metadata");
         }
-        this.appendChunkTaggingArgs(indexArgs);
-        await this.runPython(indexScript, indexArgs);
+        this.appendChunkTaggingArgs(indexArgs, { allowRegenerate: false });
+        if (logPath) {
+          void this.appendToLogFile(
+            logPath,
+            `Reindexing doc_id ${docId}`,
+            "index_redisearch",
+            "INFO"
+          );
+        }
+        await this.runPythonStreaming(
+          indexScript,
+          indexArgs,
+          (payload) => {
+            if (!logPath || !payload) {
+              return;
+            }
+            if (payload?.type === "progress" && payload.message) {
+              void this.appendToLogFile(
+                logPath,
+                String(payload.message),
+                "index_redisearch",
+                "INFO"
+              );
+            }
+          },
+          () => undefined,
+          logPath,
+          "index_redisearch"
+        );
       } catch (error) {
         failures += 1;
+        const message = this.getPythonErrorMessage(error);
+        const classification = this.classifyIndexingError(message);
         console.error(`Failed to reindex ${docId}`, error);
+        if (classification === "chunks_missing") {
+          new Notice(`Chunks cache missing for ${docId}. Reimport or rebuild this note.`);
+          continue;
+        }
+        if (classification === "embed_dim_mismatch") {
+          abortReason = {
+            kind: "embed_dim_mismatch",
+            message,
+          };
+          break;
+        }
+        if (classification === "embed_failure") {
+          abortReason = {
+            kind: "embed_failure",
+            message,
+          };
+          break;
+        }
       }
+    }
+
+    if (abortReason) {
+      this.showStatusProgress("Aborted", 100);
+      window.setTimeout(() => this.clearStatusProgress(), 1200);
+      this.reindexCacheActive = false;
+      if (abortReason.kind === "embed_dim_mismatch") {
+        const confirmed = await this.confirmRebuildIndex(
+          "Embedding model output dimension does not match the Redis index schema."
+        );
+        if (confirmed) {
+          try {
+            await this.dropRedisIndex(true);
+            await this.reindexRedisFromCache();
+          } catch (dropError) {
+            new Notice("Failed to drop/rebuild the Redis index. See console for details.");
+            console.error(dropError);
+          }
+        }
+      } else {
+        new Notice(
+          "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
+        );
+      }
+      return;
     }
 
     this.showStatusProgress("Done", 100);
@@ -2539,6 +3058,12 @@ export default class ZoteroRagPlugin extends Plugin {
     } else {
       new Notice(`Reindexed ${chunkDocIds.length - failures}/${chunkDocIds.length} items (see console).`);
     }
+    try {
+      await this.pruneDocIndexOrphans();
+    } catch (error) {
+      console.warn("Failed to prune doc index orphans", error);
+    }
+    this.reindexCacheActive = false;
   }
 
   private async reindexChunkUpdates(
@@ -2548,6 +3073,9 @@ export default class ZoteroRagPlugin extends Plugin {
     deleteIds: string[]
   ): Promise<void> {
     if (!chunkIds.length && !deleteIds.length) {
+      return;
+    }
+    if (!(await this.ensureRedisAvailable("reindex updates"))) {
       return;
     }
     const pluginDir = this.getPluginDir();
@@ -2572,7 +3100,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (this.settings.embedIncludeMetadata) {
       args.push("--embed-include-metadata");
     }
-    this.appendChunkTaggingArgs(args);
+    this.appendChunkTaggingArgs(args, { allowRegenerate: false });
     if (chunkIds.length) {
       args.push("--chunk-ids", chunkIds.join(","));
     }
@@ -2583,7 +3111,27 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       await this.runPython(indexScript, args);
     } catch (error) {
+      const message = this.getPythonErrorMessage(error);
+      const classification = this.classifyIndexingError(message);
       console.error(`Failed to reindex updated chunks for ${docId}`, error);
+      if (classification === "embed_dim_mismatch") {
+        const confirmed = await this.confirmRebuildIndex(
+          "Embedding model output dimension does not match the Redis index schema."
+        );
+        if (confirmed) {
+          try {
+            await this.dropRedisIndex(true);
+            await this.reindexRedisFromCache();
+          } catch (dropError) {
+            new Notice("Failed to drop/rebuild the Redis index. See console for details.");
+            console.error(dropError);
+          }
+        }
+        return;
+      }
+      if (classification === "embed_failure") {
+        new Notice("Embedding provider error detected. Fix the provider/model settings and rerun.");
+      }
     }
   }
 
@@ -2810,6 +3358,18 @@ export default class ZoteroRagPlugin extends Plugin {
   private async promptLanguageHint(): Promise<string | null> {
     return new Promise((resolve) => {
       new LanguageSuggestModal(this.app, resolve).open();
+    });
+  }
+
+  private async promptRedisSearchTerm(): Promise<string | null> {
+    return new Promise((resolve) => {
+      new TextPromptModal(
+        this.app,
+        "Search Redis index",
+        "Enter a word or phrase",
+        (value) => resolve(value),
+        "Search term cannot be empty."
+      ).open();
     });
   }
 
@@ -4055,10 +4615,6 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         node = iterator.nextNode();
       }
-      if (!comments.length) {
-        return;
-      }
-
       const parsed = comments
         .map((comment) => ({ comment, info: parseZrrBadgeInfo(comment.data || "") }))
         .filter((entry) => entry.info !== null);
@@ -4067,8 +4623,9 @@ export default class ZoteroRagPlugin extends Plugin {
       }
 
       const pageNumbers = parsed
-        .filter((entry) => entry.info?.pageNumber)
-        .map((entry) => entry.info?.pageNumber || 0);
+        .map((entry) => entry.info)
+        .filter((info): info is ZrrBadgeInfo => Boolean(info?.pageNumber))
+        .map((info) => info.pageNumber || 0);
       const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
       let lastChunkKind: "page" | "section" | null = null;
 
@@ -4251,6 +4808,120 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
     await this.deleteZoteroNoteAndCacheForFile(view.file);
+  }
+
+  private formatRedisSearchResults(payload: any): string {
+    const total = typeof payload?.total === "number" ? payload.total : 0;
+    const query = typeof payload?.query === "string" ? payload.query : "";
+    const rawQuery = typeof payload?.raw_query === "string" ? payload.raw_query : "";
+    const results = Array.isArray(payload?.results) ? payload.results : [];
+
+    const lines: string[] = [];
+    lines.push(`Query: ${rawQuery || query}`);
+    if (query && rawQuery && query !== rawQuery) {
+      lines.push(`Expanded: ${query}`);
+    }
+    lines.push(`Total matches: ${total}`);
+    lines.push("");
+
+    if (!results.length) {
+      lines.push("(no results)");
+      return lines.join("\n");
+    }
+
+    for (const result of results) {
+      const docId = String(result.doc_id || "").trim();
+      const chunkId = String(result.chunk_id || "").trim();
+      const pageStart = String(result.page_start || "").trim();
+      const pageEnd = String(result.page_end || "").trim();
+      const title = String(result.title || "").trim();
+      const section = String(result.section || "").trim();
+      const score = String(result.score || "").trim();
+      const text = String(result.text || "").replace(/\s+/g, " ").trim();
+      const snippet = text.length > 220 ? `${text.slice(0, 220)}…` : text;
+
+      const labelParts = [docId];
+      if (chunkId) {
+        labelParts.push(chunkId);
+      }
+      if (pageStart || pageEnd) {
+        labelParts.push(`p.${pageStart || "?"}-${pageEnd || "?"}`);
+      }
+      lines.push(labelParts.filter(Boolean).join(" • "));
+      if (score) {
+        lines.push(`  score: ${score}`);
+      }
+      if (title) {
+        lines.push(`  title: ${title}`);
+      }
+      if (section) {
+        lines.push(`  section: ${section}`);
+      }
+      if (snippet) {
+        lines.push(`  ${snippet}`);
+      }
+      lines.push("");
+    }
+
+    return lines.join("\n");
+  }
+
+  private async searchRedisIndex(): Promise<void> {
+    const term = await this.promptRedisSearchTerm();
+    if (!term) {
+      return;
+    }
+    if (!(await this.ensureRedisAvailable("index search"))) {
+      return;
+    }
+
+    const pluginDir = this.getPluginDir();
+    const scriptPath = path.join(pluginDir, "tools", "search_redis.py");
+    const args = [
+      "--query",
+      term,
+      "--redis-url",
+      this.settings.redisUrl,
+      "--index",
+      this.getRedisIndexName(),
+      "--limit",
+      "10",
+    ];
+
+    try {
+      await this.ensureBundledTools();
+      const output = await this.runPythonWithOutput(scriptPath, args);
+      const payload = JSON.parse(output || "{}");
+      const body = this.formatRedisSearchResults(payload);
+      new OutputModal(this.app, "Redis index search", body || "(empty)").open();
+    } catch (error) {
+      console.error("Redis search failed", error);
+      new Notice("Redis search failed. See console for details.");
+    }
+  }
+
+  private async showRedisDiagnostics(): Promise<void> {
+    if (!(await this.ensureRedisAvailable("diagnostics"))) {
+      return;
+    }
+    const pluginDir = this.getPluginDir();
+    const scriptPath = path.join(pluginDir, "tools", "redis_diagnostics.py");
+    const args = [
+      "--redis-url",
+      this.settings.redisUrl,
+      "--index",
+      this.getRedisIndexName(),
+    ];
+    try {
+      await this.ensureBundledTools();
+      const output = await this.runPythonWithOutput(scriptPath, args);
+      const payload = JSON.parse(output || "{}");
+      const body = `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+      new OutputModal(this.app, "Redis diagnostics", body || "(empty)").open();
+    } catch (error) {
+      console.error("Redis diagnostics failed", error);
+      new Notice("Redis diagnostics failed. See console for details.");
+    }
   }
 
   private async resolveUniqueBaseName(baseName: string, docId: string): Promise<string> {
@@ -5109,6 +5780,56 @@ export default class ZoteroRagPlugin extends Plugin {
     this.docIndex = index;
   }
 
+  private async pruneDocIndexOrphans(): Promise<{ removed: number; updated: number }> {
+    const adapter = this.app.vault.adapter;
+    const index = await this.getDocIndex();
+    const itemDocIds = new Set(await this.listDocIds(ITEM_CACHE_DIR));
+    const chunkDocIds = new Set(await this.listDocIds(CHUNK_CACHE_DIR));
+    const noteEntries = await this.scanNotesForDocIds(this.settings.outputNoteDir);
+
+    let removed = 0;
+    let updated = 0;
+    let changed = false;
+    const now = new Date().toISOString();
+
+    for (const docId of Object.keys(index)) {
+      const entry = index[docId];
+      let hasNote = false;
+      const entryNote = entry?.note_path ? entry.note_path.trim() : "";
+      if (entryNote && (await adapter.exists(entryNote))) {
+        hasNote = true;
+      } else if (noteEntries[docId]?.note_path) {
+        hasNote = true;
+        const noteEntry = noteEntries[docId];
+        if (noteEntry.note_path && noteEntry.note_path !== entry.note_path) {
+          entry.note_path = noteEntry.note_path;
+          updated += 1;
+          changed = true;
+        }
+        if (noteEntry.note_title && noteEntry.note_title !== entry.note_title) {
+          entry.note_title = noteEntry.note_title;
+          updated += 1;
+          changed = true;
+        }
+        if (updated > 0) {
+          entry.updated_at = now;
+        }
+      }
+
+      const hasCache = itemDocIds.has(docId) || chunkDocIds.has(docId);
+      if (!hasNote && !hasCache) {
+        delete index[docId];
+        removed += 1;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await this.saveDocIndex(index);
+    }
+    return { removed, updated };
+  }
+
   private async updateDocIndex(entry: Partial<DocIndexEntry> & { doc_id: string }): Promise<void> {
     const index = await this.getDocIndex();
     const existing = index[entry.doc_id] ?? { doc_id: entry.doc_id } as DocIndexEntry;
@@ -5398,6 +6119,7 @@ export default class ZoteroRagPlugin extends Plugin {
         (payload) => this.handleDoclingProgress(payload, qualityLabel),
         () => {},
         doclingLogPath,
+        "docling_extract",
         registerRecreateProcess
       );
       this.recreateMissingNotesProcess = null;
@@ -5431,64 +6153,74 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
 
-    try {
-      this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
-      const indexArgs = [
-        "--chunks-json",
-        this.getAbsoluteVaultPath(chunkPath),
-        "--redis-url",
-        this.settings.redisUrl,
-        "--index",
-        this.getRedisIndexName(),
-        "--prefix",
-        this.getRedisKeyPrefix(),
-        "--embed-base-url",
-        this.settings.embedBaseUrl,
-        "--embed-api-key",
-        this.settings.embedApiKey,
-        "--embed-model",
-        this.settings.embedModel,
-        "--upsert",
-        "--progress",
-      ];
-      if (this.settings.embedIncludeMetadata) {
-        indexArgs.push("--embed-include-metadata");
-      }
-      this.appendChunkTaggingArgs(indexArgs);
-      await this.runPythonStreaming(
-        indexScript,
-        indexArgs,
-        (payload) => {
-          if (payload?.type === "progress" && payload.total) {
-            const percent = Math.round((payload.current / payload.total) * 100);
-            const message =
-              typeof payload.message === "string" && payload.message.trim()
-                ? payload.message
-                : `Indexing chunks ${payload.current}/${payload.total}`;
-            const label = this.formatStatusLabel(
-              message,
-              qualityLabel
-            );
-            this.showStatusProgress(label, percent);
-          }
-        },
-        () => undefined,
-        undefined,
-        registerRecreateProcess
-      );
-      this.recreateMissingNotesProcess = null;
-    } catch (error) {
-      if (this.recreateMissingNotesAbort) {
-        this.recreateMissingNotesProcess = null;
-        this.clearStatusProgress();
-        return false;
-      }
+    let indexingFailed = false;
+    const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
+    const redisOk = await this.ensureRedisAvailable("rebuild");
+    if (!redisOk) {
+      indexingFailed = true;
       if (showNotices) {
-        new Notice("RedisSearch indexing failed. See console for details.");
+        new Notice("Redis is unavailable; skipping indexing for this note.");
       }
-      console.error(error);
-      this.clearStatusProgress();
-      return false;
+    } else {
+      try {
+        this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
+        const indexArgs = [
+          "--chunks-json",
+          this.getAbsoluteVaultPath(chunkPath),
+          "--redis-url",
+          this.settings.redisUrl,
+          "--index",
+          this.getRedisIndexName(),
+          "--prefix",
+          this.getRedisKeyPrefix(),
+          "--embed-base-url",
+          this.settings.embedBaseUrl,
+          "--embed-api-key",
+          this.settings.embedApiKey,
+          "--embed-model",
+          this.settings.embedModel,
+          "--upsert",
+          "--progress",
+        ];
+        if (this.settings.embedIncludeMetadata) {
+          indexArgs.push("--embed-include-metadata");
+        }
+        this.appendChunkTaggingArgs(indexArgs, { allowRegenerate: false });
+        await this.runPythonStreaming(
+          indexScript,
+          indexArgs,
+          (payload) => {
+            if (payload?.type === "progress" && payload.total) {
+              const percent = Math.round((payload.current / payload.total) * 100);
+              const message =
+                typeof payload.message === "string" && payload.message.trim()
+                  ? payload.message
+                  : `Indexing chunks ${payload.current}/${payload.total}`;
+              const label = this.formatStatusLabel(
+                message,
+                qualityLabel
+              );
+              this.showStatusProgress(label, percent);
+            }
+          },
+          () => undefined,
+          logPath,
+          "index_redisearch",
+          registerRecreateProcess
+        );
+        this.recreateMissingNotesProcess = null;
+      } catch (error) {
+        if (this.recreateMissingNotesAbort) {
+          this.recreateMissingNotesProcess = null;
+          this.clearStatusProgress();
+          return false;
+        }
+        if (showNotices) {
+          new Notice("RedisSearch indexing failed; note will still be rebuilt.");
+        }
+        console.error(error);
+        indexingFailed = true;
+      }
     }
 
     const pdfLink = layeredPdfPath
@@ -6383,7 +7115,10 @@ export default class ZoteroRagPlugin extends Plugin {
     return args;
   }
 
-  private appendChunkTaggingArgs(args: string[]): void {
+  private appendChunkTaggingArgs(args: string[], options?: { allowRegenerate?: boolean }): void {
+    if (options?.allowRegenerate === false) {
+      return;
+    }
     if (!this.settings.enableChunkTagging) {
       return;
     }
@@ -7208,6 +7943,7 @@ export default class ZoteroRagPlugin extends Plugin {
     onPayload: (payload: any) => void,
     onFallbackFinal: (payload: any) => void,
     stderrLogPath?: string | null,
+    stderrLogLabel = "docling_extract",
     onSpawn?: (child: ChildProcess) => void
   ): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -7269,7 +8005,7 @@ export default class ZoteroRagPlugin extends Plugin {
           onFallbackFinal(lastPayload);
         }
         if (stderrLogPath) {
-          void this.appendToLogFile(stderrLogPath, stderr);
+          void this.appendToLogFile(stderrLogPath, stderr, stderrLogLabel, "STDERR");
         }
         if (code === 0) {
           resolve();
@@ -7409,7 +8145,7 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       };
       const content = await readLog();
-      new OutputModal(this.app, "Docling log", content || "(empty)", {
+      new OutputModal(this.app, "Log file", content || "(empty)", {
         autoRefresh: true,
         refreshIntervalMs: 2000,
         onRefresh: readLog,
@@ -7439,7 +8175,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  private formatStderrForLog(raw: string): string {
+  private formatLogLines(raw: string, label: string, stream: string): string {
     const lines = raw
       .split(/\r?\n/)
       .map((line) => line.trimEnd())
@@ -7448,14 +8184,19 @@ export default class ZoteroRagPlugin extends Plugin {
       return "";
     }
     const timestamp = new Date().toISOString().replace("T", " ").replace("Z", "").replace(".", ",");
-    return lines.map((line) => `${timestamp} STDERR docling_extract: ${line}`).join("\n") + "\n";
+    return lines.map((line) => `${timestamp} ${stream} ${label}: ${line}`).join("\n") + "\n";
   }
 
-  private async appendToLogFile(logFilePath: string, raw: string): Promise<void> {
+  private async appendToLogFile(
+    logFilePath: string,
+    raw: string,
+    label = "docling_extract",
+    stream = "STDERR"
+  ): Promise<void> {
     if (!raw || !raw.trim()) {
       return;
     }
-    const formatted = this.formatStderrForLog(raw);
+    const formatted = this.formatLogLines(raw, label, stream);
     if (!formatted) {
       return;
     }
@@ -7470,7 +8211,8 @@ export default class ZoteroRagPlugin extends Plugin {
   private runPythonWithOutput(
     scriptPath: string,
     args: string[],
-    stderrLogPath?: string | null
+    stderrLogPath?: string | null,
+    stderrLogLabel = "docling_extract"
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
@@ -7496,7 +8238,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
       child.on("close", (code) => {
         if (stderrLogPath) {
-          void this.appendToLogFile(stderrLogPath, stderr);
+          void this.appendToLogFile(stderrLogPath, stderr, stderrLogLabel, "STDERR");
         }
         if (code === 0) {
           resolve(stdout.trim());

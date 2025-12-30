@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
 import redis
@@ -16,9 +16,78 @@ def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
 
 
-def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
+EMBED_MAX_CHARS = 12000
+EMBED_MAX_CHARS_NON_ASCII = 8000
+
+
+def truncate_for_embedding(text: str) -> Tuple[str, bool]:
+    if not text:
+        return text, False
+    max_chars = EMBED_MAX_CHARS
+    non_ascii = sum(1 for ch in text if ord(ch) > 127)
+    if non_ascii / max(1, len(text)) > 0.2:
+        max_chars = EMBED_MAX_CHARS_NON_ASCII
+    if len(text) <= max_chars:
+        return text, False
+    sep = "\n...\n"
+    head_len = max(0, (max_chars - len(sep)) // 2)
+    tail_len = max_chars - len(sep) - head_len
+    trimmed = f"{text[:head_len]}{sep}{text[-tail_len:]}" if tail_len > 0 else text[:max_chars]
+    return trimmed, True
+
+
+def _list_to_dict(items: Sequence[Any]) -> Dict[str, Any]:
+    data: Dict[str, Any] = {}
+    for i in range(0, len(items) - 1, 2):
+        key = items[i]
+        value = items[i + 1]
+        if isinstance(key, bytes):
+            key = key.decode("utf-8", "ignore")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "ignore")
+        data[str(key)] = value
+    return data
+
+
+def _iter_attributes(info_value: Any) -> Iterable[Dict[str, Any]]:
+    if not isinstance(info_value, list):
+        return []
+    for entry in info_value:
+        if isinstance(entry, list):
+            yield _list_to_dict(entry)
+
+
+def get_index_vector_dim(
+    client: redis.Redis, index_name: str, field_name: str = "embedding"
+) -> Optional[int]:
+    try:
+        info = client.execute_command("FT.INFO", index_name)
+    except Exception:
+        return None
+    info_dict = _list_to_dict(info if isinstance(info, list) else [])
+    attrs = info_dict.get("attributes")
+    for attr in _iter_attributes(attrs):
+        attr_name = attr.get("attribute") or attr.get("identifier")
+        if attr_name != field_name:
+            continue
+        if str(attr.get("type", "")).upper() != "VECTOR":
+            continue
+        dim_value = attr.get("dimension") or attr.get("dim")
+        try:
+            return int(dim_value)
+        except Exception:
+            return None
+    return None
+
+
+def ensure_index(client: redis.Redis, index_name: str, prefix: str, embedding_dim: int) -> None:
     try:
         client.execute_command("FT.INFO", index_name)
+        existing_dim = get_index_vector_dim(client, index_name)
+        if existing_dim and existing_dim != embedding_dim:
+            raise RuntimeError(
+                f"Embedding dim mismatch: index={existing_dim} model={embedding_dim}"
+            )
         ensure_schema_fields(client, index_name)
         return
     except redis.exceptions.ResponseError as exc:
@@ -78,7 +147,7 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str) -> None:
         "TYPE",
         "FLOAT32",
         "DIM",
-        "768",
+        str(embedding_dim),
         "DISTANCE_METRIC",
         "COSINE",
     )
@@ -453,12 +522,15 @@ def request_chunk_tags(
     ).format(max_tags=max_tags)
     payload = {
         "model": model,
-        "temperature": temperature,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": snippet},
         ],
     }
+    model_name = (model or "").lower()
+    requires_default_temp = "gpt-5" in model_name or model_name.startswith("gpt5")
+    if not requires_default_temp or temperature == 1.0:
+        payload["temperature"] = temperature
     response = requests.post(url, json=payload, headers=headers, timeout=60)
     if response.status_code >= 400:
         raise RuntimeError(f"Tag request failed: {response.status_code} {response.text}")
@@ -584,12 +656,6 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to delete old chunk keys for doc_id {doc_id}: {exc}")
 
-    try:
-        ensure_index(client, args.index, args.prefix)
-    except Exception as exc:
-        eprint(f"Failed to ensure index: {exc}")
-        return 2
-
     item_metadata: Dict[str, Any] = {}
     item_json_path = args.item_json or infer_item_json_path(args.chunks_json, str(doc_id))
     if item_json_path and os.path.isfile(item_json_path):
@@ -624,6 +690,48 @@ def main() -> int:
         if chunk_id in delete_ids:
             continue
         valid_chunks.append(chunk)
+
+    if not valid_chunks:
+        return 0
+
+    first_chunk = valid_chunks[0]
+    first_raw = str(first_chunk.get("text", ""))
+    first_text = normalize_index_text(markdown_to_index_text(first_raw))
+    first_embedding_text = (
+        build_embedding_text(first_text, first_chunk, item_metadata)
+        if args.embed_include_metadata
+        else first_text
+    )
+    first_len = len(first_embedding_text)
+    first_embedding_text, truncated = truncate_for_embedding(first_embedding_text)
+    if truncated:
+        eprint(
+            "Embedding input truncated for chunk %s:%s (chars=%d->%d)"
+            % (doc_id, first_chunk.get("chunk_id"), first_len, len(first_embedding_text))
+        )
+    try:
+        sample_embedding = request_embedding(
+            args.embed_base_url,
+            args.embed_api_key,
+            args.embed_model,
+            first_embedding_text,
+        )
+    except Exception as exc:
+        eprint(f"Embedding failed for chunk {doc_id}:{first_chunk.get('chunk_id')}: {exc}")
+        return 2
+
+    embedding_dim = len(sample_embedding)
+    if embedding_dim <= 0:
+        eprint("Embedding dim mismatch: empty embedding returned")
+        return 2
+
+    try:
+        ensure_index(client, args.index, args.prefix, embedding_dim)
+    except Exception as exc:
+        eprint(f"Failed to ensure index: {exc}")
+        return 2
+
+    sample_embedding = normalize_vector(sample_embedding)
 
     total = len(valid_chunks)
     current = 0
@@ -678,25 +786,37 @@ def main() -> int:
                             "stage": "embedding",
                             "current": current,
                             "total": total,
-                            "message": f"Embedding chunk {current}/{total}",
+                            "message": f"Embedding {stable_chunk_id} ({current}/{total})",
                         }
                     ),
                     flush=True,
                 )
-            embedding_text = (
-                build_embedding_text(text, chunk, item_metadata)
-                if args.embed_include_metadata
-                else text
-            )
-            embedding = request_embedding(
-                args.embed_base_url,
-                args.embed_api_key,
-                args.embed_model,
-                embedding_text,
-            )
-            if len(embedding) != 768:
-                raise RuntimeError(f"Embedding dim mismatch: {len(embedding)}")
-            embedding = normalize_vector(embedding)
+            if chunk is first_chunk:
+                embedding = sample_embedding
+            else:
+                embedding_text = (
+                    build_embedding_text(text, chunk, item_metadata)
+                    if args.embed_include_metadata
+                    else text
+                )
+                embed_len = len(embedding_text)
+                embedding_text, truncated = truncate_for_embedding(embedding_text)
+                if truncated:
+                    eprint(
+                        "Embedding input truncated for chunk %s (chars=%d->%d)"
+                        % (stable_chunk_id, embed_len, len(embedding_text))
+                    )
+                embedding = request_embedding(
+                    args.embed_base_url,
+                    args.embed_api_key,
+                    args.embed_model,
+                    embedding_text,
+                )
+                if len(embedding) != embedding_dim:
+                    raise RuntimeError(
+                        f"Embedding dim mismatch: expected {embedding_dim} got {len(embedding)}"
+                    )
+                embedding = normalize_vector(embedding)
         except Exception as exc:
             eprint(f"Embedding failed for chunk {stable_chunk_id}: {exc}")
             return 2
@@ -733,7 +853,7 @@ def main() -> int:
                         "stage": "index",
                         "current": current,
                         "total": total,
-                        "message": f"Indexing chunks {current}/{total}",
+                        "message": f"Indexing {stable_chunk_id} ({current}/{total})",
                     }
                 ),
                 flush=True,

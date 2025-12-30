@@ -1299,7 +1299,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Enable logging to file")
-      .setDesc("Write Docling/Python logs to a file during extraction.")
+      .setDesc("Write plugin logs to a file.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.enableFileLogging).onChange(async (value) => {
           this.plugin.settings.enableFileLogging = value;
@@ -1309,7 +1309,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Log file path (vault-relative)")
-      .setDesc("Where to write logs. Keep inside the vault.")
+      .setDesc("Where to write the log file. Keep inside the vault.")
       .addText((text) =>
         text
           .setPlaceholder(`${CACHE_ROOT}/logs/docling_extract.log`)
@@ -1322,7 +1322,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("View or clear log")
-      .setDesc("Open the log contents or clear the file.")
+      .setDesc("Open the log file or clear it.")
       .addButton((button) =>
         button.setButtonText("Open log").onClick(async () => {
           await this.plugin.openLogFile?.();

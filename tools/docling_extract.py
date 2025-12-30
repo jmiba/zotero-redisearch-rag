@@ -1707,6 +1707,10 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
     endpoint = f"{base_url}/chat/completions"
     api_key = (config.llm_cleanup_api_key or "").strip()
 
+    def _requires_default_temperature(model_name: str) -> bool:
+        name = (model_name or "").lower()
+        return "gpt-5" in name or name.startswith("gpt5")
+
     def _call(text: str) -> str:
         try:
             import requests
@@ -1720,7 +1724,6 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
 
         payload = {
             "model": config.llm_cleanup_model,
-            "temperature": config.llm_cleanup_temperature,
             "messages": [
                 {
                     "role": "system",
@@ -1732,6 +1735,8 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
                 {"role": "user", "content": text},
             ],
         }
+        if not _requires_default_temperature(config.llm_cleanup_model) or config.llm_cleanup_temperature == 1.0:
+            payload["temperature"] = config.llm_cleanup_temperature
         try:
             response = requests.post(endpoint, headers=headers, json=payload, timeout=config.llm_cleanup_timeout_sec)
             response.raise_for_status()

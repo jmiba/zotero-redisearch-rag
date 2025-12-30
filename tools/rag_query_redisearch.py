@@ -164,6 +164,45 @@ def parse_results(raw: List[Any]) -> List[Dict[str, Any]]:
     return results
 
 
+FIELD_TYPE_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def parse_info_map(info: Any) -> Dict[str, Any]:
+    if not isinstance(info, (list, tuple)):
+        return {}
+    it = iter(info)
+    result: Dict[str, Any] = {}
+    for key in it:
+        value = next(it, None)
+        result[str(decode_value(key))] = value
+    return result
+
+
+def get_field_types(client: redis.Redis, index: str) -> Dict[str, str]:
+    if index in FIELD_TYPE_CACHE:
+        return FIELD_TYPE_CACHE[index]
+    try:
+        info = client.execute_command("FT.INFO", index)
+    except Exception:
+        return {}
+    info_map = parse_info_map(info)
+    attributes = info_map.get("attributes") or info_map.get("fields") or []
+    field_types: Dict[str, str] = {}
+    if isinstance(attributes, (list, tuple)):
+        for attr in attributes:
+            if not isinstance(attr, (list, tuple)):
+                continue
+            attr_map: Dict[str, Any] = {}
+            for i in range(0, len(attr) - 1, 2):
+                attr_map[str(decode_value(attr[i]))] = decode_value(attr[i + 1])
+            name = attr_map.get("identifier") or attr_map.get("attribute") or attr_map.get("name")
+            ftype = attr_map.get("type")
+            if name and ftype:
+                field_types[str(name)] = str(ftype).upper()
+    FIELD_TYPE_CACHE[index] = field_types
+    return field_types
+
+
 _QUERY_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "into", "over",
     "under", "after", "before", "were", "was", "are", "is", "its", "their",
@@ -178,17 +217,34 @@ _QUERY_STOPWORDS = {
 
 
 def extract_keywords(query: str) -> List[str]:
-    raw_tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\\-]{2,}", query)
+    raw_tokens = re.findall(r"[\\w'\\-\u2011]{2,}", query, flags=re.UNICODE)
     keywords: List[str] = []
+    def add_keyword(token: str, raw: str) -> None:
+        if not token:
+            return
+        lower = token.lower()
+        if lower in _QUERY_STOPWORDS:
+            return
+        keywords.append(lower)
+        raw_lower = raw.lower()
+        if raw_lower.endswith(("'s", "\u2019s")) and len(lower) > 3:
+            stem = lower[:-1]
+            if stem and stem not in _QUERY_STOPWORDS:
+                keywords.append(stem)
+
     for token in raw_tokens:
-        cleaned = re.sub(r"[^A-Za-z0-9]", "", token)
+        cleaned = "".join(ch for ch in token if ch.isalnum())
         if not cleaned:
             continue
-        lower = cleaned.lower()
-        if lower in _QUERY_STOPWORDS:
-            continue
         if token[:1].isupper() or len(cleaned) >= 5:
-            keywords.append(lower)
+            add_keyword(cleaned, token)
+        if "-" in token or "\u2011" in token:
+            for part in re.split(r"[-\u2011]+", token):
+                part_clean = "".join(ch for ch in part if ch.isalnum())
+                if not part_clean:
+                    continue
+                if part[:1].isupper() or len(part_clean) >= 4:
+                    add_keyword(part_clean, part)
     seen = set()
     ordered: List[str] = []
     for token in keywords:
@@ -308,6 +364,7 @@ def retrieve_chunks(
 
     lexical_limit = max(k, 5)
     lexical_results = run_lexical_search(client, index, keywords, lexical_limit)
+    lexical_ids: Set[str] = set()
     if lexical_results:
         seen = {item.get("chunk_id") for item in retrieved if item.get("chunk_id")}
         for item in lexical_results:
@@ -316,6 +373,11 @@ def retrieve_chunks(
                 continue
             retrieved.append(item)
             seen.add(chunk_id)
+            lexical_ids.add(str(chunk_id))
+        for item in lexical_results:
+            chunk_id = item.get("chunk_id")
+            if chunk_id:
+                lexical_ids.add(str(chunk_id))
 
         max_total = k + lexical_limit
         if len(retrieved) > max_total:
@@ -333,9 +395,29 @@ def retrieve_chunks(
         if not filtered:
             filtered = retrieved
 
+    if lexical_ids:
+        seen_ids = {str(item.get("chunk_id")) for item in filtered if item.get("chunk_id")}
+        for item in lexical_results:
+            chunk_id = item.get("chunk_id")
+            if not chunk_id:
+                continue
+            cid = str(chunk_id)
+            if cid in seen_ids:
+                continue
+            text = str(item.get("text", "") or "").strip()
+            if not text:
+                continue
+            filtered.append(item)
+            seen_ids.add(cid)
+
     metrics = compute_retrieval_metrics(retrieved, filtered)
-    retrieved = apply_tag_boosting(filtered, keywords)
-    return retrieved, metrics
+    ordered = apply_tag_boosting(filtered, keywords)
+    if lexical_ids:
+        lexical_set = set(lexical_ids)
+        lexical_first = [item for item in ordered if str(item.get("chunk_id")) in lexical_set]
+        rest = [item for item in ordered if str(item.get("chunk_id")) not in lexical_set]
+        ordered = lexical_first + rest
+    return ordered, metrics
 
 
 def run_lexical_search(
@@ -346,16 +428,50 @@ def run_lexical_search(
 ) -> List[Dict[str, Any]]:
     if not keywords or limit <= 0:
         return []
-    tokens = [re.sub(r"[^A-Za-z0-9]", "", token) for token in keywords]
+    tokens = ["".join(ch for ch in token if ch.isalnum()) for token in keywords]
     tokens = [token for token in tokens if token]
     if not tokens:
         return []
-    query = "@text:(" + "|".join(tokens) + ")"
-    try:
+    text_terms = "|".join(tokens)
+    tag_terms = "|".join(tokens)
+    field_types = get_field_types(client, index)
+
+    def should_include(name: str, required: bool = False) -> bool:
+        if field_types:
+            return required or name in field_types
+        return required
+
+    def field_is_tag(name: str) -> bool:
+        return field_types.get(name, "").upper() == "TAG"
+
+    def format_term(name: str) -> str:
+        field = f"@{name}"
+        if field_is_tag(name):
+            return f"{field}:{{{tag_terms}}}"
+        return f"{field}:({text_terms})"
+
+    parts: List[Tuple[str, str]] = []
+    if should_include("text", required=True):
+        parts.append(("text", format_term("text")))
+    if should_include("title"):
+        parts.append(("title", format_term("title")))
+    if should_include("authors"):
+        parts.append(("authors", format_term("authors")))
+    if should_include("tags"):
+        parts.append(("tags", format_term("tags")))
+    if should_include("chunk_tags"):
+        parts.append(("chunk_tags", format_term("chunk_tags")))
+    if should_include("doc_id"):
+        parts.append(("doc_id", format_term("doc_id")))
+    if not parts:
+        return []
+    query = "(" + " OR ".join(clause for _name, clause in parts) + ")"
+
+    def run_search(query_text: str) -> Tuple[List[Dict[str, Any]], int]:
         raw = client.execute_command(
             "FT.SEARCH",
             index,
-            query,
+            query_text,
             "LIMIT",
             "0",
             str(limit),
@@ -375,9 +491,53 @@ def run_lexical_search(
             "DIALECT",
             "2",
         )
+        total = 0
+        if isinstance(raw, list) and raw:
+            try:
+                total = int(raw[0])
+            except Exception:
+                total = 0
+        return parse_results(raw), total
+
+    def dedupe_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen: Set[str] = set()
+        merged: List[Dict[str, Any]] = []
+        for item in results:
+            chunk_id = item.get("chunk_id")
+            if not chunk_id:
+                continue
+            cid = str(chunk_id)
+            if cid in seen:
+                continue
+            seen.add(cid)
+            merged.append(item)
+            if limit > 0 and len(merged) >= limit:
+                break
+        return merged
+
+    try:
+        results, total = run_search(query)
+        if total == 0:
+            fallback_results: List[Dict[str, Any]] = []
+            for _name, clause in parts:
+                try:
+                    field_results, _ = run_search(clause)
+                    fallback_results.extend(field_results)
+                except Exception:
+                    continue
+            merged = dedupe_results(fallback_results)
+            if merged:
+                return merged
+        return results
     except Exception:
-        return []
-    return parse_results(raw)
+        fallback_results = []
+        for _name, clause in parts:
+            try:
+                field_results, _ = run_search(clause)
+                fallback_results.extend(field_results)
+            except Exception:
+                continue
+        return dedupe_results(fallback_results)
 
 def is_content_chunk(chunk: Dict[str, Any]) -> bool:
     text = chunk.get("text", "")
@@ -436,6 +596,11 @@ def compute_retrieval_metrics(
         "filtered_chars": sum(len(str(chunk.get("text", ""))) for chunk in filtered),
         "best_score": min(scores) if scores else None,
     }
+
+def is_short_query(query: str) -> bool:
+    tokens = re.findall(r"[\\w]+", query, flags=re.UNICODE)
+    tokens = [token for token in tokens if token]
+    return len(tokens) <= 3
 
 
 _MIN_CONTEXT_CHUNKS = 3
@@ -582,15 +747,18 @@ def main() -> int:
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
     keywords = extract_keywords(args.query)
 
+    base_k = args.k
+    if is_short_query(args.query):
+        base_k = max(base_k, 12)
     try:
-        retrieved, metrics = retrieve_chunks(client, args.index, vec, args.k, keywords, strict=True)
+        retrieved, metrics = retrieve_chunks(client, args.index, vec, base_k, keywords, strict=True)
     except Exception as exc:
         eprint(f"RedisSearch query failed: {exc}")
         return 2
 
-    broaden, _ = should_broaden_retrieval(metrics, args.k)
+    broaden, _ = should_broaden_retrieval(metrics, base_k)
     if broaden:
-        fallback_k = max(args.k * 2, 12)
+        fallback_k = max(base_k * 2, 12)
         try:
             retrieved, _ = retrieve_chunks(client, args.index, vec, fallback_k, keywords, strict=False)
         except Exception as exc:
