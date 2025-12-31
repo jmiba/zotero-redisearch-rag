@@ -725,11 +725,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
       );
     
-    containerEl.createEl("h2", { text: "Automatic OCR cleanup" });
+    containerEl.createEl("h2", { text: "OCR cleanup" });
 
     new Setting(containerEl)
       .setName("LLM cleanup for low-quality chunks")
-      .setDesc("Optional OpenAI-compatible cleanup for poor OCR. Can be slow/costly.")
+      .setDesc("Automatic AI cleanup for poor OCR at import. Can be slow/costly.")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.enableLlmCleanup).onChange(async (value) => {
           this.plugin.settings.enableLlmCleanup = value;

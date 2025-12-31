@@ -2420,7 +2420,40 @@ export default class ZoteroRagPlugin extends Plugin {
     for (const [token, replacement] of replacements) {
       result = result.split(token).join(replacement);
     }
-    return result;
+    // As a safety net, repair any truncated or unlabeled wiki links to zrr-chunk anchors
+    // that could occur when some local providers truncate responses.
+    return this.repairTruncatedWikilinks(result);
+  }
+
+  // Repairs common cases of truncated Obsidian wiki links produced after inline citation expansion.
+  // Examples fixed:
+  //   "[[zotero/notes/Foo#zrr-chunk:p1"           -> "[[zotero/notes/Foo#zrr-chunk:p1]]"
+  //   "[[zotero/notes/Foo#zrr-chunk:p1]]"        -> "[[zotero/notes/Foo#zrr-chunk:p1|p1]]" (adds default label)
+  private repairTruncatedWikilinks(text: string): string {
+    if (!text || typeof text !== "string") {
+      return text;
+    }
+    let next = text;
+    // 1) Close any line-ending link that starts a zrr-chunk anchor but lacks closing ]] on that line
+    //    We only touch links that clearly target a zrr-chunk to avoid false positives.
+    next = next.replace(/\[\[([^\]\n#]+#zrr-chunk:[^\]\n|]+)(?=\n|$)/g, "[[$1]]");
+
+    // 2) Ensure label is present for zrr-chunk links that have no explicit label
+    //    i.e., convert [[path#zrr-chunk:ID]] -> [[path#zrr-chunk:ID|LABEL]] where LABEL defaults to ID or page-like form
+    next = next.replace(/\[\[([^\]\n#]+#zrr-chunk:([^\]\n|]+))\]\]/g, (_m, full, chunkId) => {
+      const label = this.buildDefaultChunkLabel(String(chunkId || "").trim());
+      return `[[${full}|${label}]]`;
+    });
+    return next;
+  }
+
+  private buildDefaultChunkLabel(chunkId: string): string {
+    const id = (chunkId || "").trim();
+    const m = id.match(/^p(\d+)$/i);
+    if (m) {
+      return `p. ${m[1]}`;
+    }
+    return id || "source";
   }
 
   private handleDoclingProgress(payload: any, qualityLabel: string | null): void {
