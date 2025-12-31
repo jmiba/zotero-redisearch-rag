@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0
+
+- Import now resumes after a drop/rebuild when an embedding-dimension mismatch is detected, with clearer provider-error notices.
+- Chat queries now handle embedding dimension mismatches by offering a drop/rebuild and retrying after a successful rebuild.
+- Import/chat now surface embedding-provider failures encountered during rebuilds with clearer guidance.
+- Import and Zotero group lookups now show a toast when the local Zotero API is unreachable.
+- Python env now defaults to a shared user cache folder so multiple vaults can reuse it.
+- Added a setting to choose between shared and per-vault Python env locations.
+- Python path now defaults to blank and auto-detects interpreters when setting up the env.
+- Plugin now detects an already-running Redis instance on startup (when auto-start is off) and notifies the user.
+
 ## 0.3.4
 
 - Sync markers now render as styled badges in reading view (page/section + sync start/end).

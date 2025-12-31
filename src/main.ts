@@ -28,6 +28,7 @@ import { promises as fs, existsSync } from "fs";
 import http from "http";
 import https from "https";
 import net from "net";
+import os from "os";
 import tls from "tls";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -1305,6 +1306,8 @@ export default class ZoteroRagPlugin extends Plugin {
   private statusBarInnerEl?: HTMLElement;
   private lastPythonEnvNotice: string | null = null;
   private lastContainerNotice: string | null = null;
+  private lastZoteroApiNotice: string | null = null;
+  private lastRedisNotice: string | null = null;
   private noteSyncTimers = new Map<string, number>();
   private noteSyncInFlight = new Set<string>();
   private noteSyncSuppressed = new Set<string>();
@@ -1314,6 +1317,15 @@ export default class ZoteroRagPlugin extends Plugin {
   private recreateMissingNotesAbort = false;
   private recreateMissingNotesProcess: ChildProcess | null = null;
   private reindexCacheActive = false;
+  private lastReindexFailure:
+    | "busy"
+    | "tools_error"
+    | "redis_unavailable"
+    | "no_cache"
+    | "embed_dim_mismatch"
+    | "embed_failure"
+    | "unknown"
+    | null = null;
   private lastRedisSearchTerm = "";
 
   async onload(): Promise<void> {
@@ -1336,6 +1348,8 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       console.error("Failed to sync bundled tools", error);
     }
+
+    void this.autoDetectRedisOnLoad();
 
     this.addCommand({
       id: "import-zotero-item-index",
@@ -1461,6 +1475,11 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to sync bundled tools. See console for details.");
       console.error(error);
+      return;
+    }
+
+    const localApiOk = await this.warnIfZoteroLocalApiUnavailable("import");
+    if (!localApiOk && !this.canUseWebApi()) {
       return;
     }
 
@@ -1646,6 +1665,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
+    let indexingRecovered = false;
     try {
       this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
       const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
@@ -1691,10 +1711,57 @@ export default class ZoteroRagPlugin extends Plugin {
         () => undefined
       );
     } catch (error) {
-      new Notice("RedisSearch indexing failed. See console for details.");
+      const message = this.getPythonErrorMessage(error);
+      const classification = this.classifyIndexingError(message);
       console.error(error);
-      this.clearStatusProgress();
-      return;
+      if (classification === "embed_dim_mismatch") {
+        const confirmed = await this.confirmRebuildIndex(
+          "Embedding model output dimension does not match the Redis index schema. " +
+            "Switch to a model with matching dimensions, or drop/rebuild the index."
+        );
+        if (confirmed) {
+          try {
+            await this.dropRedisIndex(true);
+            const rebuilt = await this.reindexRedisFromCache();
+            if (!rebuilt) {
+              this.clearStatusProgress();
+              if (this.lastReindexFailure === "embed_failure") {
+                new Notice(
+                  "Embedding provider error detected while rebuilding the Redis index. " +
+                    "Fix the provider/model settings and retry import."
+                );
+              } else {
+                new Notice("Redis index rebuild did not complete. Import stopped.");
+              }
+              return;
+            }
+            new Notice("Redis index rebuilt; resuming import.");
+            indexingRecovered = true;
+          } catch (dropError) {
+            this.clearStatusProgress();
+            new Notice("Failed to drop/rebuild the Redis index. See console for details.");
+            console.error(dropError);
+            return;
+          }
+        } else {
+          this.clearStatusProgress();
+          new Notice(
+            "Indexing aborted due to embedding dimension mismatch. " +
+              "Switch models or drop/rebuild the index."
+          );
+          return;
+        }
+      }
+      if (!indexingRecovered) {
+        if (classification === "embed_failure") {
+          this.clearStatusProgress();
+          new Notice("Embedding provider error detected. Fix the provider/model settings and rerun.");
+          return;
+        }
+        this.clearStatusProgress();
+        new Notice("RedisSearch indexing failed. See console for details.");
+        return;
+      }
     }
 
     try {
@@ -2213,24 +2280,82 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      await this.runPythonStreaming(
-        ragScript,
-        args,
-        (payload) => {
-          if (payload?.type === "delta" && typeof payload.content === "string") {
-            onDelta(payload.content);
+      const runQuery = async (): Promise<void> => {
+        await this.runPythonStreaming(
+          ragScript,
+          args,
+          (payload) => {
+            if (payload?.type === "delta" && typeof payload.content === "string") {
+              onDelta(payload.content);
+              return;
+            }
+            if (payload?.type === "final") {
+              onFinal(payload);
+              return;
+            }
+            if (payload?.answer) {
+              onFinal(payload);
+            }
+          },
+          onFinal
+        );
+      };
+      let attemptedRebuild = false;
+      while (true) {
+        try {
+          await runQuery();
+          break;
+        } catch (error) {
+          const message = this.getPythonErrorMessage(error);
+          const classification = this.classifyIndexingError(message);
+          if (classification === "embed_dim_mismatch") {
+            if (attemptedRebuild) {
+              onFinal({
+                answer:
+                  "Embedding dimension mismatch persists after rebuild. Check the embedding model settings.",
+              });
+              return;
+            }
+            const confirmed = await this.confirmRebuildIndex(
+              "Embedding model output dimension does not match the Redis index schema."
+            );
+            if (!confirmed) {
+              onFinal({
+                answer:
+                  "Embedding dimension mismatch. Switch models or drop/rebuild the Redis index.",
+              });
+              return;
+            }
+            try {
+              await this.dropRedisIndex(true);
+              const rebuilt = await this.reindexRedisFromCache();
+              if (!rebuilt) {
+                const answer =
+                  this.lastReindexFailure === "embed_failure"
+                    ? "Embedding provider error detected while rebuilding the index. Fix settings and retry."
+                    : "Redis index rebuild did not complete. Chat query stopped.";
+                onFinal({ answer });
+                return;
+              }
+            } catch (dropError) {
+              console.error(dropError);
+              onFinal({
+                answer: "Failed to drop/rebuild the Redis index. See console for details.",
+              });
+              return;
+            }
+            attemptedRebuild = true;
+            continue;
+          }
+          if (classification === "embed_failure") {
+            onFinal({
+              answer: "Embedding provider error detected. Fix the provider/model settings and retry.",
+            });
             return;
           }
-          if (payload?.type === "final") {
-            onFinal(payload);
-            return;
-          }
-          if (payload?.answer) {
-            onFinal(payload);
-          }
-        },
-        onFinal
-      );
+          throw error;
+        }
+      }
     } finally {
       if (historyFile?.relativePath) {
         try {
@@ -2818,8 +2943,11 @@ export default class ZoteroRagPlugin extends Plugin {
     return parts.join("");
   }
 
-  private async checkRedisConnection(timeoutMs = 2000): Promise<{ ok: boolean; message?: string }> {
-    const urlRaw = (this.settings.redisUrl || "").trim();
+  private async checkRedisConnectionWithUrl(
+    redisUrl: string,
+    timeoutMs = 2000
+  ): Promise<{ ok: boolean; message?: string }> {
+    const urlRaw = (redisUrl || "").trim();
     if (!urlRaw) {
       return { ok: false, message: "Redis URL is not configured." };
     }
@@ -2924,6 +3052,10 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
+  private async checkRedisConnection(timeoutMs = 2000): Promise<{ ok: boolean; message?: string }> {
+    return this.checkRedisConnectionWithUrl(this.settings.redisUrl, timeoutMs);
+  }
+
   private async ensureRedisAvailable(context: string): Promise<boolean> {
     const result = await this.checkRedisConnection();
     if (result.ok) {
@@ -2959,6 +3091,8 @@ export default class ZoteroRagPlugin extends Plugin {
     if (
       text.includes("embedding failed") ||
       text.includes("embedding request failed") ||
+      text.includes("unloaded") ||
+      text.includes("crashed") ||
       text.includes("model does not exist") ||
       text.includes("failed to load model") ||
       text.includes("connection refused") ||
@@ -3092,10 +3226,12 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  public async reindexRedisFromCache(): Promise<void> {
+  public async reindexRedisFromCache(): Promise<boolean> {
+    this.lastReindexFailure = null;
     if (this.reindexCacheActive) {
       new Notice("Reindex already running.");
-      return;
+      this.lastReindexFailure = "busy";
+      return false;
     }
     this.reindexCacheActive = true;
     let abortReason: { kind: "embed_dim_mismatch" | "embed_failure"; message: string } | null = null;
@@ -3106,18 +3242,21 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Failed to sync bundled tools. See console for details.");
       console.error(error);
       this.reindexCacheActive = false;
-      return;
+      this.lastReindexFailure = "tools_error";
+      return false;
     }
     if (!(await this.ensureRedisAvailable("reindex"))) {
       this.reindexCacheActive = false;
-      return;
+      this.lastReindexFailure = "redis_unavailable";
+      return false;
     }
 
     const chunkDocIds = await this.listDocIds(CHUNK_CACHE_DIR);
     if (chunkDocIds.length === 0) {
       new Notice("No cached chunks found.");
       this.reindexCacheActive = false;
-      return;
+      this.lastReindexFailure = "no_cache";
+      return false;
     }
 
     const pluginDir = this.getPluginDir();
@@ -3230,18 +3369,22 @@ export default class ZoteroRagPlugin extends Plugin {
         if (confirmed) {
           try {
             await this.dropRedisIndex(true);
-            await this.reindexRedisFromCache();
+            return await this.reindexRedisFromCache();
           } catch (dropError) {
             new Notice("Failed to drop/rebuild the Redis index. See console for details.");
             console.error(dropError);
+            this.lastReindexFailure = "unknown";
+            return false;
           }
         }
+        this.lastReindexFailure = "embed_dim_mismatch";
       } else {
         new Notice(
           "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
         );
+        this.lastReindexFailure = "embed_failure";
       }
-      return;
+      return false;
     }
 
     this.showStatusProgress("Done", 100);
@@ -3257,6 +3400,8 @@ export default class ZoteroRagPlugin extends Plugin {
       console.warn("Failed to prune doc index orphans", error);
     }
     this.reindexCacheActive = false;
+    this.lastReindexFailure = null;
+    return true;
   }
 
   private async reindexChunkUpdates(
@@ -6810,12 +6955,15 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     };
 
-    try {
-      const url = this.buildZoteroUrl("/users/0/groups");
-      const payload = await this.requestLocalApi(url, `Zotero groups fetch failed for ${url}`);
-      addOptions(this.parseZoteroGroupOptions(payload));
-    } catch (error) {
-      console.warn("Failed to fetch Zotero groups from local API", error);
+    const localApiOk = await this.warnIfZoteroLocalApiUnavailable("Zotero groups");
+    if (localApiOk) {
+      try {
+        const url = this.buildZoteroUrl("/users/0/groups");
+        const payload = await this.requestLocalApi(url, `Zotero groups fetch failed for ${url}`);
+        addOptions(this.parseZoteroGroupOptions(payload));
+      } catch (error) {
+        console.warn("Failed to fetch Zotero groups from local API", error);
+      }
     }
 
     if (this.canUseWebApi() && this.settings.webApiLibraryType === "user") {
@@ -7800,6 +7948,50 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
 
+    host = this.getPortCheckHost(host);
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      let done = false;
+      const finish = (ok: boolean): void => {
+        if (done) {
+          return;
+        }
+        done = true;
+        socket.destroy();
+        resolve(ok);
+      };
+      socket.setTimeout(500);
+      socket.once("connect", () => finish(true));
+      socket.once("timeout", () => finish(false));
+      socket.once("error", () => finish(false));
+      socket.connect(port, host);
+    });
+  }
+
+  private async isZoteroLocalApiReachable(): Promise<boolean> {
+    const raw = (this.settings.zoteroBaseUrl || "").trim();
+    if (!raw) {
+      return false;
+    }
+    let host = "127.0.0.1";
+    let port = 23119;
+    try {
+      const parsed = new URL(raw);
+      host = parsed.hostname || host;
+      if (parsed.port) {
+        const parsedPort = Number(parsed.port);
+        if (Number.isFinite(parsedPort) && parsedPort > 0) {
+          port = parsedPort;
+        }
+      } else if (parsed.protocol === "https:") {
+        port = 443;
+      } else {
+        port = 80;
+      }
+    } catch {
+      return false;
+    }
+
     return new Promise((resolve) => {
       const socket = new net.Socket();
       let done = false;
@@ -7956,6 +8148,18 @@ export default class ZoteroRagPlugin extends Plugin {
       const autoAssign = this.settings.autoAssignRedisPort && this.isLocalRedisHost(redisHost);
       let redisUrl = this.settings.redisUrl;
       let redisPort = requestedPort;
+      const notifySharedRedisHint = (): void => {
+        if (silent) {
+          return;
+        }
+        if (!this.settings.autoAssignRedisPort) {
+          new Notice(
+            "Redis already running. If you share Redis across vaults, disable Auto-start Redis in this vault."
+          );
+          return;
+        }
+        new Notice(`Redis already running at ${redisUrl}.`);
+      };
 
       if (autoAssign) {
         const preferredPort =
@@ -7973,11 +8177,25 @@ export default class ZoteroRagPlugin extends Plugin {
             new Notice(`Using Redis port ${redisPort} for this vault.`);
           }
         }
-      } else if (await this.isRedisReachable(redisUrl)) {
-        if (!silent) {
-          new Notice(`Redis already running at ${redisUrl}.`);
+      } else {
+        if (this.isLocalRedisHost(redisHost)) {
+          const portFree = await this.isPortFree(portCheckHost, redisPort);
+          if (!portFree) {
+            if (await this.isRedisReachable(redisUrl)) {
+              notifySharedRedisHint();
+            } else if (!silent) {
+              new Notice(
+                `Port ${redisPort} is already in use and Redis is not reachable at ${redisUrl}. ` +
+                  "Update the Redis URL or enable auto-assign."
+              );
+            }
+            return;
+          }
         }
-        return;
+        if (await this.isRedisReachable(redisUrl)) {
+          notifySharedRedisHint();
+          return;
+        }
       }
       composeEnv.ZRR_DATA_DIR = dataDir;
       composeEnv.ZRR_PORT = String(redisPort);
@@ -8024,6 +8242,7 @@ export default class ZoteroRagPlugin extends Plugin {
       this.showStatusProgress("Setting up Python environment...", null);
       console.log(`Python env: using plugin dir ${pluginDir}`);
       console.log(`Python env: venv path ${venvDir}`);
+      await fs.mkdir(path.dirname(venvDir), { recursive: true });
 
       let bootstrap: { command: string; args: string[] } | null = null;
       const ensureBootstrap = async (): Promise<{ command: string; args: string[] }> => {
@@ -8090,8 +8309,22 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private getSharedPythonEnvRoot(): string {
+    const home = os.homedir();
+    if (process.platform === "win32") {
+      const base =
+        process.env.LOCALAPPDATA || process.env.APPDATA || path.join(home, "AppData", "Local");
+      return path.join(base, "zotero-redisearch-rag");
+    }
+    const base = process.env.XDG_CACHE_HOME || path.join(home, ".cache");
+    return path.join(base, "zotero-redisearch-rag");
+  }
+
   private getPythonVenvDir(): string {
-    return path.join(this.getPluginDir(), ".venv");
+    if (this.settings.pythonEnvLocation === "plugin") {
+      return path.join(this.getPluginDir(), ".venv");
+    }
+    return path.join(this.getSharedPythonEnvRoot(), "venv");
   }
 
   private getVenvPythonPath(venvDir: string): string {
@@ -8438,6 +8671,52 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     this.lastContainerNotice = message;
     new Notice(message);
+  }
+
+  private notifyRedisOnce(message: string): void {
+    if (this.lastRedisNotice === message) {
+      return;
+    }
+    this.lastRedisNotice = message;
+    new Notice(message);
+  }
+
+  private async autoDetectRedisOnLoad(): Promise<void> {
+    if (this.settings.autoStartRedis) {
+      return;
+    }
+    const current = (this.settings.redisUrl || "").trim();
+    const defaultUrl = "redis://127.0.0.1:6379";
+    const candidate = current || defaultUrl;
+    const result = await this.checkRedisConnectionWithUrl(candidate, 500);
+    if (!result.ok) {
+      return;
+    }
+    if (!current) {
+      this.settings.redisUrl = candidate;
+      await this.saveSettings();
+    }
+    this.notifyRedisOnce(`Redis detected at ${candidate}. This instance will be used.`);
+  }
+
+  private notifyZoteroApiOnce(message: string): void {
+    if (this.lastZoteroApiNotice === message) {
+      return;
+    }
+    this.lastZoteroApiNotice = message;
+    new Notice(message);
+  }
+
+  private async warnIfZoteroLocalApiUnavailable(context: string): Promise<boolean> {
+    const reachable = await this.isZoteroLocalApiReachable();
+    if (reachable) {
+      this.lastZoteroApiNotice = null;
+      return true;
+    }
+    const label = context ? `${context}` : "this action";
+    const message = `Zotero Local API is not reachable for ${label}. Start Zotero or update the Local API URL in settings.`;
+    this.notifyZoteroApiOnce(message);
+    return false;
   }
 
   private openPluginSettings(): void {

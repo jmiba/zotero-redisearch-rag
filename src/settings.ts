@@ -15,6 +15,7 @@ export interface ZoteroRagSettings {
   webApiLibraryId: string;
   webApiKey: string;
   pythonPath: string;
+  pythonEnvLocation: "shared" | "plugin";
   dockerPath: string;
   autoStartRedis: boolean;
   copyPdfToVault: boolean;
@@ -75,7 +76,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   webApiLibraryType: "user",
   webApiLibraryId: "",
   webApiKey: "",
-  pythonPath: "python3",
+  pythonPath: "",
+  pythonEnvLocation: "shared",
   dockerPath: "docker",
   autoStartRedis: false,
   copyPdfToVault: true,
@@ -188,7 +190,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
     startRedisStack: (silent?: boolean) => Promise<void>;
     setupPythonEnv: () => Promise<void>;
-    reindexRedisFromCache: () => Promise<void>;
+    reindexRedisFromCache: () => Promise<boolean>;
     recreateMissingNotesFromCache: () => Promise<void>;
     cancelRecreateMissingNotesFromCache: () => void;
     deleteChatSession?: (sessionId: string) => Promise<void>;
@@ -207,7 +209,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
       startRedisStack: (silent?: boolean) => Promise<void>;
       setupPythonEnv: () => Promise<void>;
-      reindexRedisFromCache: () => Promise<void>;
+      reindexRedisFromCache: () => Promise<boolean>;
       recreateMissingNotesFromCache: () => Promise<void>;
       cancelRecreateMissingNotesFromCache: () => void;
       openLogFile: () => Promise<void>;
@@ -242,10 +244,13 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Python path")
-      .setDesc("Optional path to the Python interpreter used to create or run the plugin env.")
+      .setDesc(
+        "Optional path to the Python interpreter used to create or run the plugin env. " +
+          "Leave blank to auto-detect (python3.12/3.11/3.10/python3/python, or py on Windows)."
+      )
       .addText((text) =>
         text
-          .setPlaceholder("python3")
+          .setPlaceholder("auto-detect")
           .setValue(this.plugin.settings.pythonPath)
           .onChange(async (value) => {
             this.plugin.settings.pythonPath = value.trim();
@@ -255,7 +260,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Python environment")
-      .setDesc("Create or update the plugin's Python env (.venv in the plugin folder).")
+      .setDesc(
+        "Create or update the plugin's Python env (location configured below)."
+      )
       .addButton((button) => {
         button.setButtonText("Create/Update").setCta();
         button.onClick(async () => {
@@ -266,6 +273,25 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             button.setDisabled(false);
           }
         });
+      });
+
+    new Setting(containerEl)
+      .setName("Python env location")
+      .setDesc(
+        "Shared user cache can be reused across vaults; plugin folder keeps a per-vault env."
+      )
+      .addDropdown((dropdown: DropdownComponent) => {
+        dropdown.addOption("shared", "Shared user cache");
+        dropdown.addOption("plugin", "Plugin folder (.venv)");
+        dropdown
+          .setValue(this.plugin.settings.pythonEnvLocation)
+          .onChange(async (value) => {
+            if (value !== "shared" && value !== "plugin") {
+              return;
+            }
+            this.plugin.settings.pythonEnvLocation = value;
+            await this.plugin.saveSettings();
+          });
       });
 
     new Setting(containerEl)
@@ -305,7 +331,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Auto-start Redis stack (Docker/Podman Compose)")
-      .setDesc("Requires Docker Desktop running and your vault path shared with Docker.")
+      .setDesc(
+        "Requires Docker Desktop running and your vault path shared with Docker. " +
+          "Uses a vault-specific data dir at .obsidian/zotero-redisearch-rag/redis-data."
+      )
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
           this.plugin.settings.autoStartRedis = value;
