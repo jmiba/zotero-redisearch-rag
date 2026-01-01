@@ -96,7 +96,7 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 - Obsidian (desktop)
 - Zotero 7 (desktop)
 - Docker Desktop or Podman (for Redis Stack)
-- LM Studio (or any OpenAI-compatible local server)
+- LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
 - Python 3.11+ (for Docling tools)
 
 ## Setup
@@ -128,25 +128,47 @@ npm run build
 Then copy the plugin folder to your vault as above.
 
 ### 3) Start Redis Stack
-Recommended: use the plugin command
+Recommended: start from the plugin
 - Command palette -> "Start Redis Stack (Docker Compose)"
+
+Settings related to Redis (Settings → Prerequisites):
+- Docker/Podman path: path to the CLI (default `docker`; set to `podman` if using Podman).
+- Redis URL: `redis://127.0.0.1:6379` (updated automatically when Auto‑assign is ON).
+- Auto-assign Redis port: OFF by default. When enabled, the plugin picks a free local port and updates Redis URL on start.
+- Auto-start Redis stack: ON by default. The plugin will ensure the stack is running when needed.
+- Start Redis stack now: button in settings to start/restart immediately.
 
 Notes:
 - Docker Desktop or Podman machine must be running (Podman uses `podman compose` or `podman-compose`).
-- Your vault folder must be shared in Docker settings.
+- Your vault folder must be shared in Docker/Podman file sharing settings.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
 - Multiple vaults:
-  - If you start Redis Stack from the plugin, each vault gets its own Docker Compose project and data folder.
-  - Auto-assign Redis port picks a free local port per vault and updates the Redis URL when starting a stack.
-  - If you point multiple vaults at the same Redis URL, the plugin namespaces the index and key prefix using a vault-specific hash, so vaults can share a single Redis safely.
+   - Starting from the plugin creates a per‑vault Docker Compose project and data folder.
+   - With Auto‑assign Redis port enabled, each vault gets a unique local port and the Redis URL is updated automatically.
+   - If multiple vaults share the same Redis URL, the plugin namespaces the index and key prefix with a vault‑specific hash so they can safely share one Redis instance.
 
-### 4) Start LM Studio
-1) Open LM Studio and start the local server.
-2) Copy the model ID shown in LM Studio (not the repo name).
-   Example model IDs:
-   - `text-embedding-embeddinggemma-300m`
-   - `text-embedding-nomic-embed-text-v1.5`
-3) Keep the server running while you use the plugin.
+### 4) Start a model provider (LM Studio, Ollama, or cloud)
+
+Local options
+- LM Studio
+   1) Open LM Studio and start the local server.
+   2) Copy the model ID shown in LM Studio (not the repo name).
+       Example model IDs:
+       - `text-embedding-embeddinggemma-300m`
+       - `text-embedding-nomic-embed-text-v1.5`
+   3) Keep the server running while you use the plugin.
+- Ollama
+   1) Install Ollama and ensure the daemon is running (typically `ollama serve`, or it autostarts).
+   2) Use the OpenAI-compatible endpoint at `http://localhost:11434/v1`.
+   3) Pull models you need, e.g. `ollama pull nomic-embed-text` (embeddings) or `ollama pull llama3.1` (chat).
+   4) In settings, select the Ollama provider profile (or set base URL/API key manually; API key usually blank for local).
+
+Cloud options
+- OpenAI or OpenRouter
+   - In Settings → LLM Provider Profiles, add/select a profile:
+      - Base URL: `https://api.openai.com/v1` (OpenAI) or `https://openrouter.ai/api/v1` (OpenRouter)
+      - API key: your key from the provider
+   - Then select that profile for Embeddings/Chat/OCR cleanup and choose a model via the Refresh buttons.
 
 ### 5) Python setup (Docling)
 ```bash
@@ -167,13 +189,33 @@ Optional (for faster native rebuilds):
 Obsidian -> Settings -> Community plugins -> Zotero Redis RAG
 
 Key settings:
-- Python path: `/path/to/your/.venv/bin/python`
-- Redis URL: `redis://127.0.0.1:6379`
-- Embeddings base URL: `http://localhost:1234/v1`
-- Embeddings model: LM Studio model ID
-- Chat base URL/model: LM Studio chat model ID
+- Prerequisites
+   - Python path: `/path/to/your/.venv/bin/python` (or leave blank to auto‑detect)
+   - Python environment: Create/Update button to set up the plugin venv
+   - Docker/Podman path: `docker` (or `podman`)
+   - Redis URL: `redis://127.0.0.1:6379` (auto‑updated if Auto‑assign is ON)
+   - Auto-assign Redis port: toggle (default OFF)
+   - Auto-start Redis stack: toggle (default ON)
+- Zotero Local/Web API: base URLs, library type/ID, and optional Web API key
+- Output
+   - PDF and Notes folders
+   - Frontmatter template and Tag sanitization
+   - Note body template
+- LLM Provider Profiles
+   - Define provider profiles (base URL + API key) once, then select them in Embeddings/Chat/OCR cleanup sections
+- Text Embedding
+   - Embeddings provider profile or manual base URL/API key
+   - Embeddings model (select via Refresh)
+   - Include metadata, subchunk size/overlap, optional LLM tags for chunks
+- Chat LLM
+   - Chat provider profile or manual base URL/API key
+   - Chat model (select via Refresh), temperature, history size, panel location
+- Docling / OCR cleanup
+   - OCR mode and quality threshold; chunking mode
+   - Optional LLM cleanup (provider/profile, model, temperature, thresholds)
 - Saved chats folder: where exported chat notes are stored
-- Prefer Obsidian note for citations: when ON, citations jump to note chunks; when OFF, citations deep-link to Zotero
+- Citations: Prefer Obsidian note for citations (toggle)
+- Logging: enable file logging; view/clear log; log file path
 
 ![Settings panel](assets/image1.png)
 

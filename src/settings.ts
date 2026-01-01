@@ -70,17 +70,27 @@ export type LlmProviderProfile = {
 };
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
+  // Prerequisites
+  pythonPath: "",
+  pythonEnvLocation: "shared",
+  dockerPath: "docker",
+  redisUrl: "redis://127.0.0.1:6379",
+  autoAssignRedisPort: false,
+  autoStartRedis: true,
+
+  // Zotero Local API
   zoteroBaseUrl: "http://127.0.0.1:23119/api",
   zoteroUserId: "0",
+
+  // Zotero Web API
   webApiBaseUrl: "https://api.zotero.org",
   webApiLibraryType: "user",
   webApiLibraryId: "",
   webApiKey: "",
-  pythonPath: "",
-  pythonEnvLocation: "shared",
-  dockerPath: "docker",
-  autoStartRedis: false,
-  copyPdfToVault: true,
+
+  // Output
+  outputPdfDir: "Zotero/PDFs",
+  outputNoteDir: "Zotero/Notes",
   frontmatterTemplate:
     "doc_id: {{doc_id}}\n" +
     "zotero_key: {{zotero_key}}\n" +
@@ -113,7 +123,10 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "abstract: {{abstract_yaml}}\n" +
     "pdf_link: {{pdf_link_yaml}}\n" +
     "item_json: {{item_json_yaml}}",
+  tagSanitizeMode: "kebab",
   noteBodyTemplate: "{{pdf_block}}{{docling_markdown}}",
+
+  // LLM Provider Profiles
   llmProviderProfiles: [
     {
       id: "lm-studio",
@@ -140,18 +153,32 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
       apiKey: "",
     },
   ],
-  embedProviderProfileId: "lm-studio",
-  chatProviderProfileId: "lm-studio",
-  llmCleanupProviderProfileId: "lm-studio",
-  tagSanitizeMode: "kebab",
-  outputPdfDir: "Zotero/PDFs",
-  outputNoteDir: "Zotero/Notes",
+
+  // Saved chats
   chatOutputDir: "Zotero/Chats",
-  chatPaneLocation: "right",
-  redisUrl: "redis://127.0.0.1:6379",
-  autoAssignRedisPort: true,
-  redisIndex: "idx:zotero",
-  redisPrefix: "zotero:chunk:",
+
+  // PDF handling
+  copyPdfToVault: true,
+  createOcrLayeredPdf: false,
+  preferObsidianNoteForCitations: true,
+
+  // Docling
+  ocrMode: "auto",
+  ocrQualityThreshold: 0.5,
+  chunkingMode: "page",
+
+  // OCR cleanup
+  enableLlmCleanup: false,
+  llmCleanupProviderProfileId: "lm-studio",
+  llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
+  llmCleanupApiKey: "",
+  llmCleanupModel: "openai/gpt-oss-20b",
+  llmCleanupTemperature: 0.0,
+  llmCleanupMinQuality: 0.35,
+  llmCleanupMaxChars: 2000,
+
+  // Text Embedding
+  embedProviderProfileId: "lm-studio",
   embedBaseUrl: "http://localhost:1234/v1",
   embedApiKey: "lm-studio",
   embedModel: "google/embedding-gemma-300m",
@@ -159,25 +186,23 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   embedSubchunkChars: 3500,
   embedSubchunkOverlap: 200,
   enableChunkTagging: false,
+
+  // Chat LLM
+  chatProviderProfileId: "lm-studio",
   chatBaseUrl: "http://127.0.0.1:1234/v1",
   chatApiKey: "",
   chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
-  ocrMode: "auto",
-  chunkingMode: "page",
-  ocrQualityThreshold: 0.5,
-  enableLlmCleanup: false,
-  llmCleanupBaseUrl: "http://127.0.0.1:1234/v1",
-  llmCleanupApiKey: "",
-  llmCleanupModel: "openai/gpt-oss-20b",
-  llmCleanupTemperature: 0.0,
-  llmCleanupMinQuality: 0.35,
-  llmCleanupMaxChars: 2000,
+  chatPaneLocation: "right",
+
+  // Logging
   enableFileLogging: false,
   logFilePath: `${CACHE_ROOT}/logs/docling_extract.log`,
-  createOcrLayeredPdf: false,
-  preferObsidianNoteForCitations: true,
+
+  // Redis index (internal)
+  redisIndex: "idx:zotero",
+  redisPrefix: "zotero:chunk:",
 };
 
 export class ZoteroRagSettingTab extends PluginSettingTab {
