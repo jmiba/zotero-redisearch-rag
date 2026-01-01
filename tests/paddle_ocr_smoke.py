@@ -19,6 +19,7 @@ Options
 - --preview-len: Print a single-line preview of the first K characters of the OCR text (default 500). Set 0 to disable preview.
 - --print-text: Print the full OCR text to stdout.
 - --out: Write the full OCR text to the specified file path.
+- --out-md: Write layout-labeled markdown output (only when layout OCR is used).
 - --pp-structure-v3: Use a layout pipeline instead of plain OCR (PaddleX layout first), with plain OCR fallback for text. Requires extra deps (cv2, shapely, pyclipper, paddlex).
 
 OCR toggles
@@ -49,6 +50,9 @@ import argparse
 import os
 import sys
 import warnings
+import numbers
+import shutil
+from typing import Optional
 
 
 # -----------------------------------------------------------------------------
@@ -60,9 +64,9 @@ import warnings
 # -----------------------------------------------------------------------------
 
 GENERAL_DEFAULTS = {
-    "dpi": 200,
-    "pages": 1,
-    "max_side": 2500,
+    "dpi": 300,
+    "pages": 2,
+    "max_side": 3000,
     "preview_len": 500,
     "doc_orientation": False,
     "doc_unwarping": False,
@@ -71,13 +75,14 @@ GENERAL_DEFAULTS = {
 
 LAYOUT_DEFAULTS = {
     "layout_model": "PP-DocLayout-L",     # or PP-DocLayout-M / PP-DocLayout-S
-    "layout_threshold": 0.15,               # keep lower-confidence boxes
+    "layout_threshold": 0.5,               # keep lower-confidence boxes
     "layout_img_size": None,               # larger input can help two-column pages
-    "layout_merge": "union",              # keep both inner and outer boxes
-    "layout_unclip": 1.2,                  # expand boxes slightly
+    "layout_merge": "small",              # keep both inner and outer boxes
+    "layout_unclip": 1.05,                  # expand boxes slightly
     "layout_device": None,                 # e.g., "cpu" or "gpu:0"; None = PaddleX default
     "layout_nms": True,                    # enable NMS postprocessing
     "fail_on_zero_layout": True,
+    "layout_recognize_boxes": True,        # run OCR inside detected layout boxes
 }
 
 FLAGS_DEFAULTS = {
@@ -85,7 +90,16 @@ FLAGS_DEFAULTS = {
     "pp_structure_v3": True,
     # Enable dump output by default unless CLI overrides
     "dump": False,
+    # Default path to save crops under the tests folder
+    "save_crops": os.path.join(os.path.dirname(__file__), "_ocr_crops"),
+    # Default path to save layout-labeled markdown output
+    "out_md": os.path.join(os.path.dirname(__file__), "_ocr_output.md"),
+    # Default set of PaddleX layout labels to OCR (case-insensitive, comma-separated)
+    "layout_keep_labels": "text,paragraph_title,title,heading,caption,header,number,figure_title,body,section,text_block,textbox,textline,paragraph",
 }
+
+# Global counter for saving debug crops when --save-crops is enabled
+CROP_SAVE_SEQ = 0
 
 def _cli_provided(*names: str) -> bool:
     """Return True if any of the CLI option names was provided on the command line."""
@@ -125,6 +139,11 @@ def main() -> int:
     parser.add_argument(
         "--out",
         help="Optional path to write full OCR text",
+    )
+    parser.add_argument(
+        "--out-md",
+        dest="out_md",
+        help="Optional path to write layout-labeled markdown output",
     )
     # PP-Structure flag (allow --pp-structure-v3 / --no-pp-structure-v3 when available)
     try:
@@ -196,6 +215,21 @@ def main() -> int:
         default=None,
         help="PaddleX device (e.g., cpu, gpu:0)",
     )
+    parser.add_argument(
+        "--layout-keep-labels",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of PaddleX layout labels to OCR (case-insensitive). "
+            "Defaults: text,paragraph_title,title,heading,caption,header,number,figure_title,body,section,text_block,textblock"
+        ),
+    )
+    parser.add_argument(
+        "--save-crops",
+        type=str,
+        default=None,
+        help="Optional directory to save detected layout region crops for debugging",
+    )
     # Python 3.9+: tri-state boolean with --layout-nms / --no-layout-nms
     try:
         bool_action = argparse.BooleanOptionalAction  # type: ignore[attr-defined]
@@ -214,6 +248,12 @@ def main() -> int:
             default=None,
             help="Exit with non-zero status if layout detections == 0",
         )
+        parser.add_argument(
+            "--layout-recognize-boxes",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Recognize text inside detected layout boxes (PaddleX)",
+        )
     else:
         parser.add_argument(
             "--layout-nms",
@@ -224,6 +264,11 @@ def main() -> int:
             "--fail-on-zero-layout",
             action="store_true",
             help="Exit with non-zero status if layout detections == 0",
+        )
+        parser.add_argument(
+            "--layout-recognize-boxes",
+            action="store_true",
+            help="Recognize text inside detected layout boxes (PaddleX)",
         )
     args = parser.parse_args()
 
@@ -260,6 +305,13 @@ def main() -> int:
             args.layout_nms = LAYOUT_DEFAULTS["layout_nms"]
         if getattr(args, "fail_on_zero_layout", None) is None:
             args.fail_on_zero_layout = LAYOUT_DEFAULTS["fail_on_zero_layout"]
+    # Apply flag-level defaults for non-boolean flags
+    if not _cli_provided("--save-crops") and getattr(args, "save_crops", None) is None:
+        args.save_crops = FLAGS_DEFAULTS["save_crops"]
+        if getattr(args, "layout_recognize_boxes", None) is None:
+            args.layout_recognize_boxes = LAYOUT_DEFAULTS["layout_recognize_boxes"]
+    if not _cli_provided("--out-md") and getattr(args, "out_md", None) is None:
+        args.out_md = FLAGS_DEFAULTS["out_md"]
 
     # OCR toggle defaults
     if getattr(args, "doc_orientation", None) is None and not _cli_provided("--doc-orientation", "--no-doc-orientation"):
@@ -272,6 +324,16 @@ def main() -> int:
     if not args.pdf and not args.image:
         parser.print_help()
         return 2
+
+    if getattr(args, "save_crops", None):
+        try:
+            if os.path.isdir(args.save_crops):
+                shutil.rmtree(args.save_crops)
+            elif os.path.exists(args.save_crops):
+                os.remove(args.save_crops)
+        except Exception as exc:
+            if bool(getattr(args, "dump", False)):
+                print(f"Failed to clear crops directory: {exc}")
 
     os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
     os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
@@ -441,6 +503,37 @@ def main() -> int:
             return texts
         return []
 
+    def _ocr_predict(image: object, det: bool | None = None, rec: bool | None = None, cls: bool | None = None) -> object | None:
+        if ocr is None or not hasattr(ocr, "predict"):
+            return None
+        try:
+            if det is None and rec is None and cls is None:
+                return ocr.predict(image)  # type: ignore[attr-defined]
+            return ocr.predict(image, det=det, rec=rec, cls=cls)  # type: ignore[attr-defined]
+        except TypeError:
+            try:
+                return ocr.predict(image)  # type: ignore[attr-defined]
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _ocr_legacy(image: object, **kwargs: object) -> object | None:
+        if ocr is None or not hasattr(ocr, "ocr"):
+            return None
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Please use `predict` instead.",
+                    category=DeprecationWarning,
+                )
+                return ocr.ocr(image, **kwargs)  # type: ignore[attr-defined]
+        except TypeError:
+            return None
+        except Exception:
+            return None
+
     # PP-Structure helpers (layout pipeline)
     def _strip_html(text: str) -> str:
         import re as _re
@@ -489,7 +582,12 @@ def main() -> int:
             return lines
         return []
 
-    def _paddlex_structure_extract_texts(image_obj, lang: str, src_path: str | None = None) -> list[str]:
+    def _paddlex_structure_extract_texts(
+        image_obj,
+        lang: str,
+        src_path: str | None = None,
+        page_num: int | None = None,
+    ) -> tuple[list[str], bool, list[list[dict]]]:
         """Try PaddleX layout via create_model. If `src_path` is provided, prefer
         calling `model.predict(src_path, ...)` because PaddleX may behave
         differently for file paths vs arrays. Returns [] to let OCR fallback
@@ -500,7 +598,7 @@ def main() -> int:
         except Exception as exc:
             print(f"PaddleX create_model import failed: {exc}")
             print("Diagnosis: PaddleX create_model not available. Will fall back to plain OCR.")
-            return []
+            return [], False
         cm_kwargs = {"model_name": args.layout_model}
         if args.layout_device:
             cm_kwargs["device"] = args.layout_device
@@ -519,9 +617,9 @@ def main() -> int:
                     model = create_model(**cm_kwargs)
                 except Exception as exc2:
                     print(f"PaddleX create_model retry without img_size failed: {exc2}")
-                    return []
+                    return [], False
             else:
-                return []
+                return [], False
         try:
             import numpy as _np
             predict_kwargs = {"batch_size": 1}
@@ -540,7 +638,8 @@ def main() -> int:
             output = list(out_gen)
         except Exception as exc:
             print(f"PaddleX layout predict failed: {exc}")
-            return []
+            return [], False
+        layout_has_boxes = False
         # Diagnostics: count detections if possible
         try:
             total = 0
@@ -564,6 +663,7 @@ def main() -> int:
                             dets = res_json.get("boxes") or res_json.get("layout") or res_json.get("result") or []
                             total += len(dets) if isinstance(dets, (list, tuple)) else 0
             print(f"PaddleX layout detections: {total}")
+            layout_has_boxes = total > 0
             if args.dump:
                 print(f"PaddleX raw output length: {len(output)}")
                 if output:
@@ -592,11 +692,689 @@ def main() -> int:
                 sys.exit(5)
         except Exception:
             pass
-        print("Diagnosis: PaddleX layout ran. Using plain OCR for text extraction.")
-        return []
+        # If requested, run OCR inside detected layout boxes and reconstruct text
+        if bool(getattr(args, "layout_recognize_boxes", False)):
+            # Try to extract boxes from first output element
+            boxes: list = []
+            try:
+                first = output[0] if isinstance(output, (list, tuple)) and output else None
+                maybe = _paddle_obj_to_dict(first)
+                if isinstance(maybe, dict):
+                    raw_boxes = maybe.get("boxes") or []
+                    if isinstance(raw_boxes, (list, tuple)):
+                        boxes = list(raw_boxes)
+            except Exception:
+                boxes = []
+            if boxes:
+                layout_has_boxes = True
+                from PIL import Image, ImageOps, ImageFilter
+                import numpy as _np
+                # Helpers to parse OCR entries with quads and order into columns
+                def _iter_ocr_entries(res: object) -> list[tuple[object, str]]:
+                    out: list[tuple[object, str]] = []
+                    # Try generic Paddle object conversion first (handles OCRResult)
+                    try:
+                        maybe = _paddle_obj_to_dict(res)
+                        if isinstance(maybe, dict):
+                            texts = maybe.get("rec_texts") or maybe.get("texts") or maybe.get("rec_text")
+                            boxes = (
+                                maybe.get("dt_polys")
+                                or maybe.get("det_polys")
+                                or maybe.get("dt_boxes")
+                                or maybe.get("boxes")
+                            )
+                            if isinstance(texts, list):
+                                for i, tv in enumerate(texts):
+                                    s = str(tv or "").strip()
+                                    if not s:
+                                        continue
+                                    quad = None
+                                    if isinstance(boxes, list) and i < len(boxes):
+                                        quad = boxes[i]
+                                    out.append((quad, s))
+                                return out
+                    except Exception:
+                        pass
+                    if isinstance(res, dict):
+                        texts = res.get("rec_texts") or res.get("texts") or res.get("rec_text")
+                        boxes = (
+                            res.get("dt_polys")
+                            or res.get("det_polys")
+                            or res.get("dt_boxes")
+                            or res.get("boxes")
+                        )
+                        if isinstance(texts, list):
+                            for i, tv in enumerate(texts):
+                                s = str(tv or "").strip()
+                                if not s:
+                                    continue
+                                quad = None
+                                if isinstance(boxes, list) and i < len(boxes):
+                                    quad = boxes[i]
+                                out.append((quad, s))
+                        return out
+                    if isinstance(res, list):
+                        entries = res
+                        if len(res) == 1:
+                            maybe = _paddle_obj_to_dict(res[0])
+                            if isinstance(maybe, dict):
+                                return _iter_ocr_entries(maybe)
+                            if isinstance(res[0], (list, tuple, dict)):
+                                entries = res[0]
+                        if isinstance(entries, dict):
+                            return _iter_ocr_entries(entries)
+                        for entry in entries:
+                            if isinstance(entry, str):
+                                s = entry.strip()
+                                if s:
+                                    out.append((None, s))
+                                continue
+                            if not isinstance(entry, (list, tuple)):
+                                continue
+                            if entry and isinstance(entry[0], str):
+                                s = str(entry[0] or "").strip()
+                                if s:
+                                    out.append((None, s))
+                                continue
+                            quad = entry[0] if len(entry) > 0 else None
+                            text_part = entry[1] if len(entry) > 1 else None
+                            if isinstance(text_part, (list, tuple)) and text_part:
+                                s = str(text_part[0] or "").strip()
+                            else:
+                                s = str(text_part or "").strip()
+                            if s:
+                                out.append((quad, s))
+                        return out
+                    return out
+
+                def _bbox_from_quad(quad: object) -> tuple[float, float, float, float, float] | None:
+                    try:
+                        if isinstance(quad, (list, tuple)) and quad and isinstance(quad[0], (list, tuple)):
+                            xs = [float(p[0]) for p in quad]
+                            ys = [float(p[1]) for p in quad]
+                            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+                            return x0, y0, x1, y1, 0.5 * (x0 + x1)
+                    except Exception:
+                        return None
+                    return None
+
+                def _order_blocks_into_columns(blocks: list[dict]) -> list[list[dict]]:
+                    if not blocks:
+                        return []
+                    xs = sorted(b["xc"] for b in blocks)
+                    span = max(1.0, xs[-1] - xs[0]) if xs else 1.0
+                    widths = sorted((b["x1"] - b["x0"]) for b in blocks)
+                    w_med = widths[len(widths) // 2] if widths else 1.0
+                    gap_thr = max(0.06 * span, 0.5 * w_med)
+
+                    diffs: list[tuple[float, int]] = []
+                    for i in range(1, len(xs)):
+                        diffs.append((xs[i] - xs[i - 1], i))
+                    candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
+
+                    blocks_sorted = sorted(blocks, key=lambda b: b["xc"])  # align with xs order
+                    columns: list[list[dict]] = []
+                    used_splits: list[int] = []
+                    min_lines = max(3, len(blocks) // 20 or 1)
+
+                    if candidates:
+                        # Try 3 columns via two splits first
+                        cands_sorted = sorted(candidates, reverse=True)
+                        tried = False
+                        for a_idx in range(min(5, len(cands_sorted))):
+                            for b_idx in range(a_idx + 1, min(6, len(cands_sorted))):
+                                a = cands_sorted[a_idx]
+                                b = cands_sorted[b_idx]
+                                lo, hi = min(a, b), max(a, b)
+                                if lo < min_lines or (hi - lo) < min_lines or (len(blocks) - hi) < min_lines:
+                                    continue
+                                used_splits = [lo, hi]
+                                tried = True
+                                break
+                            if tried:
+                                break
+                        if not used_splits:
+                            # Fallback to 2 columns: largest valid gap
+                            for _, i in sorted(diffs, key=lambda t: t[0], reverse=True):
+                                if i >= min_lines and (len(blocks) - i) >= min_lines:
+                                    used_splits = [i]
+                                    break
+
+                    if used_splits:
+                        used_splits = sorted(set(used_splits))
+                        start = 0
+                        for s in used_splits:
+                            columns.append(blocks_sorted[start:s])
+                            start = s
+                        columns.append(blocks_sorted[start:])
+                    else:
+                        # Threshold grouping
+                        cur: list[dict] = []
+                        prev_xc: float | None = None
+                        for b in blocks_sorted:
+                            if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
+                                cur.append(b)
+                            else:
+                                if cur:
+                                    columns.append(cur)
+                                cur = [b]
+                            prev_xc = b["xc"]
+                        if cur:
+                            columns.append(cur)
+
+                    # Sort columns left-to-right; lines top-down
+                    def col_key(col: list[dict]) -> float:
+                        # Use left edge to avoid wide boxes shifting column order.
+                        left_edges = [b["x0"] for b in col if isinstance(b.get("x0"), (int, float))]
+                        if left_edges:
+                            return min(left_edges)
+                        centers = sorted(b["xc"] for b in col)
+                        return centers[len(centers) // 2]
+
+                    columns = [col for col in columns if col]
+                    columns.sort(key=col_key)
+                    ordered_columns: list[list[dict]] = []
+                    for col in columns:
+                        col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
+                        if col_sorted:
+                            ordered_columns.append(col_sorted)
+                    return ordered_columns
+
+                def _columns_to_text(columns: list[list[dict]]) -> str:
+                    if not columns:
+                        return ""
+                    out_cols: list[str] = []
+                    for col in columns:
+                        lines = [str(b.get("text", "")).strip() for b in col if str(b.get("text", "")).strip()]
+                        if lines:
+                            out_cols.append("\n".join(lines))
+                    return "\n\n".join([c for c in out_cols if c])
+
+                def _rect_from_box(b) -> tuple[float, float, float, float] | None:
+                    # Try attribute-based extraction first (object with coords)
+                    try:
+                        for names in (("x0","y0","x1","y1"),("xmin","ymin","xmax","ymax"),("left","top","right","bottom")):
+                            if all(hasattr(b, n) for n in names):
+                                x0 = float(getattr(b, names[0])); y0 = float(getattr(b, names[1]))
+                                x1 = float(getattr(b, names[2])); y1 = float(getattr(b, names[3]))
+                                return (x0, y0, x1, y1)
+                        # Some objects have a bbox attribute
+                        bb_attr = getattr(b, "bbox", None)
+                        if bb_attr is not None:
+                            return _rect_from_box(bb_attr)  # type: ignore
+                    except Exception:
+                        pass
+                    # If it's a foreign object, try to_dict() next
+                    if not isinstance(b, (dict, list, tuple)):
+                        try:
+                            maybe = _paddle_obj_to_dict(b)
+                        except Exception:
+                            maybe = None
+                        if isinstance(maybe, dict):
+                            b = maybe
+                    if isinstance(b, dict):
+                        coord = b.get("coordinate")
+                        if coord is not None:
+                            try:
+                                import numpy as _np4
+                                if isinstance(coord, _np4.ndarray):
+                                    # Accept shapes (N,2) or flat
+                                    if coord.ndim == 2 and coord.shape[1] == 2:
+                                        coord = coord.reshape(-1, 2).tolist()
+                                    else:
+                                        coord = coord.flatten().tolist()
+                            except Exception:
+                                pass
+                            if isinstance(coord, (list, tuple)):
+                                # coord can be list of pairs [[x,y],...]
+                                if coord and isinstance(coord[0], (list, tuple)) and len(coord[0]) >= 2:
+                                    try:
+                                        xs = [float(p[0]) for p in coord]
+                                        ys = [float(p[1]) for p in coord]
+                                        return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                                    except Exception:
+                                        pass
+                                # coord can be list of dicts [{'x':..,'y':..}, ...]
+                                if coord and isinstance(coord[0], dict):
+                                    try:
+                                        xs = []
+                                        ys = []
+                                        for d in coord:
+                                            x = d.get('x') if 'x' in d else d.get('X')
+                                            y = d.get('y') if 'y' in d else d.get('Y')
+                                            if x is None or y is None:
+                                                continue
+                                            xs.append(float(x)); ys.append(float(y))
+                                        if xs and ys:
+                                            return (min(xs), min(ys), max(xs), max(ys))
+                                    except Exception:
+                                        pass
+                                # flat numeric list [x0,y0,x1,y1,...] or [x0,y0,x1,y1]
+                                if len(coord) >= 8 and all(isinstance(v, numbers.Real) for v in coord):
+                                    xs = [float(v) for v in coord[0::2]]
+                                    ys = [float(v) for v in coord[1::2]]
+                                    return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                                if len(coord) == 4 and all(isinstance(v, numbers.Real) for v in coord):
+                                    x0, y0, a, b = float(coord[0]), float(coord[1]), float(coord[2]), float(coord[3])
+                                    # Heuristic: if third/fourth are not greater than first/second, treat as width/height
+                                    if a <= x0 or b <= y0:
+                                        x1 = x0 + a
+                                        y1 = y0 + b
+                                    else:
+                                        x1 = a
+                                        y1 = b
+                                    if x1 > x0 and y1 > y0:
+                                        return (x0, y0, x1, y1)
+                            # coord can be a dict with various schemas
+                            if isinstance(coord, dict):
+                                # direct corners
+                                try:
+                                    for names in (("x0","y0","x1","y1"),("xmin","ymin","xmax","ymax"),("left","top","right","bottom")):
+                                        if all(k in coord for k in names):
+                                            x0 = float(coord[names[0]]); y0 = float(coord[names[1]])
+                                            x1 = float(coord[names[2]]); y1 = float(coord[names[3]])
+                                            return (x0, y0, x1, y1)
+                                except Exception:
+                                    pass
+                                # points/poly arrays inside the dict
+                                for key in ("points", "poly", "polygon", "coords", "coordinates"):
+                                    pts = coord.get(key)
+                                    if pts is None:
+                                        continue
+                                    try:
+                                        # normalize numpy
+                                        import numpy as _np6
+                                        if isinstance(pts, _np6.ndarray):
+                                            if pts.ndim == 2 and pts.shape[1] == 2:
+                                                pts = pts.reshape(-1, 2).tolist()
+                                            else:
+                                                pts = pts.flatten().tolist()
+                                        if isinstance(pts, (list, tuple)):
+                                            if pts and isinstance(pts[0], (list, tuple)) and len(pts[0]) >= 2:
+                                                xs = [float(p[0]) for p in pts]
+                                                ys = [float(p[1]) for p in pts]
+                                                return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                                            if pts and isinstance(pts[0], dict):
+                                                xs = []
+                                                ys = []
+                                                for d in pts:
+                                                    x = d.get('x') if 'x' in d else d.get('X')
+                                                    y = d.get('y') if 'y' in d else d.get('Y')
+                                                    if x is None or y is None:
+                                                        continue
+                                                    xs.append(float(x)); ys.append(float(y))
+                                                if xs and ys:
+                                                    return (min(xs), min(ys), max(xs), max(ys))
+                                            if len(pts) >= 8 and all(isinstance(v, numbers.Real) for v in pts):
+                                                xs = [float(v) for v in pts[0::2]]
+                                                ys = [float(v) for v in pts[1::2]]
+                                                return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                                            if len(pts) == 4 and all(isinstance(v, (int, float)) for v in pts):
+                                                x0, y0, a, b = float(pts[0]), float(pts[1]), float(pts[2]), float(pts[3])
+                                                if a <= x0 or b <= y0:
+                                                    x1 = x0 + a
+                                                    y1 = y0 + b
+                                                else:
+                                                    x1 = a
+                                                    y1 = b
+                                                if x1 > x0 and y1 > y0:
+                                                    return (x0, y0, x1, y1)
+                                    except Exception:
+                                        pass
+                        bb = b.get("bbox") or b.get("box") or b.get("points") or b.get("poly")
+                        if isinstance(bb, dict):
+                            try:
+                                x0 = float(bb.get("x0", bb.get("left", 0.0)))
+                                y0 = float(bb.get("y0", bb.get("top", 0.0)))
+                                x1 = float(bb.get("x1", bb.get("right", 0.0)))
+                                y1 = float(bb.get("y1", bb.get("bottom", 0.0)))
+                                return (x0, y0, x1, y1)
+                            except Exception:
+                                return None
+                        # Some dicts may have explicit corners
+                        try:
+                            x0 = b.get("x0") or b.get("xmin") or b.get("left")
+                            y0 = b.get("y0") or b.get("ymin") or b.get("top")
+                            x1 = b.get("x1") or b.get("xmax") or b.get("right")
+                            y1 = b.get("y1") or b.get("ymax") or b.get("bottom")
+                            if all(v is not None for v in (x0, y0, x1, y1)):
+                                return (float(x0), float(y0), float(x1), float(y1))
+                        except Exception:
+                            pass
+                        if isinstance(bb, (list, tuple)):
+                            if len(bb) == 4 and all(isinstance(v, (int, float)) for v in bb):
+                                return (float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3]))
+                            if len(bb) >= 8 and all(isinstance(v, (int, float)) for v in bb):
+                                xs = [float(v) for v in bb[0::2]]
+                                ys = [float(v) for v in bb[1::2]]
+                                return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                    if isinstance(b, (list, tuple)):
+                        # Nested list-of-points (poly)
+                        if b and isinstance(b[0], (list, tuple)) and len(b[0]) >= 2:
+                            try:
+                                xs = [float(p[0]) for p in b]
+                                ys = [float(p[1]) for p in b]
+                                return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                            except Exception:
+                                pass
+                        # Flat numeric list
+                        if len(b) >= 8 and all(isinstance(v, (int, float)) for v in b):
+                            xs = [float(v) for v in b[0::2]]
+                            ys = [float(v) for v in b[1::2]]
+                            return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                        if len(b) >= 4 and all(isinstance(v, (int, float)) for v in b[:4]):
+                            return (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+                    # Numpy array support
+                    try:
+                        import numpy as _np2  # local import
+                        if isinstance(b, _np2.ndarray):
+                            arr = b.flatten().tolist()
+                            if len(arr) >= 8:
+                                xs = [float(v) for v in arr[0::2]]
+                                ys = [float(v) for v in arr[1::2]]
+                                return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+                            if len(arr) >= 4:
+                                return (float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3]))
+                    except Exception:
+                        pass
+                    return None
+
+                # Prepare OCR on boxes using existing ocr instance
+                rects: list[dict] = []
+                kept_labels: list[str] = []
+                skipped_labels: list[str] = []
+                # Build allowed labels set
+                if getattr(args, "layout_keep_labels", None):
+                    allowed_text_labels = {lbl.strip().lower() for lbl in str(args.layout_keep_labels).split(",") if lbl.strip()}
+                else:
+                    # Apply default from FLAGS_DEFAULTS if provided
+                    try:
+                        default_keep = FLAGS_DEFAULTS.get("layout_keep_labels")
+                        if default_keep:
+                            allowed_text_labels = {lbl.strip().lower() for lbl in str(default_keep).split(",") if lbl.strip()}
+                        else:
+                            allowed_text_labels = {
+                                "text", "paragraph_title", "title", "heading", "caption",
+                                "header", "number", "figure_title", "body", "section",
+                                "text_block", "textblock", "paragraph", "textbox", "textline"
+                            }
+                    except Exception:
+                        allowed_text_labels = {
+                            "text", "paragraph_title", "title", "heading", "caption",
+                            "header", "number", "figure_title", "body", "section",
+                            "text_block", "textblock", "paragraph", "textbox", "textline"
+                        }
+                for b in boxes:
+                    # Optional: filter by text-like labels
+                    label = None
+                    if isinstance(b, dict):
+                        try:
+                            label = str(b.get("label") or "").strip().lower() or None
+                        except Exception:
+                            label = None
+                    else:
+                        try:
+                            label = str(getattr(b, "label") or "").strip().lower() or None
+                        except Exception:
+                            label = None
+                    take = True
+                    if label:
+                        if label not in allowed_text_labels:
+                            skipped_labels.append(label)
+                            take = False
+                        else:
+                            kept_labels.append(label)
+                    if not take:
+                        continue
+                    r = _rect_from_box(b)
+                    if r is not None:
+                        x0, y0, x1, y1 = r
+                        if x1 > x0 and y1 > y0:
+                            rects.append(
+                                {
+                                    "x0": x0,
+                                    "y0": y0,
+                                    "x1": x1,
+                                    "y1": y1,
+                                    "label": label or "text",
+                                }
+                            )
+                # Prepare page size and blocks container once
+                w, h = image_obj.size if hasattr(image_obj, "size") else (0, 0)
+                blocks: list[dict] = []
+                def _save_crop(crop_img, ix0: int, iy0: int, ix1: int, iy1: int) -> None:
+                    global CROP_SAVE_SEQ
+                    if not getattr(args, "save_crops", None):
+                        return
+                    try:
+                        os.makedirs(args.save_crops, exist_ok=True)
+                        CROP_SAVE_SEQ += 1
+                        prefix = f"p{page_num}" if page_num is not None else "p0"
+                        filename = f"{prefix}_crop_{CROP_SAVE_SEQ:05d}_{ix0}_{iy0}_{ix1}_{iy1}.png"
+                        crop_img.save(os.path.join(args.save_crops, filename))
+                    except Exception as exc:
+                        if bool(getattr(args, "dump", False)):
+                            print(f"Failed to save crop: {exc}")
+
+                def _keep_if_text(res: object | None) -> object | None:
+                    if not res:
+                        return None
+                    try:
+                        for _, text_val in _iter_ocr_entries(res):
+                            if text_val:
+                                return res
+                    except Exception:
+                        return None
+                    return None
+
+                def _iter_crop_variants(crop_img):
+                    base = crop_img.convert("RGB")
+                    yield "orig", base
+                    try:
+                        gray = ImageOps.grayscale(base)
+                        yield "gray", gray.convert("RGB")
+                        yield "autocontrast", ImageOps.autocontrast(gray).convert("RGB")
+                        bw = ImageOps.autocontrast(gray).point(lambda x: 255 if x > 160 else 0, mode="L").convert("RGB")
+                        yield "bw", bw
+                    except Exception:
+                        pass
+                    try:
+                        yield "sharp", base.filter(ImageFilter.SHARPEN)
+                        yield "unsharp", base.filter(ImageFilter.UnsharpMask(radius=1.5, percent=150, threshold=3))
+                    except Exception:
+                        pass
+                    max_upscale_side = 3500
+                    for scale in (1.5, 2.0):
+                        try:
+                            new_w = max(1, int(base.width * scale))
+                            new_h = max(1, int(base.height * scale))
+                            if max(new_w, new_h) > max_upscale_side:
+                                continue
+                            up = base.resize((new_w, new_h), resample=_PILImage.LANCZOS)
+                            yield f"up{scale}".replace(".", "p"), up
+                            try:
+                                up_gray = ImageOps.grayscale(up)
+                                yield f"up{scale}".replace(".", "p") + "_gray", up_gray.convert("RGB")
+                            except Exception:
+                                pass
+                        except Exception:
+                            continue
+
+                def _run_crop_ocr(crop_img):
+                    for variant_name, variant_img in _iter_crop_variants(crop_img):
+                        crop_arr = _np.array(variant_img)
+                        result = _ocr_predict(
+                            crop_arr,
+                            det=False,
+                            rec=True,
+                            cls=bool(getattr(args, "textline_orientation", True)),
+                        )
+                        result = _keep_if_text(result)
+                        if not result:
+                            result = _ocr_predict(crop_arr, det=False, rec=True)
+                            result = _keep_if_text(result)
+                        if not result:
+                            result = _ocr_predict(crop_arr)
+                            result = _keep_if_text(result)
+                        if not result:
+                            result = _ocr_legacy(crop_arr)
+                            result = _keep_if_text(result)
+                        if not result:
+                            result = _ocr_legacy(
+                                crop_arr,
+                                cls=bool(getattr(args, "textline_orientation", True)),
+                            )
+                            result = _keep_if_text(result)
+                        if result:
+                            if _cli_provided("--dump"):
+                                print(f"Crop OCR succeeded with variant: {variant_name}")
+                            return result
+                    return None
+
+                if rects:
+                    layout_has_boxes = True
+                    if bool(getattr(args, "dump", False)):
+                        try:
+                            print(f"PaddleX rects parsed: {len(rects)}; first: {rects[0] if rects else None}")
+                            if kept_labels or skipped_labels:
+                                from collections import Counter
+                                print(f"Kept labels: {dict(Counter(kept_labels))}; Skipped labels: {dict(Counter(skipped_labels))}")
+                        except Exception:
+                            pass
+                    for rect in rects:
+                        try:
+                            x0 = rect.get("x0"); y0 = rect.get("y0")
+                            x1 = rect.get("x1"); y1 = rect.get("y1")
+                            label = rect.get("label") or "text"
+                            if x0 is None or y0 is None or x1 is None or y1 is None:
+                                continue
+                            ix0 = max(0, int(x0)); iy0 = max(0, int(y0))
+                            ix1 = min(w, int(x1)); iy1 = min(h, int(y1))
+                            if ix1 <= ix0 or iy1 <= iy0:
+                                continue
+                            crop = image_obj.crop((ix0, iy0, ix1, iy1))
+                            _save_crop(crop, ix0, iy0, ix1, iy1)
+                        except Exception:
+                            continue
+                        # Run OCR on the crop using robust inference
+                        result_crop = _run_crop_ocr(crop)
+                        if not result_crop:
+                            continue
+                        for quad, text_val in _iter_ocr_entries(result_crop):
+                            if not text_val:
+                                continue
+                            if quad is None:
+                                # if no quad from recognizer, approximate as the crop rectangle
+                                bx0, by0, bx1, by1 = float(ix0), float(iy0), float(ix1), float(iy1)
+                                bxc = 0.5 * (bx0 + bx1)
+                            else:
+                                bb = _bbox_from_quad(quad)
+                                if not bb:
+                                    bx0, by0, bx1, by1 = float(ix0), float(iy0), float(ix1), float(iy1)
+                                    bxc = 0.5 * (bx0 + bx1)
+                                else:
+                                    bx0, by0, bx1, by1, bxc = bb
+                                    # map to page coordinates by adding crop offset
+                                    bx0 += float(ix0); by0 += float(iy0)
+                                    bx1 += float(ix0); by1 += float(iy0)
+                                    bxc += float(ix0)
+                            blocks.append({
+                                "x0": bx0,
+                                "y0": by0,
+                                "x1": bx1,
+                                "y1": by1,
+                                "xc": bxc,
+                                "label": label,
+                                "text": text_val,
+                            })
+                else:
+                    if bool(getattr(args, "dump", False)):
+                        try:
+                            print("PaddleX boxes present but no rects parsed; inspecting first 2 boxes…")
+                            for idx_box, bb in enumerate(boxes[:2]):
+                                print(f"  Box[{idx_box}] type: {type(bb)}")
+                                for names in (("x0","y0","x1","y1"),("xmin","ymin","xmax","ymax"),("left","top","right","bottom")):
+                                    try:
+                                        if all(hasattr(bb, n) for n in names):
+                                            vals = tuple(float(getattr(bb, n)) for n in names)
+                                            print(f"  Box[{idx_box}] attrs {names}: {vals}")
+                                    except Exception:
+                                        pass
+                                maybe_bb = None
+                                try:
+                                    maybe_bb = _paddle_obj_to_dict(bb)
+                                except Exception:
+                                    maybe_bb = None
+                                if isinstance(maybe_bb, dict):
+                                    print(f"  Box[{idx_box}] dict keys: {sorted(maybe_bb.keys())}")
+                                    try:
+                                        coord = maybe_bb.get('coordinate')
+                                        if coord is not None:
+                                            import numpy as _np5
+                                            if isinstance(coord, _np5.ndarray):
+                                                print(f"    coordinate ndarray shape: {coord.shape}")
+                                            elif isinstance(coord, (list, tuple)):
+                                                preview_vals = coord[:8] if len(coord) > 8 else coord
+                                                print(f"    coordinate list len: {len(coord)}; first item type: {type(coord[0]) if coord else None}; values: {preview_vals}")
+                                                if coord and isinstance(coord[0], (list, tuple)):
+                                                    print(f"    first pair: {coord[0]}")
+                                                elif coord and isinstance(coord[0], dict):
+                                                    print(f"    first dict keys: {list(coord[0].keys())}")
+                                            elif isinstance(coord, dict):
+                                                print(f"    coordinate dict keys: {list(coord.keys())}")
+                                    except Exception:
+                                        pass
+                                elif isinstance(bb, (list, tuple)):
+                                    preview = bb[:8] if len(bb) >= 8 else bb
+                                    print(f"  Box[{idx_box}] list/tuple preview: {preview}")
+                                else:
+                                    try:
+                                        import numpy as _np3
+                                        if isinstance(bb, _np3.ndarray):
+                                            print(f"  Box[{idx_box}] ndarray shape: {bb.shape}")
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                if blocks:
+                    columns = _order_blocks_into_columns(blocks)
+                    ordered = _columns_to_text(columns)
+                    if ordered.strip():
+                        return ordered.splitlines(), True, columns
+                if layout_has_boxes:
+                    if bool(getattr(args, "dump", False)):
+                        print("Layout boxes detected but crop OCR produced no text; enabling plain OCR fallback.")
+                    layout_has_boxes = False
+
+        print("Diagnosis: PaddleX layout ran. Falling back to plain OCR for text extraction.")
+        return [], layout_has_boxes, []
 
     # Note: legacy paddleocr.ppstructure fallback removed. We use PaddleX for layout and OCR for text.
 
+    def _render_layout_markdown(pages: list[list[list[dict]]], fallback_text: str | None = None) -> str:
+        lines: list[str] = []
+        for page_idx, columns in enumerate(pages, start=1):
+            if not columns:
+                continue
+            lines.append(f"## Page {page_idx}")
+            for col_idx, col in enumerate(columns, start=1):
+                if col_idx > 1:
+                    lines.append("")
+                    lines.append(f"### Column {col_idx}")
+                for block in col:
+                    text_val = str(block.get("text", "")).strip()
+                    if not text_val:
+                        continue
+                    label_val = str(block.get("label", "text")).strip().lower() or "text"
+                    lines.append(f"**{label_val}:** {text_val}")
+                    lines.append("")
+        if not lines and fallback_text:
+            fallback = fallback_text.strip()
+            if fallback:
+                lines = ["## Page 1", "", "**text:**", fallback, ""]
+        return "\n".join(lines).strip() + ("\n" if lines else "")
+
+    layout_pages: list[list[list[dict]]] = []
     all_lines: list[str] = []
     for idx, image in enumerate(images, start=1):
         print(f"Page {idx} rendered size: {image.width}x{image.height}")
@@ -612,71 +1390,68 @@ def main() -> int:
         page_lines: list[str] = []
         if args.pp_structure_v3:
             # Try PaddleX layout; if no layout boxes, fall back to plain OCR for text
-            page_lines = _paddlex_structure_extract_texts(image, ocr_kwargs.get("lang", "en"))
+            page_lines, layout_boxes, page_columns = _paddlex_structure_extract_texts(
+                image, ocr_kwargs.get("lang", "en"), page_num=idx
+            )
+            layout_pages.append(page_columns)
             if not page_lines:
+                if layout_boxes:
+                    if args.dump:
+                        print("Layout boxes detected; skipping plain OCR fallback for this page.")
+                    page_lines = []
+                else:
                 # Plain OCR path. Ensure we have an OCR instance; try to recreate if missing.
-                if ocr is None:
-                    # Retry construction in case environment changed after first page
-                    retry_candidates: list[dict] = []
-                    retry_candidates.append({**ocr_kwargs, "use_textline_orientation": True})
-                    retry_candidates.append({**reduced_kwargs, "use_textline_orientation": True})
-                    retry_candidates.append({**ocr_kwargs})
-                    retry_candidates.append({**reduced_kwargs})
-                    retry_candidates.append({**ocr_kwargs, "use_angle_cls": bool(getattr(args, "textline_orientation", True))})
-                    retry_candidates.append({**reduced_kwargs, "use_angle_cls": bool(getattr(args, "textline_orientation", True))})
-                    for kw in retry_candidates:
-                        ocr = _try_create_direct(kw)
-                        if ocr is not None:
-                            break
                     if ocr is None:
-                        print("Diagnostic: failed to create PaddleOCR for plain OCR fallback.")
+                        # Retry construction in case environment changed after first page
+                        retry_candidates: list[dict] = []
+                        retry_candidates.append({**ocr_kwargs, "use_textline_orientation": True})
+                        retry_candidates.append({**reduced_kwargs, "use_textline_orientation": True})
+                        retry_candidates.append({**ocr_kwargs})
+                        retry_candidates.append({**reduced_kwargs})
+                        retry_candidates.append({**ocr_kwargs, "use_angle_cls": bool(getattr(args, "textline_orientation", True))})
+                        retry_candidates.append({**reduced_kwargs, "use_angle_cls": bool(getattr(args, "textline_orientation", True))})
+                        for kw in retry_candidates:
+                            ocr = _try_create_direct(kw)
+                            if ocr is not None:
+                                break
+                        if ocr is None:
+                            print("Diagnostic: failed to create PaddleOCR for plain OCR fallback.")
+                            return 2
+                    result = None
+                    try:
+                        img_np = np.array(image)
+                        result = _ocr_predict(img_np)
+                        if result is None:
+                            result = _ocr_legacy(img_np)
+                        if result is None:
+                            result = _ocr_legacy(
+                                img_np,
+                                cls=bool(getattr(args, "textline_orientation", True)),
+                            )
+                    except Exception as exc:
+                        print(f"PaddleOCR failed: {exc}")
                         return 2
-                result = None
-                try:
-                    img_np = np.array(image)
-                    # Try modern API first
-                    if hasattr(ocr, "predict"):
-                        try:
-                            result = ocr.predict(img_np)  # type: ignore[attr-defined]
-                        except TypeError:
-                            result = None
-                    # Fallback to legacy API without cls first (to avoid unexpected kw errors)
-                    if result is None and hasattr(ocr, "ocr"):
-                        try:
-                            result = ocr.ocr(img_np)  # type: ignore[attr-defined]
-                        except TypeError:
-                            result = None
-                    # Fallback to legacy API with cls flag
-                    if result is None and hasattr(ocr, "ocr"):
-                        result = ocr.ocr(img_np, cls=bool(getattr(args, "textline_orientation", True)))  # type: ignore[attr-defined]
-                except Exception as exc:
-                    print(f"PaddleOCR failed: {exc}")
-                    return 2
-                if args.dump:
-                    print(f"Page {idx} result type: {type(result)}")
-                    if isinstance(result, dict):
-                        print(f"Page {idx} result keys: {sorted(result.keys())}")
-                    elif isinstance(result, list):
-                        print(f"Page {idx} result list size: {len(result)}")
-                        if result:
-                            print(f"Page {idx} result[0] type: {type(result[0])}")
-                page_lines = _extract_texts(result) if result else []
+                    if args.dump:
+                        print(f"Page {idx} result type: {type(result)}")
+                        if isinstance(result, dict):
+                            print(f"Page {idx} result keys: {sorted(result.keys())}")
+                        elif isinstance(result, list):
+                            print(f"Page {idx} result list size: {len(result)}")
+                            if result:
+                                print(f"Page {idx} result[0] type: {type(result[0])}")
+                    page_lines = _extract_texts(result) if result else []
         else:
             result = None
             try:
                 img_np = np.array(image)
-                if hasattr(ocr, "predict"):
-                    try:
-                        result = ocr.predict(img_np)  # type: ignore[attr-defined]
-                    except TypeError:
-                        result = None
-                if result is None and hasattr(ocr, "ocr"):
-                    try:
-                        result = ocr.ocr(img_np)  # type: ignore[attr-defined]
-                    except TypeError:
-                        result = None
-                if result is None and hasattr(ocr, "ocr"):
-                    result = ocr.ocr(img_np, cls=bool(getattr(args, "textline_orientation", True)))  # type: ignore[attr-defined]
+                result = _ocr_predict(img_np)
+                if result is None:
+                    result = _ocr_legacy(img_np)
+                if result is None:
+                    result = _ocr_legacy(
+                        img_np,
+                        cls=bool(getattr(args, "textline_orientation", True)),
+                    )
             except Exception as exc:
                 print(f"PaddleOCR failed: {exc}")
                 return 2
@@ -691,6 +1466,7 @@ def main() -> int:
                         print(f"Page {idx} result[0] type: {type(result[0])}")
 
             page_lines = _extract_texts(result) if result else []
+            layout_pages.append([])
         if page_lines:
             all_lines.extend(page_lines)
             print(f"Page {idx} text chars: {len(''.join(page_lines))}")
@@ -712,6 +1488,17 @@ def main() -> int:
                     handle.write(text)
             except Exception as exc:
                 print(f"Failed to write OCR text to {args.out}: {exc}")
+        if args.out_md:
+            try:
+                md_text = _render_layout_markdown(layout_pages, fallback_text=text)
+                if md_text:
+                    md_dir = os.path.dirname(args.out_md)
+                    if md_dir:
+                        os.makedirs(md_dir, exist_ok=True)
+                    with open(args.out_md, "w", encoding="utf-8") as handle:
+                        handle.write(md_text)
+            except Exception as exc:
+                print(f"Failed to write layout markdown to {args.out_md}: {exc}")
         return 0
 
     print("No text extracted.")
