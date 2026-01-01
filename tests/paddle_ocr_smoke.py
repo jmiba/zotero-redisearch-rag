@@ -801,83 +801,168 @@ def main() -> int:
                 def _order_blocks_into_columns(blocks: list[dict]) -> list[list[dict]]:
                     if not blocks:
                         return []
-                    xs = sorted(b["xc"] for b in blocks)
-                    span = max(1.0, xs[-1] - xs[0]) if xs else 1.0
-                    widths = sorted((b["x1"] - b["x0"]) for b in blocks)
-                    w_med = widths[len(widths) // 2] if widths else 1.0
-                    gap_thr = max(0.06 * span, 0.5 * w_med)
 
-                    diffs: list[tuple[float, int]] = []
-                    for i in range(1, len(xs)):
-                        diffs.append((xs[i] - xs[i - 1], i))
-                    candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
+                    def _center_y(block: dict) -> float:
+                        try:
+                            return 0.5 * (float(block.get("y0", 0.0)) + float(block.get("y1", 0.0)))
+                        except Exception:
+                            return 0.0
 
-                    blocks_sorted = sorted(blocks, key=lambda b: b["xc"])  # align with xs order
-                    columns: list[list[dict]] = []
-                    used_splits: list[int] = []
-                    min_lines = max(3, len(blocks) // 20 or 1)
+                    def _is_full_width(block: dict) -> bool:
+                        page_width = max(1.0, float(w or 1))
+                        try:
+                            width = float(block.get("x1", 0.0)) - float(block.get("x0", 0.0))
+                        except Exception:
+                            width = 0.0
+                        if width <= 0.0:
+                            return False
+                        ratio = width / page_width
+                        label = str(block.get("label", "")).strip().lower()
+                        full_labels = {"title", "heading", "header", "paragraph_title", "figure_title", "caption"}
+                        if ratio >= 0.85:
+                            return True
+                        if label in full_labels and ratio >= 0.6:
+                            return True
+                        return False
 
-                    if candidates:
-                        # Try 3 columns via two splits first
-                        cands_sorted = sorted(candidates, reverse=True)
-                        tried = False
-                        for a_idx in range(min(5, len(cands_sorted))):
-                            for b_idx in range(a_idx + 1, min(6, len(cands_sorted))):
-                                a = cands_sorted[a_idx]
-                                b = cands_sorted[b_idx]
-                                lo, hi = min(a, b), max(a, b)
-                                if lo < min_lines or (hi - lo) < min_lines or (len(blocks) - hi) < min_lines:
-                                    continue
-                                used_splits = [lo, hi]
-                                tried = True
-                                break
-                            if tried:
-                                break
-                        if not used_splits:
-                            # Fallback to 2 columns: largest valid gap
-                            for _, i in sorted(diffs, key=lambda t: t[0], reverse=True):
-                                if i >= min_lines and (len(blocks) - i) >= min_lines:
-                                    used_splits = [i]
+                    def _order_columns(col_blocks: list[dict]) -> list[list[dict]]:
+                        if not col_blocks:
+                            return []
+                        xs = sorted(b["xc"] for b in col_blocks)
+                        span = max(1.0, xs[-1] - xs[0]) if xs else 1.0
+                        widths = sorted((b["x1"] - b["x0"]) for b in col_blocks)
+                        w_med = widths[len(widths) // 2] if widths else 1.0
+                        gap_thr = max(0.06 * span, 0.5 * w_med)
+
+                        diffs: list[tuple[float, int]] = []
+                        for i in range(1, len(xs)):
+                            diffs.append((xs[i] - xs[i - 1], i))
+                        candidates = [idx for (gap, idx) in diffs if gap >= gap_thr]
+
+                        blocks_sorted = sorted(col_blocks, key=lambda b: b["xc"])  # align with xs order
+                        columns: list[list[dict]] = []
+                        used_splits: list[int] = []
+                        min_lines = max(3, len(col_blocks) // 20 or 1)
+
+                        if candidates:
+                            # Try 3 columns via two splits first
+                            cands_sorted = sorted(candidates, reverse=True)
+                            tried = False
+                            for a_idx in range(min(5, len(cands_sorted))):
+                                for b_idx in range(a_idx + 1, min(6, len(cands_sorted))):
+                                    a = cands_sorted[a_idx]
+                                    b = cands_sorted[b_idx]
+                                    lo, hi = min(a, b), max(a, b)
+                                    if lo < min_lines or (hi - lo) < min_lines or (len(col_blocks) - hi) < min_lines:
+                                        continue
+                                    used_splits = [lo, hi]
+                                    tried = True
                                     break
+                                if tried:
+                                    break
+                            if not used_splits:
+                                # Fallback to 2 columns: largest valid gap
+                                for _, i in sorted(diffs, key=lambda t: t[0], reverse=True):
+                                    if i >= min_lines and (len(col_blocks) - i) >= min_lines:
+                                        used_splits = [i]
+                                        break
 
-                    if used_splits:
-                        used_splits = sorted(set(used_splits))
-                        start = 0
-                        for s in used_splits:
-                            columns.append(blocks_sorted[start:s])
-                            start = s
-                        columns.append(blocks_sorted[start:])
-                    else:
-                        # Threshold grouping
-                        cur: list[dict] = []
-                        prev_xc: float | None = None
-                        for b in blocks_sorted:
-                            if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
-                                cur.append(b)
-                            else:
-                                if cur:
-                                    columns.append(cur)
-                                cur = [b]
-                            prev_xc = b["xc"]
-                        if cur:
-                            columns.append(cur)
+                        if used_splits:
+                            used_splits = sorted(set(used_splits))
+                            start = 0
+                            for s in used_splits:
+                                columns.append(blocks_sorted[start:s])
+                                start = s
+                            columns.append(blocks_sorted[start:])
+                        else:
+                            # Threshold grouping
+                            cur: list[dict] = []
+                            prev_xc: float | None = None
+                            for b in blocks_sorted:
+                                if prev_xc is None or abs(b["xc"] - prev_xc) <= gap_thr:
+                                    cur.append(b)
+                                else:
+                                    if cur:
+                                        columns.append(cur)
+                                    cur = [b]
+                                prev_xc = b["xc"]
+                            if cur:
+                                columns.append(cur)
 
-                    # Sort columns left-to-right; lines top-down
-                    def col_key(col: list[dict]) -> float:
-                        # Use left edge to avoid wide boxes shifting column order.
-                        left_edges = [b["x0"] for b in col if isinstance(b.get("x0"), (int, float))]
-                        if left_edges:
-                            return min(left_edges)
-                        centers = sorted(b["xc"] for b in col)
-                        return centers[len(centers) // 2]
+                        # Sort columns left-to-right; lines top-down
+                        def col_key(col: list[dict]) -> float:
+                            # Use left edge to avoid wide boxes shifting column order.
+                            left_edges = [b["x0"] for b in col if isinstance(b.get("x0"), (int, float))]
+                            if left_edges:
+                                return min(left_edges)
+                            centers = sorted(b["xc"] for b in col)
+                            return centers[len(centers) // 2]
 
-                    columns = [col for col in columns if col]
-                    columns.sort(key=col_key)
+                        columns = [col for col in columns if col]
+                        columns.sort(key=col_key)
+                        ordered_columns: list[list[dict]] = []
+                        for col in columns:
+                            col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
+                            if col_sorted:
+                                ordered_columns.append(col_sorted)
+                        return ordered_columns
+
+                    full_blocks: list[dict] = []
+                    normal_blocks: list[dict] = []
+                    for block in blocks:
+                        if _is_full_width(block):
+                            block["full_width"] = True
+                            full_blocks.append(block)
+                        else:
+                            normal_blocks.append(block)
+
+                    if not full_blocks:
+                        return _order_columns(blocks)
+
+                    full_blocks = sorted(full_blocks, key=lambda b: b.get("y0", 0.0))
+                    normal_sorted = sorted(normal_blocks, key=_center_y)
+                    sections: list[tuple[str, list[dict]]] = []
+
+                    normal_idx = 0
+                    start_y = float("-inf")
+
+                    def _collect_until(y_max: float) -> list[dict]:
+                        nonlocal normal_idx, start_y
+                        seg: list[dict] = []
+                        while normal_idx < len(normal_sorted):
+                            b = normal_sorted[normal_idx]
+                            yc = _center_y(b)
+                            if yc < start_y:
+                                normal_idx += 1
+                                continue
+                            if yc >= y_max:
+                                break
+                            seg.append(b)
+                            normal_idx += 1
+                        return seg
+
+                    for fb in full_blocks:
+                        seg = _collect_until(float(fb.get("y0", 0.0)))
+                        if seg:
+                            sections.append(("columns", seg))
+                        sections.append(("full", [fb]))
+                        start_y = float(fb.get("y1", fb.get("y0", 0.0)))
+
+                    tail: list[dict] = []
+                    while normal_idx < len(normal_sorted):
+                        b = normal_sorted[normal_idx]
+                        if _center_y(b) >= start_y:
+                            tail.append(b)
+                        normal_idx += 1
+                    if tail:
+                        sections.append(("columns", tail))
+
                     ordered_columns: list[list[dict]] = []
-                    for col in columns:
-                        col_sorted = sorted(col, key=lambda b: (b["y0"], b["x0"]))
-                        if col_sorted:
-                            ordered_columns.append(col_sorted)
+                    for kind, seg in sections:
+                        if kind == "full":
+                            ordered_columns.append(seg)
+                        else:
+                            ordered_columns.extend(_order_columns(seg))
                     return ordered_columns
 
                 def _columns_to_text(columns: list[list[dict]]) -> str:
@@ -1260,33 +1345,42 @@ def main() -> int:
                         result_crop = _run_crop_ocr(crop)
                         if not result_crop:
                             continue
+                        line_entries: list[dict] = []
+                        seq = 0
                         for quad, text_val in _iter_ocr_entries(result_crop):
                             if not text_val:
                                 continue
-                            if quad is None:
-                                # if no quad from recognizer, approximate as the crop rectangle
-                                bx0, by0, bx1, by1 = float(ix0), float(iy0), float(ix1), float(iy1)
-                                bxc = 0.5 * (bx0 + bx1)
-                            else:
+                            seq += 1
+                            line_x0 = float(ix0)
+                            line_y0 = float(iy0)
+                            if quad is not None:
                                 bb = _bbox_from_quad(quad)
-                                if not bb:
-                                    bx0, by0, bx1, by1 = float(ix0), float(iy0), float(ix1), float(iy1)
-                                    bxc = 0.5 * (bx0 + bx1)
-                                else:
-                                    bx0, by0, bx1, by1, bxc = bb
+                                if bb:
+                                    bx0, by0, bx1, by1, _ = bb
                                     # map to page coordinates by adding crop offset
                                     bx0 += float(ix0); by0 += float(iy0)
-                                    bx1 += float(ix0); by1 += float(iy0)
-                                    bxc += float(ix0)
-                            blocks.append({
-                                "x0": bx0,
-                                "y0": by0,
-                                "x1": bx1,
-                                "y1": by1,
-                                "xc": bxc,
-                                "label": label,
-                                "text": text_val,
-                            })
+                                    line_x0 = bx0
+                                    line_y0 = by0
+                            line_entries.append(
+                                {"text": text_val, "y0": line_y0, "x0": line_x0, "seq": seq}
+                            )
+                        if not line_entries:
+                            continue
+                        line_entries.sort(key=lambda entry: (entry["y0"], entry["x0"], entry["seq"]))
+                        block_text = "\n".join(entry["text"] for entry in line_entries if entry["text"])
+                        if not block_text.strip():
+                            continue
+                        bx0, by0, bx1, by1 = float(ix0), float(iy0), float(ix1), float(iy1)
+                        bxc = 0.5 * (bx0 + bx1)
+                        blocks.append({
+                            "x0": bx0,
+                            "y0": by0,
+                            "x1": bx1,
+                            "y1": by1,
+                            "xc": bxc,
+                            "label": label,
+                            "text": block_text,
+                        })
                 else:
                     if bool(getattr(args, "dump", False)):
                         try:
@@ -1352,27 +1446,73 @@ def main() -> int:
     # Note: legacy paddleocr.ppstructure fallback removed. We use PaddleX for layout and OCR for text.
 
     def _render_layout_markdown(pages: list[list[list[dict]]], fallback_text: str | None = None) -> str:
-        lines: list[str] = []
+        def _normalize_block_text(text: str) -> str:
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            lines = [line.rstrip() for line in text.split("\n")]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            while lines and not lines[-1].strip():
+                lines.pop()
+            return "\n".join(lines)
+
+        def _single_line(text: str) -> str:
+            return " ".join(_normalize_block_text(text).split()).strip()
+
+        out_lines: list[str] = []
         for page_idx, columns in enumerate(pages, start=1):
-            if not columns:
+            # flatten columns for emptiness check
+            page_blocks = [b for col in columns for b in col] if columns else []
+            if not page_blocks:
                 continue
-            lines.append(f"## Page {page_idx}")
-            for col_idx, col in enumerate(columns, start=1):
-                if col_idx > 1:
-                    lines.append("")
-                    lines.append(f"### Column {col_idx}")
+
+            out_lines.append(f"## Page {page_idx}")
+            non_full_columns = [
+                col for col in columns
+                if not all(bool(block.get("full_width")) for block in col)
+            ]
+            col_num = 0
+            for col in columns:
+                is_full = all(bool(block.get("full_width")) for block in col)
+                if not is_full:
+                    col_num += 1
+                    if len(non_full_columns) > 1:
+                        out_lines.append(f"### Column {col_num}")
+
                 for block in col:
-                    text_val = str(block.get("text", "")).strip()
+                    text_val = _normalize_block_text(str(block.get("text", "") or ""))
                     if not text_val:
                         continue
-                    label_val = str(block.get("label", "text")).strip().lower() or "text"
-                    lines.append(f"**{label_val}:** {text_val}")
-                    lines.append("")
-        if not lines and fallback_text:
-            fallback = fallback_text.strip()
-            if fallback:
-                lines = ["## Page 1", "", "**text:**", fallback, ""]
-        return "\n".join(lines).strip() + ("\n" if lines else "")
+                    label_val = str(block.get("label", "") or "").strip().lower()
+
+                    # Subheaders / paragraph titles
+                    if label_val in {"paragraph_title", "title", "heading", "section", "header"}:
+                        heading = _single_line(text_val)
+                        if heading:
+                            out_lines.append(f"### {heading}")
+                        out_lines.append("")
+                        continue
+
+                    # Figure / caption handling
+                    if label_val in {"figure_title", "caption", "figure", "figure_caption"}:
+                        caption = _single_line(text_val)
+                        if caption:
+                            out_lines.append(f"**figure caption:** {caption}")
+                        out_lines.append("")
+                        continue
+
+                    # Default: paragraph text
+                    out_lines.append("")
+                    out_lines.append(text_val)
+
+            out_lines.append("")
+
+        # Fallback to normalized plain text when layout produced nothing
+        if not out_lines and fallback_text:
+            fb = _normalize_block_text(fallback_text)
+            if fb:
+                return f"## Page 1\n\n{fb}\n"
+
+        return ("\n".join(out_lines).rstrip() + "\n") if out_lines else ""
 
     layout_pages: list[list[list[dict]]] = []
     all_lines: list[str] = []
