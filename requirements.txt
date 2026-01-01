@@ -1,21 +1,23 @@
 docling
-paddleocr
-paddlex[ocr]
-paddlepaddle==3.2.2
-opencv-python
-pyclipper
-shapely
-pdf2image
-pypdf
-pytesseract
-redis
-requests
-pyzotero
-tqdm
-wordfreq
 markdown
 markdown-it-py
+numpy
+opencv-python
+paddleocr
+paddlepaddle==3.2.2
+paddlex[ocr]
+pdf2image
+pillow
+pyclipper
+pypdf
+pytesseract
+pyzotero
+redis
+requests
+shapely
 stopwordsiso
+tqdm
+wordfreq
 
 # Optional for language normalization and spellchecking
 langcodes

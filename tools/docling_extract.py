@@ -62,8 +62,8 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
 @dataclass
 class DoclingProcessingConfig:
     ocr_mode: str = "auto"
-    prefer_ocr_engine: str = "tesseract"
-    fallback_ocr_engine: str = "paddle"
+    prefer_ocr_engine: str = "paddle"
+    fallback_ocr_engine: str = "tesseract"
     language_hint: Optional[str] = None
     default_lang_german: str = "deu+eng"
     default_lang_english: str = "eng"
@@ -713,6 +713,32 @@ def select_wordfreq_languages(languages: str) -> List[str]:
         selected.append("de")
     if any(token in lang for token in ("eng", "en", "english")):
         selected.append("en")
+    if any(token in lang for token in ("fra", "fr", "french", "francais", "français")):
+        selected.append("fr")
+    if any(token in lang for token in ("spa", "es", "spanish", "espanol", "español")):
+        selected.append("es")
+    if any(token in lang for token in ("ita", "it", "italian", "italiano")):
+        selected.append("it")
+    if any(token in lang for token in ("pol", "pl", "polish", "polski")):
+        selected.append("pl")
+    if any(token in lang for token in ("por", "pt", "portuguese", "português", "portugues")):
+        selected.append("pt")
+    if any(token in lang for token in ("nld", "dut", "nl", "dutch", "nederlands")):
+        selected.append("nl")
+    if any(token in lang for token in ("swe", "sv", "swedish", "svenska")):
+        selected.append("sv")
+    if any(token in lang for token in ("nor", "no", "norsk", "bokmal", "bokmål", "nynorsk")):
+        selected.append("no")
+    if any(token in lang for token in ("dan", "da", "danish", "dansk")):
+        selected.append("da")
+    if any(token in lang for token in ("fin", "fi", "finnish", "suomi")):
+        selected.append("fi")
+    if any(token in lang for token in ("rus", "ru", "russian", "рус")):
+        selected.append("ru")
+    if any(token in lang for token in ("ces", "cze", "cs", "czech", "čeština", "cesky", "česky")):
+        selected.append("cs")
+    if any(token in lang for token in ("ell", "el", "greek", "ελληνικά")):
+        selected.append("el")
     if not selected:
         selected.append("en")
     return selected
@@ -942,6 +968,28 @@ def select_language_set(
                 return "fra+eng"  # French + English fallback
             if code == "pol":
                 return "pol+eng"  # Polish + English fallback
+            if code == "ita":
+                return "ita+eng"  # Italian + English fallback
+            if code == "spa":
+                return "spa+eng"  # Spanish + English fallback
+            if code == "por":
+                return "por+eng"  # Portuguese + English fallback
+            if code == "nld" or code == "dut":
+                return "nld+eng"  # Dutch + English fallback
+            if code == "swe":
+                return "swe+eng"  # Swedish + English fallback
+            if code == "nor":
+                return "nor+eng"  # Norwegian + English fallback
+            if code == "dan":
+                return "dan+eng"  # Danish + English fallback
+            if code == "fin":
+                return "fin+eng"  # Finnish + English fallback
+            if code == "rus":
+                return "rus+eng"  # Russian + English fallback
+            if code == "ces" or code == "cze":
+                return "ces+eng"  # Czech + English fallback
+            if code == "ell" or code == "gre":
+                return "ell+eng"  # Greek + English fallback
             # Add more as needed
             return code
         except Exception:
@@ -957,6 +1005,15 @@ def select_language_set(
         (r"(\bit\b|_it\b|-it\b|ita|italian|italiano)", "ita+eng"),
         (r"(\bes\b|_es\b|-es\b|spa|spanish|espanol|español)", "spa+eng"),
         (r"(\bpl\b|_pl\b|-pl\b|pol|polish|polski)", "pol+eng"),
+        (r"(\bpt\b|_pt\b|-pt\b|por|portuguese|português|portugues)", "por+eng"),
+        (r"(\bnl\b|_nl\b|-nl\b|nld|dut|dutch|nederlands)", "nld+eng"),
+        (r"(\bsv\b|_sv\b|-sv\b|swe|swedish|svenska)", "swe+eng"),
+        (r"(\bno\b|_no\b|-no\b|nor|norsk|bokmal|bokmål|nynorsk)", "nor+eng"),
+        (r"(\bda\b|_da\b|-da\b|dan|danish|dansk)", "dan+eng"),
+        (r"(\bfi\b|_fi\b|-fi\b|fin|finnish|suomi)", "fin+eng"),
+        (r"(\bru\b|_ru\b|-ru\b|rus|russian|рус)", "rus+eng"),
+        (r"(\bcs\b|_cs\b|-cs\b|ces|cze|czech|čeština|cesky|česky)", "ces+eng"),
+        (r"(\bel\b|_el\b|-el\b|ell|greek|ελληνικά)", "ell+eng"),
     ]:
         if re.search(pattern, name):
             return lang_code
@@ -984,6 +1041,10 @@ def normalize_languages_for_engine(languages: str, engine: str) -> str:
                 "spa": "spanish",
                 "pl": "polish",
                 "pol": "polish",
+                "pt": "portuguese",
+                "por": "portuguese",
+                "ru": "russian",
+                "rus": "russian",
             }
             alpha2 = code.to_alpha2()
             alpha3 = code.to_alpha3()
@@ -1205,6 +1266,18 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
             "en_US": ("en", "en_US"),
             "en_GB": ("en", "en_GB"),
             "fr_FR": ("fr_FR", "fr"),
+            "es_ES": ("es", "es"),
+            "it_IT": ("it_IT", "it_IT"),
+            "pl_PL": ("pl_PL", "pl_PL"),
+            "pt_PT": ("pt_PT", "pt_PT"),
+            "pt_BR": ("pt_BR", "pt_BR"),
+            "nl_NL": ("nl_NL", "nl_NL"),
+            "sv_SE": ("sv_SE", "sv_SE"),
+            "da_DK": ("da_DK", "da_DK"),
+            "fi_FI": ("fi_FI", "fi_FI"),
+            "ru_RU": ("ru_RU", "ru_RU"),
+            "cs_CZ": ("cs_CZ", "cs_CZ"),
+            "el_GR": ("el_GR", "el_GR"),
         }
         lang_code = None
         lang = (languages or "").lower()
@@ -1212,8 +1285,30 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
             lang_code = "de_DE"
         elif any(t in lang for t in ("en", "eng", "english")):
             lang_code = "en_US"
-        elif any(t in lang for t in ("fr", "fra", "french", "francais")):
+        elif any(t in lang for t in ("fr", "fra", "french", "francais", "français")):
             lang_code = "fr_FR"
+        elif any(t in lang for t in ("es", "spa", "spanish", "espanol", "español")):
+            lang_code = "es_ES"
+        elif any(t in lang for t in ("it", "ita", "italian", "italiano")):
+            lang_code = "it_IT"
+        elif any(t in lang for t in ("pl", "pol", "polish", "polski")):
+            lang_code = "pl_PL"
+        elif any(t in lang for t in ("pt", "por", "portuguese", "português", "portugues")):
+            lang_code = "pt_PT"
+        elif any(t in lang for t in ("nl", "nld", "dut", "dutch", "nederlands")):
+            lang_code = "nl_NL"
+        elif any(t in lang for t in ("sv", "swe", "swedish", "svenska")):
+            lang_code = "sv_SE"
+        elif any(t in lang for t in ("da", "dan", "danish", "dansk")):
+            lang_code = "da_DK"
+        elif any(t in lang for t in ("fi", "fin", "finnish", "suomi")):
+            lang_code = "fi_FI"
+        elif any(t in lang for t in ("ru", "rus", "russian", "рус")):
+            lang_code = "ru_RU"
+        elif any(t in lang for t in ("cs", "ces", "cze", "czech", "čeština", "česky", "cesky")):
+            lang_code = "cs_CZ"
+        elif any(t in lang for t in ("el", "ell", "greek", "ελληνικά")):
+            lang_code = "el_GR"
         if not lang_code:
             lang_code = "en_US"
         folder, prefix = repo_map.get(lang_code, (lang_code, lang_code))
