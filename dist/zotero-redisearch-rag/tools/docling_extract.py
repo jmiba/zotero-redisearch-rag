@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
+from ocr_paddle import ocr_pages_with_paddle, ocr_pages_with_paddle_structure
+from ocr_tesseract import find_tesseract_path, ocr_pages_with_tesseract
 
 # Reduce noisy warnings and route them to logging
 logging.captureWarnings(True)
@@ -62,7 +64,7 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
 @dataclass
 class DoclingProcessingConfig:
     ocr_mode: str = "auto"
-    prefer_ocr_engine: str = "tesseract"
+    prefer_ocr_engine: str = "paddle"
     fallback_ocr_engine: str = "paddle"
     language_hint: Optional[str] = None
     default_lang_german: str = "deu+eng"
@@ -135,12 +137,32 @@ class DoclingProcessingConfig:
     paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 3500
     paddle_use_doc_orientation_classify: bool = True
-    paddle_use_doc_unwarping: bool = False
-    paddle_use_textline_orientation: bool = False
-    paddle_use_structure_v3: bool = False
+    paddle_use_doc_unwarping: bool = True
+    paddle_use_textline_orientation: bool = True
+    # Enable PP-StructureV3 layout parsing by default to mirror the smoke test's
+    # layout-first approach. Can be disabled via CLI: --no-paddle-structure-v3
+    paddle_use_structure_v3: bool = True
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
     paddle_structure_footer_ratio: float = 0.05
+    # When true and PP-StructureV3 is used, re-run recognition on detected layout
+    # boxes using PaddleOCR recognizer to better follow layout boxes and reading order.
+    paddle_recognize_from_layout_boxes: bool = True
+    # PaddleX DocLayout extraction (mirrors paddle_ocr_smoke.py layout path).
+    paddle_use_paddlex_layout: bool = True
+    paddle_layout_model: str = "PP-DocLayout-L"
+    paddle_layout_threshold: float = 0.5
+    paddle_layout_img_size: Optional[int] = None
+    paddle_layout_merge: str = "small"
+    paddle_layout_unclip: float = 1.05
+    paddle_layout_device: Optional[str] = None
+    paddle_layout_nms: bool = True
+    paddle_layout_keep_labels: str = (
+        "text,paragraph_title,title,heading,caption,header,number,figure_title,"
+        "body,section,text_block,textbox,textline,paragraph"
+    )
+    paddle_layout_recognize_boxes: bool = True
+    paddle_layout_fail_on_zero: bool = False
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -1011,7 +1033,17 @@ def get_pdf_max_page_points(pdf_path: str, max_pages: int = 3) -> Optional[float
             page = reader.pages[idx]
             width = float(page.mediabox.width)
             height = float(page.mediabox.height)
-            max_side = max(max_side, width, height)
+            try:
+                user_unit = float(getattr(page, "user_unit", None) or page.get("/UserUnit", 1.0))
+            except Exception:
+                user_unit = 1.0
+            # Normalize to 1/72" points; some scanned PDFs use fractional user units (e.g., 0.25)
+            # which otherwise inflate the detected page size and force a low DPI cap.
+            if not math.isfinite(user_unit) or user_unit <= 0:
+                user_unit = 1.0
+            width_pt = width * user_unit
+            height_pt = height * user_unit
+            max_side = max(max_side, width_pt, height_pt)
         return max_side or None
     except Exception:
         return None
@@ -1025,6 +1057,11 @@ def decide_ocr_route(
     languages: str,
 ) -> OcrRouteDecision:
     low_quality = is_low_quality(quality, config)
+    force_external_for_paddle_layout = bool(
+        config.prefer_ocr_engine == "paddle"
+        and getattr(config, "paddle_use_paddlex_layout", False)
+        and config.ocr_mode != "off"
+    )
     if config.ocr_mode == "off":
         return OcrRouteDecision(
             False,
@@ -1039,7 +1076,7 @@ def decide_ocr_route(
     if config.ocr_mode == "force":
         ocr_used = True
         route_reason = "OCR forced by config"
-    elif has_text_layer and not (config.force_ocr_on_low_quality_text and low_quality):
+    elif has_text_layer and not (config.force_ocr_on_low_quality_text and low_quality) and not force_external_for_paddle_layout:
         return OcrRouteDecision(
             False,
             "none",
@@ -1052,7 +1089,10 @@ def decide_ocr_route(
     else:
         ocr_used = True
         if has_text_layer:
-            route_reason = "Text layer detected but low quality"
+            if force_external_for_paddle_layout:
+                route_reason = "Text layer detected; external OCR forced for Paddle layout"
+            else:
+                route_reason = "Text layer detected but low quality"
         else:
             route_reason = "No usable text layer detected"
 
@@ -2469,20 +2509,6 @@ def find_poppler_path() -> Optional[str]:
 
 
 POPPLER_LOGGED_ONCE = False
-TESSERACT_LOGGED_ONCE = False
-
-
-def find_tesseract_path() -> Optional[str]:
-    env_cmd = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
-    if env_cmd and os.path.isfile(env_cmd):
-        return env_cmd
-    tesseract_cmd = shutil.which("tesseract")
-    if tesseract_cmd:
-        return tesseract_cmd
-    for candidate in ("/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"):
-        if os.path.isfile(candidate):
-            return candidate
-    return None
 
 
 def render_pdf_pages(pdf_path: str, dpi: int) -> List[Any]:
@@ -2991,916 +3017,19 @@ def has_output_text(markdown: str, pages: Sequence[Dict[str, Any]]) -> bool:
     return bool(markdown.strip()) or ocr_pages_text_chars(pages) > 0
 
 
-def ocr_pages_with_paddle_structure(
-    images: Sequence[Any],
-    languages: str,
-    config: DoclingProcessingConfig,
-    progress_cb: Optional[ProgressCallback] = None,
-    progress_base: int = 0,
-    progress_span: int = 0,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    def _check_ppstructure_deps() -> None:
-        missing: List[str] = []
-        for module_name in ("cv2", "pyclipper", "shapely", "paddlex"):
-            try:
-                __import__(module_name)
-            except Exception:
-                missing.append(module_name)
-        if missing:
-            raise RuntimeError(
-                "PP-Structure dependencies missing: "
-                + ", ".join(missing)
-                + ". Install them in the plugin venv."
-            )
-
-    def _resolve_ppstructure():
-        import importlib
-        import pkgutil
-
-        candidates = [
-            ("paddleocr", "PPStructure"),
-            ("paddleocr", "PPStructureV3"),
-            ("paddleocr.ppstructure", "PPStructure"),
-            ("paddleocr.ppstructure", "PPStructureV3"),
-            ("paddleocr.ppstructure.predict_system", "PPStructure"),
-            ("paddleocr.ppstructure.predict_system", "StructureSystem"),
-            ("paddleocr._pipelines", "PPStructure"),
-            ("paddleocr._pipelines", "PPStructureV3"),
-            ("paddleocr._pipelines", "StructureSystem"),
-        ]
-        for module_name, attr_name in candidates:
-            try:
-                module = importlib.import_module(module_name)
-            except Exception:
-                continue
-            if hasattr(module, attr_name):
-                LOGGER.info("PPStructure resolved from %s.%s", module_name, attr_name)
-                return getattr(module, attr_name)
-
-        try:
-            pipelines = importlib.import_module("paddleocr._pipelines")
-        except Exception:
-            pipelines = None
-        if pipelines and hasattr(pipelines, "__path__"):
-            for modinfo in pkgutil.walk_packages(pipelines.__path__, pipelines.__name__ + "."):
-                if "structure" not in modinfo.name:
-                    continue
-                try:
-                    module = importlib.import_module(modinfo.name)
-                except Exception:
-                    continue
-                for attr_name in ("PPStructure", "PPStructureV3", "StructureSystem"):
-                    if hasattr(module, attr_name):
-                        LOGGER.info("PPStructure resolved from %s.%s", modinfo.name, attr_name)
-                        return getattr(module, attr_name)
-        raise RuntimeError(
-            "PPStructure not available in paddleocr; install a version that ships PPStructure."
-        )
-
-    _check_ppstructure_deps()
-    PPStructure = _resolve_ppstructure()
-    structure_name = getattr(PPStructure, "__name__", "")
-    structure_module = getattr(PPStructure, "__module__", "")
-    use_v3 = "v3" in structure_name.lower() or "pp_structurev3" in structure_module.lower()
-
-    try:
-        import numpy as np
-    except Exception as exc:
-        raise RuntimeError(f"numpy is required for PPStructure: {exc}") from exc
-
-    if use_v3:
-        structure_kwargs: Dict[str, Any] = {"lang": languages}
-        if config.paddle_target_max_side_px > 0:
-            structure_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
-            structure_kwargs["text_det_limit_type"] = "max"
-        if config.paddle_use_textline_orientation:
-            structure_kwargs["use_textline_orientation"] = True
-        if config.paddle_use_doc_orientation_classify:
-            structure_kwargs["use_doc_orientation_classify"] = True
-        if config.paddle_use_doc_unwarping:
-            structure_kwargs["use_doc_unwarping"] = True
-    else:
-        structure_kwargs = {
-            "lang": languages,
-            "layout": True,
-            "ocr": True,
-            "show_log": False,
-        }
-        if config.paddle_use_textline_orientation:
-            structure_kwargs["use_textline_orientation"] = True
-        if config.paddle_use_doc_orientation_classify:
-            structure_kwargs["use_doc_orientation_classify"] = True
-        if config.paddle_use_doc_unwarping:
-            structure_kwargs["use_doc_unwarping"] = True
-        if config.paddle_structure_version:
-            structure_kwargs["structure_version"] = config.paddle_structure_version
-
-    def _create_structure(kwargs: Dict[str, Any]) -> Any:
-        return PPStructure(**kwargs)
-
-    structure = None
-    try:
-        structure = _create_structure(structure_kwargs)
-    except TypeError:
-        reduced_kwargs = dict(structure_kwargs)
-        reduced_kwargs.pop("use_textline_orientation", None)
-        reduced_kwargs.pop("use_doc_orientation_classify", None)
-        reduced_kwargs.pop("use_doc_unwarping", None)
-        reduced_kwargs.pop("text_det_limit_side_len", None)
-        reduced_kwargs.pop("text_det_limit_type", None)
-        try:
-            structure = _create_structure(reduced_kwargs)
-        except TypeError:
-            reduced_kwargs.pop("structure_version", None)
-            structure = _create_structure(reduced_kwargs)
-        except Exception as exc:
-            LOGGER.exception("PP-Structure init failed with reduced kwargs: %s", exc)
-            raise
-    except Exception as exc:
-        LOGGER.exception("PP-Structure init failed: %s", exc)
-        raise
-
-    def _run_structure(structure_obj: Any, image_arr: Any) -> Any:
-        if callable(structure_obj):
-            return structure_obj(image_arr)
-        predict = getattr(structure_obj, "predict", None)
-        if callable(predict):
-            try:
-                return predict(image_arr)
-            except Exception:
-                return predict([image_arr])
-        paddlex_pipeline = getattr(structure_obj, "paddlex_pipeline", None)
-        pipeline_predict = getattr(paddlex_pipeline, "predict", None)
-        if callable(pipeline_predict):
-            try:
-                return pipeline_predict(image_arr)
-            except Exception:
-                return pipeline_predict([image_arr])
-        raise RuntimeError("PP-Structure instance is not callable and has no predict method.")
-
-    def _block_to_dict(block: Any) -> Dict[str, Any]:
-        if isinstance(block, dict):
-            return block
-        to_dict = getattr(block, "to_dict", None)
-        if callable(to_dict):
-            try:
-                converted = to_dict()
-                if isinstance(converted, dict):
-                    return converted
-            except Exception:
-                return {}
-        return {}
-
-    def _strip_html(text: str) -> str:
-        return re.sub(r"<[^>]+>", " ", text)
-
-    def _extract_block_lines(block: Dict[str, Any]) -> List[str]:
-        res = block.get("res") or block.get("text") or block.get("content")
-        if isinstance(res, str):
-            cleaned = _strip_html(res).strip()
-            return [cleaned] if cleaned else []
-        if isinstance(res, dict):
-            text_val = res.get("text")
-            if isinstance(text_val, str):
-                cleaned = text_val.strip()
-                return [cleaned] if cleaned else []
-            html_val = res.get("html")
-            if isinstance(html_val, str):
-                cleaned = _strip_html(html_val).strip()
-                return [cleaned] if cleaned else []
-        if isinstance(res, list):
-            lines: List[str] = []
-            for item in res:
-                if isinstance(item, str):
-                    item = item.strip()
-                    if item:
-                        lines.append(item)
-                    continue
-                if isinstance(item, dict):
-                    text_val = item.get("text")
-                    if isinstance(text_val, str):
-                        text_val = text_val.strip()
-                        if text_val:
-                            lines.append(text_val)
-            return lines
-        return []
-
-    def _extract_bbox(block: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
-        bbox = block.get("bbox") or block.get("box") or block.get("points")
-        if bbox is None:
-            return None
-        if isinstance(bbox, dict):
-            try:
-                x0 = float(bbox.get("x0", bbox.get("left", 0.0)))
-                y0 = float(bbox.get("y0", bbox.get("top", 0.0)))
-                x1 = float(bbox.get("x1", bbox.get("right", 0.0)))
-                y1 = float(bbox.get("y1", bbox.get("bottom", 0.0)))
-                return x0, y0, x1, y1
-            except Exception:
-                return None
-        if isinstance(bbox, (list, tuple)):
-            if len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
-                x0, y0, x1, y1 = bbox
-                return float(x0), float(y0), float(x1), float(y1)
-            if len(bbox) >= 4 and all(isinstance(v, (list, tuple)) for v in bbox):
-                xs = []
-                ys = []
-                for pt in bbox:
-                    if len(pt) < 2:
-                        continue
-                    xs.append(float(pt[0]))
-                    ys.append(float(pt[1]))
-                if xs and ys:
-                    return min(xs), min(ys), max(xs), max(ys)
-            if len(bbox) >= 8 and all(isinstance(v, (int, float)) for v in bbox):
-                xs = [float(v) for v in bbox[0::2]]
-                ys = [float(v) for v in bbox[1::2]]
-                if xs and ys:
-                    return min(xs), min(ys), max(xs), max(ys)
-        return None
-
-    def _is_header_footer(bbox: Optional[Tuple[float, float, float, float]], page_h: float) -> bool:
-        if not bbox or page_h <= 0:
-            return False
-        _, y0, _, y1 = bbox
-        top_band = max(0.0, float(config.paddle_structure_header_ratio))
-        bottom_band = max(0.0, float(config.paddle_structure_footer_ratio))
-        if top_band > 0 and y1 <= page_h * top_band:
-            return True
-        if bottom_band > 0 and y0 >= page_h * (1.0 - bottom_band):
-            return True
-        return False
-
-    pages: List[Dict[str, Any]] = []
-    total = max(1, len(images))
-    total_pages = len(images)
-    removed_total = 0
-    repeat_threshold = 0
-    repeated_clusters: List[BoilerplateCluster] = []
-    page_records: List[Dict[str, Any]] = []
-    edge_candidates: List[List[str]] = []
-
-    for idx, image in enumerate(images, start=1):
-        LOGGER.info("PP-Structure page %d/%d: layout start", idx, total)
-        t_start = time.perf_counter()
-        result = _run_structure(structure, np.array(image))
-        if isinstance(result, dict):
-            blocks = (
-                result.get("layout")
-                or result.get("blocks")
-                or result.get("result")
-                or result.get("items")
-                or []
-            )
-        elif hasattr(result, "layout"):
-            blocks = getattr(result, "layout", []) or []
-        else:
-            blocks = result if isinstance(result, list) else []
-        elapsed = time.perf_counter() - t_start
-        LOGGER.info(
-            "PP-Structure page %d/%d: layout done in %.2fs (blocks=%d)",
-            idx,
-            total,
-            elapsed,
-            len(blocks),
-        )
-        page_h = float(getattr(image, "height", 0.0) or 0.0)
-        record_blocks: List[Dict[str, Any]] = []
-        edge_lines: List[str] = []
-        for block in blocks:
-            block_dict = _block_to_dict(block)
-            if not block_dict:
-                continue
-            block_type = str(
-                block_dict.get("type")
-                or block_dict.get("label")
-                or block_dict.get("category")
-                or ""
-            ).lower()
-            block_lines = _extract_block_lines(block_dict)
-            if not block_lines:
-                continue
-            bbox = _extract_bbox(block_dict)
-            is_edge = _is_header_footer(bbox, page_h)
-            if is_edge:
-                edge_lines.append(" ".join(block_lines).strip())
-            record_blocks.append(
-                {
-                    "type": block_type,
-                    "lines": block_lines,
-                    "edge": is_edge,
-                }
-            )
-        page_records.append({"page_num": idx, "blocks": record_blocks})
-        if config.enable_boilerplate_removal and edge_lines:
-            edge_candidates.append([line for line in edge_lines if line])
-
-    if config.enable_boilerplate_removal and total_pages >= config.boilerplate_min_pages:
-        repeated_clusters, repeat_threshold = detect_repeated_line_clusters(
-            edge_candidates,
-            total_pages,
-            config,
-        )
-
-    for record in page_records:
-        lines_out: List[str] = []
-        for block in record["blocks"]:
-            block_lines = block["lines"]
-            block_text = " ".join(block_lines).strip()
-            if not block_text:
-                continue
-            if config.enable_boilerplate_removal and block["edge"]:
-                normalized = normalize_boilerplate_line(block_text)
-                if matches_repeated_cluster(block_text, repeated_clusters, config) or is_boilerplate_line(normalized):
-                    removed_total += 1
-                    continue
-            if block["type"] in ("title", "header", "heading"):
-                lines_out.append(f"# {block_text}")
-            else:
-                lines_out.append("\n".join(block_lines))
-        pages.append({"page_num": record["page_num"], "text": "\n\n".join(lines_out).strip()})
-        if progress_cb and progress_span > 0:
-            percent = progress_base + int(record["page_num"] / total * progress_span)
-            progress_cb(percent, "layout", f"Paddle layout page {record['page_num']}/{total}")
-
-    if removed_total and config.enable_boilerplate_removal:
-        LOGGER.info(
-            "Boilerplate removal (PP-Structure): removed %s blocks (repeat_threshold=%s, repeated_lines=%s)",
-            removed_total,
-            repeat_threshold,
-            len(repeated_clusters),
-        )
-    LOGGER.info(
-        "PP-Structure OCR complete: pages=%d, text_chars=%d",
-        len(pages),
-        ocr_pages_text_chars(pages),
-    )
-
-    return pages, {"layout_used": True, "layout_model": config.paddle_structure_version}
-
-
-def ocr_pages_with_paddle(
-    images: Sequence[Any],
-    languages: str,
-    config: DoclingProcessingConfig,
-    progress_cb: Optional[ProgressCallback] = None,
-    progress_base: int = 0,
-    progress_span: int = 0,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    from paddleocr import PaddleOCR
-
-    try:
-        import numpy as np
-    except Exception as exc:
-        raise RuntimeError(f"numpy is required for PaddleOCR: {exc}") from exc
-
-    # PaddleOCR orientation classification uses use_textline_orientation
-    ocr_kwargs: Dict[str, Any] = {"lang": languages}
-    if config.paddle_target_max_side_px > 0:
-        ocr_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
-        ocr_kwargs["text_det_limit_type"] = "max"
-    if config.paddle_use_doc_orientation_classify:
-        ocr_kwargs["use_doc_orientation_classify"] = True
-    if config.paddle_use_doc_unwarping:
-        ocr_kwargs["use_doc_unwarping"] = True
-
-    def _create_ocr(kwargs: Dict[str, Any], use_textline_orientation: bool) -> PaddleOCR:
-        return PaddleOCR(use_textline_orientation=use_textline_orientation, **kwargs)
-
-    def _try_create(kwargs: Dict[str, Any], use_textline_orientation: bool) -> Optional[PaddleOCR]:
-        try:
-            return _create_ocr(kwargs, use_textline_orientation)
-        except TypeError:
-            return None
-
-    ocr = _try_create(ocr_kwargs, config.paddle_use_textline_orientation)
-    if ocr is None:
-        reduced_kwargs = dict(ocr_kwargs)
-        reduced_kwargs.pop("use_doc_orientation_classify", None)
-        reduced_kwargs.pop("use_doc_unwarping", None)
-        ocr = _try_create(reduced_kwargs, config.paddle_use_textline_orientation)
-    if ocr is None:
-        ocr = _create_ocr(ocr_kwargs, config.paddle_use_textline_orientation)
-    pages: List[Dict[str, Any]] = []
-    confidences: List[float] = []
-
-    def _bbox_from_quad(quad: Sequence[Sequence[float]]) -> Tuple[float, float, float, float, float]:
-        xs = [p[0] for p in quad]
-        ys = [p[1] for p in quad]
-        x0, y0, x1, y1 = float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))
-        xc = 0.5 * (x0 + x1)
-        return x0, y0, x1, y1, xc
-
-    def _image_to_array(img: Any) -> Any:
-        if hasattr(img, "convert"):
-            try:
-                img = img.convert("RGB")
-            except Exception:
-                pass
-        return np.array(img)
-
-    def _paddle_obj_to_dict(obj: Any) -> Optional[Dict[str, Any]]:
-        if obj is None:
-            return None
-        if isinstance(obj, dict):
-            return obj
-        to_dict = getattr(obj, "to_dict", None)
-        if callable(to_dict):
-            try:
-                converted = to_dict()
-                if isinstance(converted, dict):
-                    return converted
-            except Exception:
-                return None
-        rec_texts = getattr(obj, "rec_texts", None)
-        dt_polys = getattr(obj, "dt_polys", None)
-        if rec_texts is not None or dt_polys is not None:
-            return {"rec_texts": rec_texts, "dt_polys": dt_polys, "rec_scores": getattr(obj, "rec_scores", None)}
-        return None
-
-    def _extract_from_paddle_dict(result: Dict[str, Any]) -> List[Tuple[Any, str, Optional[float]]]:
-        texts = result.get("rec_texts") or result.get("texts") or result.get("rec_text")
-        if not isinstance(texts, list):
-            return []
-        boxes = (
-            result.get("dt_polys")
-            or result.get("det_polys")
-            or result.get("dt_boxes")
-            or result.get("boxes")
-        )
-        scores = result.get("rec_scores") or result.get("scores") or result.get("rec_score")
-        entries: List[Tuple[Any, str, Optional[float]]] = []
-        for idx, text_val in enumerate(texts):
-            text_str = str(text_val or "").strip()
-            if not text_str:
-                continue
-            quad = None
-            if isinstance(boxes, list) and idx < len(boxes):
-                quad = boxes[idx]
-            conf_val = None
-            if isinstance(scores, list) and idx < len(scores):
-                try:
-                    conf_val = float(scores[idx])
-                except Exception:
-                    conf_val = None
-            entries.append((quad, text_str, conf_val))
-        return entries
-
-    def _iter_paddle_entries(result: Any) -> List[Tuple[Any, str, Optional[float]]]:
-        if isinstance(result, dict):
-            return _extract_from_paddle_dict(result)
-        if isinstance(result, list):
-            entries = result
-            if len(result) == 1:
-                maybe_dict = _paddle_obj_to_dict(result[0])
-                if maybe_dict is not None:
-                    return _extract_from_paddle_dict(maybe_dict)
-                if isinstance(result[0], (list, tuple, dict)):
-                    entries = result[0]
-            if isinstance(entries, dict):
-                return _extract_from_paddle_dict(entries)
-            if isinstance(entries, list) and entries and isinstance(entries[0], dict):
-                combined: List[Tuple[Any, str, Optional[float]]] = []
-                for entry in entries:
-                    if isinstance(entry, dict):
-                        combined.extend(_extract_from_paddle_dict(entry))
-                    else:
-                        maybe_dict = _paddle_obj_to_dict(entry)
-                        if maybe_dict is not None:
-                            combined.extend(_extract_from_paddle_dict(maybe_dict))
-                return combined
-            extracted: List[Tuple[Any, str, Optional[float]]] = []
-            for entry in entries:
-                if not entry or not isinstance(entry, (list, tuple)):
-                    continue
-                quad = entry[0] if len(entry) > 0 else None
-                text_part = entry[1] if len(entry) > 1 else None
-                if text_part is None:
-                    continue
-                text_str = ""
-                conf_val = None
-                if isinstance(text_part, (list, tuple)) and text_part:
-                    text_str = str(text_part[0] or "").strip()
-                    if len(text_part) > 1 and isinstance(text_part[1], (float, int)):
-                        conf_val = float(text_part[1])
-                else:
-                    text_str = str(text_part or "").strip()
-                if text_str:
-                    extracted.append((quad, text_str, conf_val))
-            return extracted
-        return []
-
-    total = max(1, len(images))
-    total_pages = len(images)
-    repeat_threshold = 0
-    repeated_clusters: List[BoilerplateCluster] = []
-    page_edge_candidates: List[List[str]] = []
-
-    for idx, image in enumerate(images, start=1):
-        if config.enable_boilerplate_removal:
-            LOGGER.info("Paddle OCR prepass %d/%d: start", idx, total_pages)
-        t_start = time.perf_counter()
-        edge_lines: List[Tuple[str, float]] = []
-        result = None
-        image_arr = _image_to_array(image)
-        try:
-            result = ocr.predict(image_arr)  # type: ignore[attr-defined]
-        except Exception as exc:
-            LOGGER.debug("PaddleOCR predict failed: %s", exc)
-        if result:
-            for quad, text_val, _ in _iter_paddle_entries(result):
-                if not text_val:
-                    continue
-                if quad is None:
-                    continue
-                try:
-                    _, y0_val, _, _, _ = _bbox_from_quad(quad)
-                except Exception:
-                    y0_val = 0.0
-                edge_lines.append((text_val, y0_val))
-        if config.enable_boilerplate_removal and edge_lines:
-            page_edge_candidates.append(
-                select_edge_texts_by_y(edge_lines, config.boilerplate_edge_lines)
-            )
-        if config.enable_boilerplate_removal:
-            elapsed = time.perf_counter() - t_start
-            LOGGER.info(
-                "Paddle OCR prepass %d/%d: done in %.2fs (edge_lines=%d)",
-                idx,
-                total_pages,
-                elapsed,
-                len(edge_lines),
-            )
-
-    if config.enable_boilerplate_removal and total_pages >= config.boilerplate_min_pages:
-        repeated_clusters, repeat_threshold = detect_repeated_line_clusters(
-            page_edge_candidates,
-            total_pages,
-            config,
-        )
-    removed_total = 0
-
-    for idx, image in enumerate(images, start=1):
-        if progress_cb and progress_span > 0:
-            percent = progress_base + int((idx - 1) / total * progress_span)
-            progress_cb(percent, "ocr", f"Paddle OCR page {idx}/{total} (running)")
-        LOGGER.info("Paddle OCR page %d/%d: start", idx, total)
-        t_start = time.perf_counter()
-        # Prefer new API: predict(); fall back to ocr() with/without cls
-        image_arr = _image_to_array(image)
-        try:
-            result = ocr.predict(image_arr)  # type: ignore[attr-defined]
-        except Exception:
-            result = None
-        blocks: List[Dict[str, Any]] = []
-        fallback_lines: List[str] = []
-        if result:
-            for quad, text_val, conf_val in _iter_paddle_entries(result):
-                if conf_val is not None:
-                    confidences.append(conf_val)
-                if not text_val:
-                    continue
-                if quad is None:
-                    fallback_lines.append(text_val)
-                    continue
-                try:
-                    x0, y0, x1, y1, xc = _bbox_from_quad(quad)
-                except Exception:
-                    fallback_lines.append(text_val)
-                    continue
-                blocks.append({
-                    "x0": x0,
-                    "y0": y0,
-                    "x1": x1,
-                    "y1": y1,
-                    "xc": xc,
-                    "text": text_val,
-                    "line_id": len(blocks),
-                })
-        edge_ids: Set[int] = set()
-        if config.enable_boilerplate_removal and blocks:
-            edge_ids = edge_ids_by_y(
-                [(b["line_id"], b["y0"]) for b in blocks],
-                config.boilerplate_edge_lines,
-            )
-        if edge_ids:
-            filtered_blocks: List[Dict[str, Any]] = []
-            for b in blocks:
-                normalized = normalize_boilerplate_line(str(b.get("text", "")).strip())
-                is_edge = b.get("line_id") in edge_ids
-                if is_edge and (
-                    matches_repeated_cluster(str(b.get("text", "")), repeated_clusters, config)
-                    or is_boilerplate_line(normalized)
-                ):
-                    removed_total += 1
-                    continue
-                filtered_blocks.append(b)
-            blocks = filtered_blocks
-        if blocks:
-            ordered_text = order_blocks_into_columns(
-                blocks,
-                log_label="Paddle",
-                preserve_single_column_order=True,
-            )
-        else:
-            ordered_text = "\n".join(fallback_lines)
-        pages.append({"page_num": idx, "text": ordered_text})
-        elapsed = time.perf_counter() - t_start
-        LOGGER.info(
-            "Paddle OCR page %d/%d: done in %.2fs (text_chars=%d, blocks=%d)",
-            idx,
-            total,
-            elapsed,
-            len(ordered_text),
-            len(blocks),
-        )
-        if progress_cb and progress_span > 0:
-            percent = progress_base + int(idx / total * progress_span)
-            progress_cb(percent, "ocr", f"Paddle OCR page {idx}/{total}")
-
-    if removed_total and config.enable_boilerplate_removal:
-        LOGGER.info(
-            "Boilerplate removal (OCR lines): removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
-            removed_total,
-            repeat_threshold,
-            len(repeated_clusters),
-        )
-
-    avg_conf = sum(confidences) / len(confidences) if confidences else None
-    LOGGER.info(
-        "Paddle OCR complete: pages=%d, text_chars=%d",
-        len(pages),
-        ocr_pages_text_chars(pages),
-    )
-    return pages, {"ocr_confidence_avg": avg_conf}
-
-
-def ocr_pages_with_tesseract(
-    images: Sequence[Any],
-    languages: str,
-    config: DoclingProcessingConfig,
-    progress_cb: Optional[ProgressCallback] = None,
-    progress_base: int = 0,
-    progress_span: int = 0,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    import pytesseract
-    tesseract_cmd = find_tesseract_path()
-    if tesseract_cmd:
-        global TESSERACT_LOGGED_ONCE
-        if shutil.which("tesseract") is None and not TESSERACT_LOGGED_ONCE:
-            LOGGER.info("Tesseract not on PATH; using %s", tesseract_cmd)
-            TESSERACT_LOGGED_ONCE = True
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-    else:
-        raise RuntimeError("Tesseract not found on PATH; set TESSERACT_CMD or install tesseract.")
-
-    def _safe_float(values: Any, idx: int) -> float:
-        if isinstance(values, list) and idx < len(values):
-            try:
-                return float(values[idx])
-            except Exception:
-                return 0.0
-        return 0.0
-
-    def _group_words_into_lines(words: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-        if not words:
-            return []
-        heights = sorted((w["y1"] - w["y0"]) for w in words)
-        h_med = heights[len(heights) // 2] if heights else 1.0
-        y_thr = max(4.0, 0.6 * h_med)
-        words_sorted = sorted(words, key=lambda w: (w["yc"], w["x0"]))
-        lines: List[List[Dict[str, Any]]] = []
-        current: List[Dict[str, Any]] = []
-        current_y: Optional[float] = None
-        for w in words_sorted:
-            if current_y is None or abs(w["yc"] - current_y) <= y_thr:
-                current.append(w)
-            else:
-                lines.append(current)
-                current = [w]
-            current_y = w["yc"]
-        if current:
-            lines.append(current)
-        return lines
-
-    pages: List[Dict[str, Any]] = []
-    confidences: List[float] = []
-    total = max(1, len(images))
-    repeat_threshold = 0
-    repeated_clusters: List[BoilerplateCluster] = []
-    removed_total = 0
-    if config.enable_boilerplate_removal and total >= config.boilerplate_min_pages:
-        page_edge_candidates: List[List[str]] = []
-        for idx, image in enumerate(images, start=1):
-            LOGGER.info("Tesseract OCR prepass %d/%d: start", idx, total)
-            t_start = time.perf_counter()
-            line_items: List[Tuple[str, float]] = []
-            try:
-                data = pytesseract.image_to_data(
-                    image, lang=languages, output_type=pytesseract.Output.DICT
-                )
-                items = len(data.get("text", []))
-                words: List[Dict[str, Any]] = []
-                for i in range(items):
-                    raw_text = str(data["text"][i] or "").strip()
-                    if not raw_text:
-                        continue
-                    x0 = _safe_float(data.get("left"), i)
-                    y0 = _safe_float(data.get("top"), i)
-                    x1 = x0 + _safe_float(data.get("width"), i)
-                    y1 = y0 + _safe_float(data.get("height"), i)
-                    yc = 0.5 * (y0 + y1)
-                    words.append(
-                        {
-                            "x0": x0,
-                            "y0": y0,
-                            "x1": x1,
-                            "y1": y1,
-                            "yc": yc,
-                            "text": raw_text,
-                        }
-                    )
-                for line_words in _group_words_into_lines(words):
-                    line_sorted = sorted(line_words, key=lambda w: w["x0"])
-                    line_text = " ".join(w["text"] for w in line_sorted if w["text"]).strip()
-                    if not line_text:
-                        continue
-                    line_y0 = min(w["y0"] for w in line_sorted)
-                    line_items.append((line_text, line_y0))
-            except Exception:
-                line_items = []
-            elapsed = time.perf_counter() - t_start
-            LOGGER.info(
-                "Tesseract OCR prepass %d/%d: done in %.2fs (edge_lines=%d)",
-                idx,
-                total,
-                elapsed,
-                len(line_items),
-            )
-            if line_items:
-                page_edge_candidates.append(
-                    select_edge_texts_by_y(line_items, config.boilerplate_edge_lines)
-                )
-        repeated_clusters, repeat_threshold = detect_repeated_line_clusters(
-            page_edge_candidates,
-            total,
-            config,
-        )
-    for idx, image in enumerate(images, start=1):
-        if progress_cb and progress_span > 0:
-            percent = progress_base + int((idx - 1) / total * progress_span)
-            progress_cb(percent, "ocr", f"Tesseract OCR page {idx}/{total} (running)")
-        LOGGER.info("Tesseract OCR page %d/%d: start", idx, total)
-        t_start = time.perf_counter()
-        text = ""
-        words: List[Dict[str, Any]] = []
-        try:
-            data = pytesseract.image_to_data(
-                image, lang=languages, output_type=pytesseract.Output.DICT
-            )
-            items = len(data.get("text", []))
-            for i in range(items):
-                raw_text = str(data["text"][i] or "").strip()
-                if not raw_text:
-                    continue
-                x0 = _safe_float(data.get("left"), i)
-                y0 = _safe_float(data.get("top"), i)
-                x1 = x0 + _safe_float(data.get("width"), i)
-                y1 = y0 + _safe_float(data.get("height"), i)
-                xc = 0.5 * (x0 + x1)
-                yc = 0.5 * (y0 + y1)
-                words.append(
-                    {
-                        "x0": x0,
-                        "y0": y0,
-                        "x1": x1,
-                        "y1": y1,
-                        "xc": xc,
-                        "yc": yc,
-                        "text": raw_text,
-                    }
-                )
-
-                conf_raw = data.get("conf", [None])[i]
-                try:
-                    conf_val = float(conf_raw)
-                except Exception:
-                    conf_val = None
-                if conf_val is not None and conf_val >= 0:
-                    confidences.append(conf_val)
-
-            if words:
-                columns, _, _ = split_blocks_into_columns(words, log_label="Tesseract")
-                column_lines: List[List[Dict[str, Any]]] = []
-                line_id_counter = 0
-                for col in columns:
-                    lines: List[Dict[str, Any]] = []
-                    for line_words in _group_words_into_lines(col):
-                        line_sorted = sorted(line_words, key=lambda w: w["x0"])
-                        line_text = " ".join(w["text"] for w in line_sorted if w["text"])
-                        if not line_text:
-                            continue
-                        line_y0 = min(w["y0"] for w in line_sorted)
-                        line_y1 = max(w["y1"] for w in line_sorted)
-                        line_x0 = min(w["x0"] for w in line_sorted)
-                        lines.append(
-                            {
-                                "text": line_text,
-                                "y0": line_y0,
-                                "y1": line_y1,
-                                "x0": line_x0,
-                                "line_id": line_id_counter,
-                            }
-                        )
-                        line_id_counter += 1
-                    lines.sort(key=lambda l: (l["y0"], l["x0"]))
-                    column_lines.append(lines)
-                edge_ids: Set[int] = set()
-                if config.enable_boilerplate_removal and column_lines:
-                    all_lines = [line for col_lines in column_lines for line in col_lines]
-                    edge_ids = edge_ids_by_y(
-                        [(line["line_id"], line["y0"]) for line in all_lines],
-                        config.boilerplate_edge_lines,
-                    )
-                if edge_ids:
-                    filtered_columns: List[List[Dict[str, Any]]] = []
-                    for lines in column_lines:
-                        filtered_lines: List[Dict[str, Any]] = []
-                        for line in lines:
-                            normalized = normalize_boilerplate_line(str(line.get("text", "")).strip())
-                            is_edge = line.get("line_id") in edge_ids
-                            if is_edge and (
-                                matches_repeated_cluster(str(line.get("text", "")), repeated_clusters, config)
-                                or is_boilerplate_line(normalized)
-                            ):
-                                removed_total += 1
-                                continue
-                            filtered_lines.append(line)
-                        filtered_columns.append(filtered_lines)
-                    column_lines = filtered_columns
-                def _join_lines(lines: List[Dict[str, Any]]) -> str:
-                    heights = [line["y1"] - line["y0"] for line in lines if line.get("y1") is not None]
-                    heights = sorted(h for h in heights if h > 0)
-                    h_med = heights[len(heights) // 2] if heights else 10.0
-                    gap_thr = max(6.0, 1.6 * h_med)
-                    paragraphs: List[str] = []
-                    current = ""
-                    prev_y1: Optional[float] = None
-                    for line in lines:
-                        line_text = str(line.get("text", "")).strip()
-                        if not line_text:
-                            continue
-                        y0 = float(line.get("y0") or 0.0)
-                        y1 = float(line.get("y1") or y0)
-                        if current and prev_y1 is not None and (y0 - prev_y1) > gap_thr:
-                            paragraphs.append(current.strip())
-                            current = ""
-                        if not current:
-                            current = line_text
-                        else:
-                            if current.endswith("-"):
-                                current = current[:-1] + line_text.lstrip()
-                            else:
-                                current = current.rstrip() + " " + line_text.lstrip()
-                        prev_y1 = y1
-                    if current:
-                        paragraphs.append(current.strip())
-                    return "\n\n".join(paragraphs)
-
-                col_texts = [_join_lines(lines) for lines in column_lines if lines]
-                text = "\n\n".join(t for t in col_texts if t)
-        except Exception:
-            text = ""
-
-        if not text:
-            text = pytesseract.image_to_string(image, lang=languages)
-        pages.append({"page_num": idx, "text": text})
-        elapsed = time.perf_counter() - t_start
-        LOGGER.info(
-            "Tesseract OCR page %d/%d: done in %.2fs (text_chars=%d, words=%d)",
-            idx,
-            total,
-            elapsed,
-            len(text),
-            len(words),
-        )
-        if progress_cb and progress_span > 0:
-            percent = progress_base + int(idx / total * progress_span)
-            progress_cb(percent, "ocr", f"Tesseract OCR page {idx}/{total}")
-    if removed_total and config.enable_boilerplate_removal:
-        LOGGER.info(
-            "Boilerplate removal (OCR lines): removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
-            removed_total,
-            repeat_threshold,
-            len(repeated_clusters),
-        )
-    avg_conf = sum(confidences) / len(confidences) if confidences else None
-    LOGGER.info(
-        "Tesseract OCR complete: pages=%d, text_chars=%d",
-        len(pages),
-        ocr_pages_text_chars(pages),
-    )
-    return pages, {"ocr_confidence_avg": avg_conf}
+def _external_ocr_helpers() -> Dict[str, Any]:
+    return {
+        "logger": LOGGER,
+        "ocr_pages_text_chars": ocr_pages_text_chars,
+        "detect_repeated_line_clusters": detect_repeated_line_clusters,
+        "normalize_boilerplate_line": normalize_boilerplate_line,
+        "matches_repeated_cluster": matches_repeated_cluster,
+        "is_boilerplate_line": is_boilerplate_line,
+        "edge_ids_by_y": edge_ids_by_y,
+        "select_edge_texts_by_y": select_edge_texts_by_y,
+        "order_blocks_into_columns": order_blocks_into_columns,
+        "split_blocks_into_columns": split_blocks_into_columns,
+    }
 
 
 def run_external_ocr_pages(
@@ -3914,6 +3043,7 @@ def run_external_ocr_pages(
     progress_span: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_dpi = dpi or config.ocr_dpi
+    helpers = _external_ocr_helpers()
     if progress_cb and progress_span > 0:
         label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
         progress_cb(progress_base, "ocr", f"{label} starting")
@@ -3956,6 +3086,7 @@ def run_external_ocr_pages(
                     images,
                     normalize_languages_for_engine(languages, engine),
                     config,
+                    helpers,
                     progress_cb,
                     progress_base,
                     progress_span,
@@ -3966,6 +3097,7 @@ def run_external_ocr_pages(
             images,
             normalize_languages_for_engine(languages, engine),
             config,
+            helpers,
             progress_cb,
             progress_base,
             progress_span,
@@ -3975,6 +3107,7 @@ def run_external_ocr_pages(
             images,
             normalize_languages_for_engine(languages, engine),
             config,
+            helpers,
             progress_cb,
             progress_base,
             progress_span,
@@ -4157,6 +3290,15 @@ def convert_pdf_with_docling(
             if ocr_pages:
                 ocr_text_chars = ocr_pages_text_chars(ocr_pages)
                 if ocr_text_chars > 0:
+                    layout_used = ocr_stats.get("layout_used")
+                    layout_model = ocr_stats.get("layout_model")
+                    LOGGER.info(
+                        "External OCR stats: engine=%s, layout_used=%s, layout_model=%s, text_chars=%d",
+                        decision.ocr_engine,
+                        layout_used,
+                        layout_model,
+                        ocr_text_chars,
+                    )
                     pages = ocr_pages
                     external_ocr_used = True
                     if config.postprocess_markdown and not markdown.strip():
@@ -4167,6 +3309,12 @@ def convert_pdf_with_docling(
                         "External OCR returned empty text (%s). Keeping Docling text.",
                         decision.ocr_engine,
                     )
+            else:
+                ocr_stats = {}
+                LOGGER.warning(
+                    "External OCR returned empty text (%s). Keeping Docling text.",
+                    decision.ocr_engine,
+                )
         except Exception as exc:
             LOGGER.warning("External OCR failed (%s): %s", decision.ocr_engine, exc)
             if decision.ocr_engine != "tesseract" and "tesseract" in available_engines:
@@ -4185,6 +3333,15 @@ def convert_pdf_with_docling(
                     if ocr_pages:
                         ocr_text_chars = ocr_pages_text_chars(ocr_pages)
                         if ocr_text_chars > 0:
+                            layout_used = ocr_stats.get("layout_used")
+                            layout_model = ocr_stats.get("layout_model")
+                            LOGGER.info(
+                                "External OCR stats: engine=%s, layout_used=%s, layout_model=%s, text_chars=%d",
+                                "tesseract",
+                                layout_used,
+                                layout_model,
+                                ocr_text_chars,
+                            )
                             pages = ocr_pages
                             ocr_engine_used = "tesseract"
                             external_ocr_used = True
@@ -4453,6 +3610,95 @@ def main() -> int:
         help="Override Paddle PP-Structure version (e.g., PP-StructureV3)",
     )
     parser.add_argument(
+        "--paddle-max-dpi",
+        type=int,
+        help="Max DPI for Paddle OCR rendering (overrides default cap).",
+    )
+    parser.add_argument(
+        "--paddle-target-max-side",
+        dest="paddle_target_max_side_px",
+        type=int,
+        help="Target max side length (px) for Paddle OCR rendering.",
+    )
+    parser.add_argument(
+        "--paddle-use-paddlex-layout",
+        dest="paddle_use_paddlex_layout",
+        action="store_true",
+        default=None,
+        help="Enable PaddleX DocLayout path for Paddle OCR.",
+    )
+    parser.add_argument(
+        "--no-paddle-use-paddlex-layout",
+        dest="paddle_use_paddlex_layout",
+        action="store_false",
+        default=None,
+        help="Disable PaddleX DocLayout path for Paddle OCR.",
+    )
+    parser.add_argument(
+        "--paddle-layout-model",
+        help="PaddleX layout model (e.g., PP-DocLayout-L).",
+    )
+    parser.add_argument(
+        "--paddle-layout-threshold",
+        type=float,
+        help="Confidence threshold for PaddleX layout detections.",
+    )
+    parser.add_argument(
+        "--paddle-layout-img-size",
+        type=int,
+        help="Input image size for PaddleX layout model.",
+    )
+    parser.add_argument(
+        "--paddle-layout-merge",
+        help="PaddleX layout merge mode (e.g., small, large, union).",
+    )
+    parser.add_argument(
+        "--paddle-layout-unclip",
+        type=float,
+        help="PaddleX layout unclip ratio.",
+    )
+    parser.add_argument(
+        "--paddle-layout-device",
+        help="PaddleX layout device (e.g., cpu, gpu:0).",
+    )
+    parser.add_argument(
+        "--paddle-layout-keep-labels",
+        help="Comma-separated list of PaddleX layout labels to OCR.",
+    )
+    parser.add_argument(
+        "--paddle-layout-recognize-boxes",
+        dest="paddle_layout_recognize_boxes",
+        action="store_true",
+        default=None,
+        help="Recognize text inside PaddleX layout boxes.",
+    )
+    parser.add_argument(
+        "--no-paddle-layout-recognize-boxes",
+        dest="paddle_layout_recognize_boxes",
+        action="store_false",
+        default=None,
+        help="Skip OCR inside PaddleX layout boxes.",
+    )
+    parser.add_argument(
+        "--paddle-layout-nms",
+        dest="paddle_layout_nms",
+        action="store_true",
+        default=None,
+        help="Enable PaddleX layout NMS.",
+    )
+    parser.add_argument(
+        "--no-paddle-layout-nms",
+        dest="paddle_layout_nms",
+        action="store_false",
+        default=None,
+        help="Disable PaddleX layout NMS.",
+    )
+    parser.add_argument(
+        "--paddle-layout-fail-on-zero",
+        action="store_true",
+        help="Fail if PaddleX layout detects zero boxes.",
+    )
+    parser.add_argument(
         "--max-chunk-chars",
         type=int,
         help="Max chars for section chunks before splitting (section mode only).",
@@ -4590,6 +3836,32 @@ def main() -> int:
         config.paddle_use_structure_v3 = args.paddle_structure_v3
     if args.paddle_structure_version:
         config.paddle_structure_version = args.paddle_structure_version
+    if args.paddle_max_dpi is not None:
+        config.paddle_max_dpi = args.paddle_max_dpi
+    if args.paddle_target_max_side_px is not None:
+        config.paddle_target_max_side_px = args.paddle_target_max_side_px
+    if args.paddle_use_paddlex_layout is not None:
+        config.paddle_use_paddlex_layout = args.paddle_use_paddlex_layout
+    if args.paddle_layout_model:
+        config.paddle_layout_model = args.paddle_layout_model
+    if args.paddle_layout_threshold is not None:
+        config.paddle_layout_threshold = args.paddle_layout_threshold
+    if args.paddle_layout_img_size is not None:
+        config.paddle_layout_img_size = args.paddle_layout_img_size
+    if args.paddle_layout_merge:
+        config.paddle_layout_merge = args.paddle_layout_merge
+    if args.paddle_layout_unclip is not None:
+        config.paddle_layout_unclip = args.paddle_layout_unclip
+    if args.paddle_layout_device:
+        config.paddle_layout_device = args.paddle_layout_device
+    if args.paddle_layout_keep_labels:
+        config.paddle_layout_keep_labels = args.paddle_layout_keep_labels
+    if args.paddle_layout_recognize_boxes is not None:
+        config.paddle_layout_recognize_boxes = args.paddle_layout_recognize_boxes
+    if args.paddle_layout_nms is not None:
+        config.paddle_layout_nms = args.paddle_layout_nms
+    if args.paddle_layout_fail_on_zero:
+        config.paddle_layout_fail_on_zero = True
     if args.max_chunk_chars is not None:
         config.max_chunk_chars = args.max_chunk_chars
     if args.chunk_overlap_chars is not None:
@@ -4655,9 +3927,15 @@ def main() -> int:
         pages = conversion.pages
         original_pages = pages
         languages = conversion.metadata.get("languages", config.default_lang_english)
+        layout_markdown_value = conversion.metadata.get("layout_markdown")
+        external_ocr_used = bool(conversion.metadata.get("external_ocr_used"))
+        layout_markdown_available = isinstance(layout_markdown_value, str) and bool(layout_markdown_value.strip())
+        prefer_layout_markdown = external_ocr_used and layout_markdown_available
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        should_postprocess = config.enable_post_correction
+        should_postprocess = config.enable_post_correction and not prefer_layout_markdown
+        if config.enable_post_correction and prefer_layout_markdown:
+            LOGGER.info("Skipping OCR post-processing to preserve Paddle layout output.")
         if should_postprocess:
             wordlist = prepare_dictionary_words(config)
             allow_missing_space = ocr_used
@@ -4715,7 +3993,6 @@ def main() -> int:
                 markdown = processed_markdown
 
         repeated_clusters: List[BoilerplateCluster] = []
-        external_ocr_used = bool(conversion.metadata.get("external_ocr_used"))
         if config.enable_boilerplate_removal and not external_ocr_used:
             pre_boilerplate_pages = pages
             pre_boilerplate_markdown = markdown
@@ -4727,7 +4004,10 @@ def main() -> int:
                 markdown = pre_boilerplate_markdown
 
         if external_ocr_used:
-            markdown = "\n\n".join(page.get("text", "") for page in pages)
+            if layout_markdown_available:
+                markdown = layout_markdown_value
+            else:
+                markdown = "\n\n".join(page.get("text", "") for page in pages)
 
         if not markdown.strip():
             LOGGER.warning("Markdown empty; rebuilding from %d pages", len(pages))

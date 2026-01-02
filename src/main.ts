@@ -8348,7 +8348,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const version = await this.getPythonVersion(configured, []);
       if (version && this.isUnsupportedPythonVersion(version)) {
         throw new Error(
-          `Configured Python ${version.major}.${version.minor} is not supported. Install Python 3.11 or 3.12 and update the Python path.`
+          `Configured Python ${version.major}.${version.minor} is not supported. Install Python 3.11–3.13 and update the Python path.`
         );
       }
       return { command: configured, args: [] };
@@ -8357,6 +8357,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const candidates =
       process.platform === "win32"
         ? [
+            { command: "py", args: ["-3.13"] },
             { command: "py", args: ["-3.12"] },
             { command: "py", args: ["-3.11"] },
             { command: "py", args: ["-3.10"] },
@@ -8364,6 +8365,7 @@ export default class ZoteroRagPlugin extends Plugin {
             { command: "python", args: [] },
           ]
         : [
+            { command: "python3.13", args: [] },
             { command: "python3.12", args: [] },
             { command: "python3.11", args: [] },
             { command: "python3.10", args: [] },
@@ -8384,11 +8386,11 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
 
-    throw new Error("No usable Python 3.11/3.12 interpreter found on PATH.");
+    throw new Error("No usable Python 3.11–3.13 interpreter found on PATH.");
   }
 
   private isUnsupportedPythonVersion(version: { major: number; minor: number }): boolean {
-    return version.major > 3 || (version.major === 3 && version.minor >= 13);
+    return version.major > 3 || (version.major === 3 && version.minor >= 14);
   }
 
   private async getPythonVersion(

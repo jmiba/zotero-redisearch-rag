@@ -3,6 +3,8 @@ import { join } from "path";
 
 const tools = [
   { name: "docling_extract.py", path: "tools/docling_extract.py" },
+  { name: "ocr_paddle.py", path: "tools/ocr_paddle.py" },
+  { name: "ocr_tesseract.py", path: "tools/ocr_tesseract.py" },
   { name: "index_redisearch.py", path: "tools/index_redisearch.py" },
   { name: "drop_redis_index.py", path: "tools/drop_redis_index.py" },
   { name: "ocr_layered_pdf.py", path: "tools/ocr_layered_pdf.py" },

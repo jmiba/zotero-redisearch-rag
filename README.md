@@ -97,7 +97,7 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 - Zotero 7 (desktop)
 - Docker Desktop or Podman (for Redis Stack)
 - LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
-- Python 3.11+ (for Docling tools)
+- Python 3.11–3.13 (for Docling tools)
 
 ## Setup
 

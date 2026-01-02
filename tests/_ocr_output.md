@@ -4,7 +4,7 @@
 ### Column 1
 **figure caption:** The Twilight with wheel and machinery.
 
-### By James V. Swift WJ Contributing Editor
+### By James V. SwifT WJ Contributing Editor
 
 
 Another Missouri River steamboat has
@@ -38,8 +38,8 @@ and while some items were recovered all
 were not entirely successful. Then in
 1986 the wreck was found again and a
 group led by Gene Smith began a careful
-plan to uncover the entire boat. In 31/
-months in 2001 the entire hull, one side-
+plan to uncover the entire boat. In 31/2
+months in 200l the entire hull, one side-
 wheel, both engines, two boilers, water
 pump, anchor, rudder, pitman arms and
 ### Column 2
@@ -78,7 +78,7 @@ The steamer Twilight was built in St.
 Louis in 1865, so it was a new boat when
 sunk. The dimensions were 180 by 32 feet
 and the engines were 16 inches in diameter
-with a 4½/2-foot stroke. The owners were
+with a 41/2-foot stroke. The owners were
 John P. Keiser, J. Henry, C.M. Sombart
 and H.W. McPherson. The Twilight's mas-
 ter was Capt. William Massie, well-known
@@ -89,7 +89,7 @@ on the Missouri River.
 
 The Steamship Historical Society of
 America will hold its spring meeting in
-Albany, N.Y., June 1416. The big event
+Albany, N.Y., June 14-16. The big event
 will be the unveiling of the society's new
 video, "Steamboats: The Hudson River."
 The video will be shown during the June 15
@@ -122,15 +122,14 @@ Josiah White II at the National Canal
 Museum, Two Rivers Landing, Easton, Pa.
 Heritage walks are given in Hugh Moore
 Park on Sunday afternoons with commen-
-—SEE STEAMBOAT PAGE 33
+Y
+SEE STEAMBOAT PAGE 33
 
 ## Page 2
 ### Column 1
-### Steamboat
 
-
-(ConTinueD from Page 34)
-
+Steamboat
+(ConTinueD frOM PaGe 34)
 tary by staff members. A new exhibit at the
 museum is a replica of the Ringling Bros.
 Barnum & Bailey Circus done by Earle
@@ -142,8 +141,7 @@ J.K. Folmar, president of the Mononga-
 hela River Buffs Association, has expressed
 the opinion, which I share, that highway
 departments are ruining views of the river
-erete barriers. Folmar is par-
-with their con
+with their concrete barriers. Folmar is par-
 ticularly disturbed because the Pennsylva-
 nia Department of Transportation has put
 barriers on the Brownsville Bridge over the

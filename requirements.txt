@@ -1,4 +1,5 @@
 docling
+langcodes[data]
 markdown
 markdown-it-py
 numpy

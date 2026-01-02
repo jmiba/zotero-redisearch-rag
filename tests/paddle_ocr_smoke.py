@@ -75,9 +75,9 @@ GENERAL_DEFAULTS = {
 
 LAYOUT_DEFAULTS = {
     "layout_model": "PP-DocLayout-L",     # or PP-DocLayout-M / PP-DocLayout-S
-    "layout_threshold": 0.5,               # keep lower-confidence boxes
-    "layout_img_size": None,               # larger input can help two-column pages
-    "layout_merge": "small",              # keep both inner and outer boxes
+    "layout_threshold": 0.3,               # keep lower-confidence boxes
+    "layout_img_size": 6000,               # larger input can help two-column pages
+    "layout_merge": "large",              # keep both inner and outer boxes
     "layout_unclip": 1.05,                  # expand boxes slightly
     "layout_device": None,                 # e.g., "cpu" or "gpu:0"; None = PaddleX default
     "layout_nms": True,                    # enable NMS postprocessing
@@ -89,7 +89,7 @@ FLAGS_DEFAULTS = {
     # Enable layout path by default unless CLI overrides
     "pp_structure_v3": True,
     # Enable dump output by default unless CLI overrides
-    "dump": False,
+    "dump": True,
     # Default path to save crops under the tests folder
     "save_crops": os.path.join(os.path.dirname(__file__), "_ocr_crops"),
     # Default path to save layout-labeled markdown output

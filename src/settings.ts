@@ -271,7 +271,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       .setName("Python path")
       .setDesc(
         "Optional path to the Python interpreter used to create or run the plugin env. " +
-          "Leave blank to auto-detect (python3.12/3.11/3.10/python3/python, or py on Windows)."
+          "Leave blank to auto-detect (python3.13/3.12/3.11/3.10/python3/python, or py on Windows)."
       )
       .addText((text) =>
         text
