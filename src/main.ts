@@ -180,12 +180,18 @@ const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElem
   if (info.type === "chunk-end") {
     badge.classList.add("zrr-sync-badge--chunk-end");
     badge.textContent = info.chunkKind === "page" ? "Page end" : "Section end";
+    if (info.chunkKind) {
+      badge.classList.add(`zrr-sync-badge--${info.chunkKind}`);
+    }
     return badge;
   }
   if (info.type !== "chunk-start") {
     return null;
   }
   badge.classList.add("zrr-sync-badge--chunk");
+  if (info.chunkKind) {
+    badge.classList.add(`zrr-sync-badge--${info.chunkKind}`);
+  }
   if (info.excluded) {
     badge.classList.add("is-excluded");
   }
@@ -675,9 +681,8 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
   }
   const doc = view.state.doc;
   const builder = new RangeSetBuilder<Decoration>();
-  const entries: Array<{ from: number; to: number; info: ZrrBadgeInfo }> = [];
+  const entries: Array<{ line: number; from: number; to: number; info: ZrrBadgeInfo }> = [];
   const pageNumbers: number[] = [];
-  let lastChunkKind: "page" | "section" | null = null;
   for (let lineNo = 1; lineNo <= doc.lines; lineNo += 1) {
     const line = doc.line(lineNo);
     const match = line.text.match(/<!--\s*([^>]*)\s*-->/);
@@ -689,12 +694,11 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
       continue;
     }
     if (info.type === "chunk-start") {
-      lastChunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
+      info.chunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
     } else if (info.type === "chunk-end") {
-      info.chunkKind = lastChunkKind ?? "section";
-      lastChunkKind = null;
+      info.chunkKind = info.chunkKind ?? "section";
     }
-    entries.push({ from: line.from, to: line.to, info });
+    entries.push({ line: lineNo, from: line.from, to: line.to, info });
     if (info.pageNumber) {
       pageNumbers.push(info.pageNumber);
     }
@@ -703,6 +707,7 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
     return Decoration.none;
   }
   const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
+
   for (const entry of entries) {
     const widget = Decoration.replace({
       widget: new ZrrBadgeWidget(entry.info, totalPages),
@@ -1339,7 +1344,6 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
     this.registerNoteDeleteMenu();
-    this.registerSyncCommentBadges();
     this.registerEditorExtension(createChunkToolsExtension(this));
     this.registerEditorExtension(createSyncBadgeExtension());
 
@@ -5020,51 +5024,6 @@ export default class ZoteroRagPlugin extends Plugin {
       .trim();
   }
 
-  private registerSyncCommentBadges(): void {
-    this.registerMarkdownPostProcessor((element) => {
-      const iterator = document.createNodeIterator(element, NodeFilter.SHOW_COMMENT);
-      const comments: Comment[] = [];
-      let node = iterator.nextNode();
-      while (node) {
-        if (node instanceof Comment) {
-          comments.push(node);
-        }
-        node = iterator.nextNode();
-      }
-      const parsed = comments
-        .map((comment) => ({ comment, info: parseZrrBadgeInfo(comment.data || "") }))
-        .filter((entry) => entry.info !== null);
-      if (!parsed.length) {
-        return;
-      }
-
-      const pageNumbers = parsed
-        .map((entry) => entry.info)
-        .filter((info): info is ZrrBadgeInfo => Boolean(info?.pageNumber))
-        .map((info) => info.pageNumber || 0);
-      const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
-      let lastChunkKind: "page" | "section" | null = null;
-
-      for (const entry of parsed) {
-        const info = entry.info;
-        if (!info) {
-          continue;
-        }
-        if (info.type === "chunk-start") {
-          lastChunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
-        } else if (info.type === "chunk-end") {
-          info.chunkKind = lastChunkKind ?? "section";
-          lastChunkKind = null;
-        }
-        const badge = createZrrBadgeElement(info, totalPages);
-        if (!badge) {
-          continue;
-        }
-        entry.comment.parentNode?.insertBefore(badge, entry.comment);
-        entry.comment.remove();
-      }
-    });
-  }
 
 
   private buildSyncedDoclingContent(

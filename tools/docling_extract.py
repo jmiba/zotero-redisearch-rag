@@ -8,7 +8,7 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, asdict
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
@@ -151,10 +151,12 @@ class DoclingProcessingConfig:
     # PaddleX DocLayout extraction (mirrors paddle_ocr_smoke.py layout path).
     paddle_use_paddlex_layout: bool = True
     paddle_layout_model: str = "PP-DocLayout-L"
-    paddle_layout_threshold: float = 0.5
-    paddle_layout_img_size: Optional[int] = None
+    paddle_layout_threshold: float = 0.3
+    paddle_layout_img_size: Optional[int] = 6000
     paddle_layout_merge: str = "small"
-    paddle_layout_unclip: float = 1.25
+    paddle_layout_unclip: float = 1.06
+    paddle_crop_padding: int = 60
+    paddle_crop_vbias: int = 6
     paddle_layout_device: Optional[str] = None
     paddle_layout_nms: bool = True
     paddle_layout_keep_labels: str = (
@@ -3726,6 +3728,7 @@ def main() -> int:
     parser.add_argument("--doc-id", help="Document identifier")
     parser.add_argument("--out-json", help="Output JSON path")
     parser.add_argument("--out-md", help="Output markdown path")
+    parser.add_argument("--config-json", help="Optional path to a JSON config file (default: docling_config.json under the cache root)")
     parser.add_argument("--log-file", help="Optional path to write a detailed log file")
     parser.add_argument("--spellchecker-info-out", help="Optional path to write spellchecker backend info JSON")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
@@ -3960,6 +3963,67 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to set up log file {args.log_file}: {exc}")
 
+    def _resolve_config_path() -> Optional[str]:
+        if args.config_json:
+            return args.config_json
+        try:
+            if args.out_json:
+                out_dir = os.path.abspath(os.path.dirname(args.out_json))
+                root_dir = os.path.abspath(os.path.join(out_dir, os.pardir))
+                return os.path.join(root_dir, "docling_config.json")
+        except Exception:
+            return None
+        return None
+
+    def _load_config_overrides(path: Optional[str]) -> Dict[str, Any]:
+        if not path or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:
+            LOGGER.warning("Failed to read config file %s: %s", path, exc)
+        return {}
+
+    _CONFIG_FIELDS = {f.name for f in fields(DoclingProcessingConfig)}
+
+    def _maybe_write_default_config(path: Optional[str]) -> None:
+        if not path:
+            return
+        if os.path.isfile(path):
+            return
+        try:
+            default_cfg = DoclingProcessingConfig()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(asdict(default_cfg), fh, indent=2)
+            LOGGER.info("Wrote default Docling config to %s", path)
+        except Exception as exc:
+            LOGGER.warning("Failed to write default config file %s: %s", path, exc)
+
+    def _apply_config_overrides(cfg: DoclingProcessingConfig, overrides: Dict[str, Any], source: Optional[str]) -> None:
+        if not overrides:
+            return
+        applied: List[str] = []
+        for key, val in overrides.items():
+            if key in _CONFIG_FIELDS:
+                setattr(cfg, key, val)
+                applied.append(key)
+        if applied:
+            label = source or "config file"
+            LOGGER.info(
+                "Applied %d config override(s) from %s: %s",
+                len(applied),
+                label,
+                ", ".join(sorted(applied)),
+            )
+
+
+    config_path = _resolve_config_path()
+    _maybe_write_default_config(config_path)
+    config_overrides = _load_config_overrides(config_path)
 
     if not os.path.isfile(args.pdf):
         eprint(f"PDF not found: {args.pdf}")
@@ -3967,6 +4031,7 @@ def main() -> int:
 
     if args.quality_only:
         config = DoclingProcessingConfig(ocr_mode=args.ocr)
+        _apply_config_overrides(config, config_overrides, config_path)
         if args.force_ocr_low_quality:
             config.force_ocr_on_low_quality_text = True
         if args.quality_threshold is not None:
@@ -3991,6 +4056,7 @@ def main() -> int:
         return 2
 
     config = DoclingProcessingConfig(ocr_mode=args.ocr)
+    _apply_config_overrides(config, config_overrides, config_path)
     if args.force_ocr_low_quality:
         config.force_ocr_on_low_quality_text = True
     if args.quality_threshold is not None:

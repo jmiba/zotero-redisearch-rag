@@ -77,12 +77,14 @@ LAYOUT_DEFAULTS = {
     "layout_model": "PP-DocLayout-L",     # or PP-DocLayout-M / PP-DocLayout-S
     "layout_threshold": 0.3,               # keep lower-confidence boxes
     "layout_img_size": 6000,               # larger input can help two-column pages
-    "layout_merge": "large",              # keep both inner and outer boxes
-    "layout_unclip": 1.05,                  # expand boxes slightly
+    "layout_merge": "small",              # keep both inner and outer boxes
+    "layout_unclip": 1.0,                  # expand boxes slightly
     "layout_device": None,                 # e.g., "cpu" or "gpu:0"; None = PaddleX default
     "layout_nms": True,                    # enable NMS postprocessing
     "fail_on_zero_layout": True,
     "layout_recognize_boxes": True,        # run OCR inside detected layout boxes
+    "crop_padding": 50,                    # padding around cropped layout boxes
+    "crop_vbias": 0,                       # positive shifts padding downward (less top, more bottom)
 }
 
 FLAGS_DEFAULTS = {
@@ -210,6 +212,18 @@ def main() -> int:
         help="Unclip ratio to expand layout boxes (e.g., 1.2)",
     )
     parser.add_argument(
+        "--crop-padding",
+        type=int,
+        default=0,
+        help="Padding in pixels to add around cropped layout boxes (default: 0)",
+    )
+    parser.add_argument(
+        "--crop-vbias",
+        type=int,
+        default=0,
+        help="Vertical bias for padding: positive reduces top padding and increases bottom padding",
+    )
+    parser.add_argument(
         "--layout-device",
         type=str,
         default=None,
@@ -298,6 +312,10 @@ def main() -> int:
             args.layout_merge = LAYOUT_DEFAULTS["layout_merge"]
         if not _cli_provided("--layout-unclip") and args.layout_unclip is None:
             args.layout_unclip = LAYOUT_DEFAULTS["layout_unclip"]
+        if not _cli_provided("--crop-padding"):
+            args.crop_padding = LAYOUT_DEFAULTS.get("crop_padding", 0)
+        if not _cli_provided("--crop-vbias"):
+            args.crop_vbias = LAYOUT_DEFAULTS.get("crop_vbias", 0)
         if not _cli_provided("--layout-device") and args.layout_device is None:
             args.layout_device = LAYOUT_DEFAULTS["layout_device"]
         # Boolean tri-state; only apply override when parser captured None
@@ -1333,11 +1351,47 @@ def main() -> int:
                             label = rect.get("label") or "text"
                             if x0 is None or y0 is None or x1 is None or y1 is None:
                                 continue
-                            ix0 = max(0, int(x0)); iy0 = max(0, int(y0))
-                            ix1 = min(w, int(x1)); iy1 = min(h, int(y1))
-                            if ix1 <= ix0 or iy1 <= iy0:
+                            pad = int(getattr(args, "crop_padding", 0) or 0)
+                            vbias = int(getattr(args, "crop_vbias", 0) or 0)
+                            
+                            # Strict crop of the box content only (clamped to image)
+                            cx0 = max(0, int(x0)); cx1 = min(w, int(x1))
+                            cy0 = max(0, int(y0)); cy1 = min(h, int(y1))
+
+                            if cx1 <= cx0 or cy1 <= cy0:
                                 continue
-                            crop = image_obj.crop((ix0, iy0, ix1, iy1))
+
+                            # Shift crop vertically (vbias>0 moves crop downward) while preserving height
+                            box_h = cy1 - cy0
+                            if vbias:
+                                shifted_cy0 = cy0 + vbias
+                                shifted_cy0 = min(max(0, shifted_cy0), max(0, h - box_h))
+                                cy0 = shifted_cy0
+                                cy1 = min(h, cy0 + box_h)
+
+                            # Asymmetric vertical padding: reduce top / add to bottom when vbias > 0
+                            pad_top = max(0, pad - vbias)
+                            pad_bottom = max(0, pad + vbias)
+
+                            # Virtual padded coordinates (unclamped)
+                            vx0 = int(x0) - pad; vy0 = int(y0) - pad_top
+                            vx1 = int(x1) + pad; vy1 = int(y1) + pad_bottom
+                            
+                            dst_w = vx1 - vx0
+                            dst_h = vy1 - vy0
+                            
+                            # White canvas (passepartout)
+                            canvas = Image.new("RGB", (dst_w, dst_h), (255, 255, 255))
+                            
+                            # Paste strict content at correct offset
+                            dx = cx0 - vx0
+                            dy = cy0 - vy0
+                            src_crop = image_obj.crop((cx0, cy0, cx1, cy1))
+                            canvas.paste(src_crop, (dx, dy))
+                            crop = canvas
+                            
+                            # Use virtual coordinates for saving and OCR mapping
+                            ix0, iy0, ix1, iy1 = vx0, vy0, vx1, vy1
                             _save_crop(crop, ix0, iy0, ix1, iy1)
                         except Exception:
                             continue

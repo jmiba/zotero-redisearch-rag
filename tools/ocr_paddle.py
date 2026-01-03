@@ -39,6 +39,8 @@ def _paddlex_layout_ocr_pages(
     layout_img_size = getattr(config, "paddle_layout_img_size", None)
     layout_merge = getattr(config, "paddle_layout_merge", "small")
     layout_unclip = getattr(config, "paddle_layout_unclip", 1.05)
+    crop_padding = int(getattr(config, "paddle_crop_padding", 0))
+    crop_vbias = int(getattr(config, "paddle_crop_vbias", 0))
     layout_device = getattr(config, "paddle_layout_device", None)
     layout_nms = bool(getattr(config, "paddle_layout_nms", True))
     layout_keep_labels = str(
@@ -974,11 +976,48 @@ def _paddlex_layout_ocr_pages(
                     label = rect.get("label") or "text"
                     if x0 is None or y0 is None or x1 is None or y1 is None:
                         continue
-                    ix0 = max(0, int(x0)); iy0 = max(0, int(y0))
-                    ix1 = min(w, int(x1)); iy1 = min(h, int(y1))
-                    if ix1 <= ix0 or iy1 <= iy0:
+                    
+                    # Strict crop of the box content only (clamped to image)
+                    cx0 = max(0, int(x0)); cx1 = min(w, int(x1))
+                    cy0 = max(0, int(y0)); cy1 = min(h, int(y1))
+
+                    if cx1 <= cx0 or cy1 <= cy0:
                         continue
-                    crop = image_obj.crop((ix0, iy0, ix1, iy1))
+
+                    # Shift crop vertically (vbias>0 moves crop downward) while preserving height
+                    box_h = cy1 - cy0
+                    if crop_vbias:
+                        shifted_cy0 = cy0 + crop_vbias
+                        # Clamp start so height fits in image
+                        shifted_cy0 = min(max(0, shifted_cy0), max(0, h - box_h))
+                        cy0 = shifted_cy0
+                        cy1 = min(h, cy0 + box_h)
+
+                    # Asymmetric vertical padding: reduce top / add to bottom when crop_vbias > 0
+                    pad_top = max(0, crop_padding - crop_vbias)
+                    pad_bottom = max(0, crop_padding + crop_vbias)
+
+                    # Virtual padded coordinates (unclamped)
+                    vx0 = int(x0) - crop_padding
+                    vx1 = int(x1) + crop_padding
+                    vy0 = int(y0) - pad_top
+                    vy1 = int(y1) + pad_bottom
+                    
+                    dst_w = vx1 - vx0
+                    dst_h = vy1 - vy0
+                    
+                    # White canvas (passepartout)
+                    canvas = _PILImage.new("RGB", (dst_w, dst_h), (255, 255, 255))
+                    
+                    # Paste strict content at correct offset
+                    dx = cx0 - vx0
+                    dy = cy0 - vy0
+                    src_crop = image_obj.crop((cx0, cy0, cx1, cy1))
+                    canvas.paste(src_crop, (dx, dy))
+                    crop = canvas
+                    
+                    # Use virtual coordinates for saving and OCR mapping
+                    ix0, iy0, ix1, iy1 = vx0, vy0, vx1, vy1
                     _save_crop(crop, ix0, iy0, ix1, iy1)
                 except Exception:
                     continue
