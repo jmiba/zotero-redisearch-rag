@@ -20,6 +20,9 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+# Test data
+tests/_ocr_crops/
+
 # Node
 node_modules/
 npm-debug.log*

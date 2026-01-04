@@ -75,10 +75,10 @@ GENERAL_DEFAULTS = {
 
 LAYOUT_DEFAULTS = {
     "layout_model": "PP-DocLayout-L",     # or PP-DocLayout-M / PP-DocLayout-S
-    "layout_threshold": 0.3,               # keep lower-confidence boxes
+    "layout_threshold": 0.5,               # keep lower-confidence boxes
     "layout_img_size": 6000,               # larger input can help two-column pages
-    "layout_merge": "small",              # keep both inner and outer boxes
-    "layout_unclip": 1.0,                  # expand boxes slightly
+    "layout_merge": "large",              # keep both inner and outer boxes
+    "layout_unclip": 1.07,                  # expand boxes slightly
     "layout_device": None,                 # e.g., "cpu" or "gpu:0"; None = PaddleX default
     "layout_nms": True,                    # enable NMS postprocessing
     "fail_on_zero_layout": True,

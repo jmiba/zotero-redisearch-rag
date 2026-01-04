@@ -202,9 +202,9 @@ class DoclingProcessingConfig:
     paddle_layout_threshold: float = 0.3
     paddle_layout_img_size: Optional[int] = 6000
     paddle_layout_merge: str = "small"
-    paddle_layout_unclip: float = 1.01
-    paddle_crop_padding: int = 65
-    paddle_crop_vbias: int = 20
+    paddle_layout_unclip: float = 1.06
+    paddle_crop_padding: int = 60
+    paddle_crop_vbias: int = 6
     paddle_layout_device: Optional[str] = None
     paddle_layout_nms: bool = True
     paddle_layout_keep_labels: str = (
