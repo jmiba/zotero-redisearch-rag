@@ -2080,6 +2080,9 @@ def postprocess_text_light(
     if config.enable_dictionary_correction or hs is not None:
         cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
     cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
+    if should_apply_llm_correction(cleaned, config) and config.llm_correct:
+        LOGGER.info("LLM cleanup applied (light mode)")
+        cleaned = config.llm_correct(cleaned)
     return cleaned
 
 def export_markdown(doc: Any) -> str:
