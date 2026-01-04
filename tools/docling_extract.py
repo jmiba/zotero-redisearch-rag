@@ -12,7 +12,7 @@ from dataclasses import dataclass, fields, asdict
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
-from ocr_paddle import ocr_pages_with_paddle, ocr_pages_with_paddle_structure
+from ocr_paddle import ocr_pages_with_paddle, ocr_pages_with_paddle_structure, ocr_pages_with_paddle_vl
 from ocr_tesseract import find_tesseract_path, ocr_pages_with_tesseract
 
 # Reduce noisy warnings and route them to logging
@@ -129,7 +129,7 @@ class DoclingProcessingConfig:
     boilerplate_edge_lines: int = 3
     boilerplate_ngram_size: int = 3
     boilerplate_near_dup_threshold: float = 0.82
-    postprocess_markdown: bool = True
+    postprocess_markdown: bool = False
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
@@ -141,7 +141,7 @@ class DoclingProcessingConfig:
     paddle_use_textline_orientation: bool = True
     # Enable PP-StructureV3 layout parsing by default to mirror the smoke test's
     # layout-first approach. Can be disabled via CLI: --no-paddle-structure-v3
-    paddle_use_structure_v3: bool = True
+    paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
     paddle_structure_footer_ratio: float = 0.05
@@ -153,7 +153,7 @@ class DoclingProcessingConfig:
     paddle_layout_model: str = "PP-DocLayout-L"
     paddle_layout_threshold: float = 0.3
     paddle_layout_img_size: Optional[int] = 6000
-    paddle_layout_merge: str = "small"
+    paddle_layout_merge: str = "large"
     paddle_layout_unclip: float = 1.06
     paddle_crop_padding: int = 60
     paddle_crop_vbias: int = 6
@@ -168,6 +168,18 @@ class DoclingProcessingConfig:
     paddle_layout_save_crops: Optional[str] = "../../../../.zotero-redisearch-rag/tmp/paddle_crops"
     paddle_dump: bool = False
     paddle_layout_markdown_out: Optional[str] = "../../../../.zotero-redisearch-rag/tmp/paddle_output.md"
+    # PaddleOCR-VL (optional, requires paddleocr[doc-parser])
+    paddle_use_vl: bool = True
+    paddle_vl_device: Optional[str] = None
+    paddle_vl_rec_backend: Optional[str] = None
+    paddle_vl_rec_server_url: Optional[str] = None
+    paddle_vl_rec_max_concurrency: Optional[int] = None
+    paddle_vl_rec_api_key: Optional[str] = None
+    paddle_vl_use_layout_detection: Optional[bool] = True
+    paddle_vl_use_chart_recognition: Optional[bool] = True
+    paddle_vl_format_block_content: Optional[bool] = True
+    paddle_vl_prompt_label: Optional[str] = None
+    paddle_vl_use_queues: Optional[bool] = True
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -1127,7 +1139,10 @@ def decide_ocr_route(
     low_quality = is_low_quality(quality, config)
     force_external_for_paddle_layout = bool(
         config.prefer_ocr_engine == "paddle"
-        and getattr(config, "paddle_use_paddlex_layout", False)
+        and (
+            getattr(config, "paddle_use_paddlex_layout", False)
+            or getattr(config, "paddle_use_vl", False)
+        )
         and config.ocr_mode != "off"
     )
     if config.ocr_mode == "off":
@@ -2047,6 +2062,24 @@ def postprocess_text(
             label = f"LLM cleanup ({progress_label})" if progress_label else "LLM cleanup..."
             progress_cb(100, "llm_cleanup", label)
         cleaned = config.llm_correct(cleaned)
+    return cleaned
+
+def postprocess_text_light(
+    text: str,
+    config: DoclingProcessingConfig,
+    languages: str,
+    wordlist: Sequence[str],
+    for_markdown: bool = False,
+) -> str:
+    if not text:
+        return text
+    cleaned = dehyphenate_text(text)
+    cleaned = replace_ligatures(cleaned)
+    cleaned = normalize_display_markdown(cleaned) if for_markdown else normalize_whitespace(cleaned)
+    hs = build_spellchecker_for_languages(config, languages) if config.enable_hunspell else None
+    if config.enable_dictionary_correction or hs is not None:
+        cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
+    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
     return cleaned
 
 def export_markdown(doc: Any) -> str:
@@ -3150,7 +3183,13 @@ def run_external_ocr_pages(
         label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
         # Use a neutral initializing message; inner routines will promptly override with page counters
         progress_cb(progress_base, "ocr", f"{label} initializing")
-    if engine == "paddle" and config.paddle_use_structure_v3:
+    if engine == "paddle" and config.paddle_use_vl:
+        LOGGER.info(
+            "External OCR starting: engine=%s (PaddleOCR-VL), dpi=%d",
+            engine,
+            effective_dpi,
+        )
+    elif engine == "paddle" and config.paddle_use_structure_v3:
         LOGGER.info(
             "External OCR starting: engine=%s (PP-Structure), dpi=%d",
             engine,
@@ -3205,6 +3244,33 @@ def run_external_ocr_pages(
                 engine,
             )
     if engine == "paddle":
+        if config.paddle_use_vl:
+            try:
+                pages, stats = ocr_pages_with_paddle_vl(
+                    images,
+                    normalize_languages_for_engine(languages, engine),
+                    config,
+                    helpers,
+                    progress_cb,
+                    progress_base,
+                    progress_span,
+                )
+                if ocr_pages_text_chars(pages) == 0:
+                    LOGGER.warning(
+                        "PaddleOCR-VL returned empty text; falling back to PaddleOCR."
+                    )
+                    return ocr_pages_with_paddle(
+                        images,
+                        normalize_languages_for_engine(languages, engine),
+                        config,
+                        helpers,
+                        progress_cb,
+                        progress_base,
+                        progress_span,
+                    )
+                return pages, stats
+            except Exception as exc:
+                LOGGER.warning("PaddleOCR-VL failed; falling back to PaddleOCR: %s", exc)
         if config.paddle_use_structure_v3:
             try:
                 pages, stats = ocr_pages_with_paddle_structure(
@@ -3778,6 +3844,101 @@ def main() -> int:
         help="Disable PaddleX DocLayout path for Paddle OCR.",
     )
     parser.add_argument(
+        "--paddle-vl",
+        dest="paddle_use_vl",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL pipeline for Paddle OCR.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl",
+        dest="paddle_use_vl",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL pipeline for Paddle OCR.",
+    )
+    parser.add_argument(
+        "--paddle-vl-device",
+        help="PaddleOCR-VL device (e.g., cpu, gpu:0).",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-backend",
+        help="PaddleOCR-VL recognition backend (e.g., vllm-server).",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-server-url",
+        help="PaddleOCR-VL recognition server URL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-max-concurrency",
+        type=int,
+        help="PaddleOCR-VL max concurrency for recognition server.",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-api-key",
+        help="PaddleOCR-VL recognition server API key.",
+    )
+    parser.add_argument(
+        "--paddle-vl-use-layout-detection",
+        dest="paddle_vl_use_layout_detection",
+        action="store_true",
+        default=None,
+        help="Enable layout detection in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-use-layout-detection",
+        dest="paddle_vl_use_layout_detection",
+        action="store_false",
+        default=None,
+        help="Disable layout detection in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-use-chart-recognition",
+        dest="paddle_vl_use_chart_recognition",
+        action="store_true",
+        default=None,
+        help="Enable chart recognition in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-use-chart-recognition",
+        dest="paddle_vl_use_chart_recognition",
+        action="store_false",
+        default=None,
+        help="Disable chart recognition in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-format-block-content",
+        dest="paddle_vl_format_block_content",
+        action="store_true",
+        default=None,
+        help="Format PaddleOCR-VL block content as markdown.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-format-block-content",
+        dest="paddle_vl_format_block_content",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL markdown formatting.",
+    )
+    parser.add_argument(
+        "--paddle-vl-prompt-label",
+        help="PaddleOCR-VL prompt label (ocr, formula, table, chart).",
+    )
+    parser.add_argument(
+        "--paddle-vl-use-queues",
+        dest="paddle_vl_use_queues",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL internal queues for large inputs.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-use-queues",
+        dest="paddle_vl_use_queues",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL internal queues.",
+    )
+    parser.add_argument(
         "--paddle-layout-model",
         help="PaddleX layout model (e.g., PP-DocLayout-L).",
     )
@@ -4073,6 +4234,28 @@ def main() -> int:
         config.paddle_target_max_side_px = args.paddle_target_max_side_px
     if args.paddle_use_paddlex_layout is not None:
         config.paddle_use_paddlex_layout = args.paddle_use_paddlex_layout
+    if args.paddle_use_vl is not None:
+        config.paddle_use_vl = args.paddle_use_vl
+    if args.paddle_vl_device:
+        config.paddle_vl_device = args.paddle_vl_device
+    if args.paddle_vl_rec_backend:
+        config.paddle_vl_rec_backend = args.paddle_vl_rec_backend
+    if args.paddle_vl_rec_server_url:
+        config.paddle_vl_rec_server_url = args.paddle_vl_rec_server_url
+    if args.paddle_vl_rec_max_concurrency is not None:
+        config.paddle_vl_rec_max_concurrency = args.paddle_vl_rec_max_concurrency
+    if args.paddle_vl_rec_api_key:
+        config.paddle_vl_rec_api_key = args.paddle_vl_rec_api_key
+    if args.paddle_vl_use_layout_detection is not None:
+        config.paddle_vl_use_layout_detection = args.paddle_vl_use_layout_detection
+    if args.paddle_vl_use_chart_recognition is not None:
+        config.paddle_vl_use_chart_recognition = args.paddle_vl_use_chart_recognition
+    if args.paddle_vl_format_block_content is not None:
+        config.paddle_vl_format_block_content = args.paddle_vl_format_block_content
+    if args.paddle_vl_prompt_label:
+        config.paddle_vl_prompt_label = args.paddle_vl_prompt_label
+    if args.paddle_vl_use_queues is not None:
+        config.paddle_vl_use_queues = args.paddle_vl_use_queues
     if args.paddle_layout_model:
         config.paddle_layout_model = args.paddle_layout_model
     if args.paddle_layout_threshold is not None:
@@ -4185,13 +4368,31 @@ def main() -> int:
             except Exception as exc:
                 LOGGER.warning("Failed to write Paddle layout markdown to %s: %s", layout_md_path, exc)
         prefer_layout_markdown = external_ocr_used and layout_markdown_available
+        layout_engine_used = bool(conversion.metadata.get("layout_used")) or bool(conversion.metadata.get("layout_model"))
+        layout_engine_configured = bool(
+            external_ocr_used
+            and (
+                getattr(config, "paddle_use_vl", False)
+                or getattr(config, "paddle_use_structure_v3", False)
+                or getattr(config, "paddle_use_paddlex_layout", False)
+            )
+        )
+        layout_engine_active = layout_markdown_available or layout_engine_used or layout_engine_configured
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        should_postprocess = config.enable_post_correction and not prefer_layout_markdown
-        if config.enable_post_correction and prefer_layout_markdown:
+        postprocess_mode = "none"
+        if config.enable_post_correction:
+            if layout_engine_active:
+                postprocess_mode = "light"
+            elif not prefer_layout_markdown:
+                postprocess_mode = "full"
+        if config.enable_post_correction and postprocess_mode == "none":
             LOGGER.info("Skipping OCR post-processing to preserve Paddle layout output.")
-        if should_postprocess:
+        elif postprocess_mode == "light":
+            LOGGER.info("Using light OCR post-processing for layout output.")
+        if postprocess_mode in ("full", "light"):
             wordlist = prepare_dictionary_words(config)
+        if postprocess_mode == "full":
             allow_missing_space = ocr_used
             def safe_postprocess(text: str, label: Optional[str]) -> str:
                 processed = postprocess_text(
@@ -4209,6 +4410,14 @@ def main() -> int:
                 return processed
 
             postprocess_fn = lambda text, label=None: safe_postprocess(text, label)
+        elif postprocess_mode == "light":
+            postprocess_fn = lambda text, label=None: postprocess_text_light(
+                text,
+                config,
+                languages,
+                wordlist,
+                for_markdown=False,
+            )
 
         if postprocess_fn:
             total_pages = len(pages)
@@ -4226,20 +4435,28 @@ def main() -> int:
 
         markdown = conversion.markdown
         original_markdown = markdown
-        if config.enable_post_correction and config.postprocess_markdown and should_postprocess:
-            wordlist = prepare_dictionary_words(config)
-            allow_missing_space = ocr_used
+        if config.enable_post_correction and config.postprocess_markdown and postprocess_mode in ("full", "light"):
             if progress_cb:
                 progress_cb(100, "postprocess_markdown", "Postprocess markdown...")
-            processed_markdown = postprocess_text(
-                markdown,
-                config,
-                languages,
-                wordlist,
-                allow_missing_space=allow_missing_space,
-                progress_cb=progress_cb,
-                progress_label="markdown",
-            )
+            if postprocess_mode == "full":
+                allow_missing_space = ocr_used
+                processed_markdown = postprocess_text(
+                    markdown,
+                    config,
+                    languages,
+                    wordlist,
+                    allow_missing_space=allow_missing_space,
+                    progress_cb=progress_cb,
+                    progress_label="markdown",
+                )
+            else:
+                processed_markdown = postprocess_text_light(
+                    markdown,
+                    config,
+                    languages,
+                    wordlist,
+                    for_markdown=True,
+                )
             if original_markdown.strip() and not processed_markdown.strip():
                 LOGGER.warning("Postprocess removed all markdown; keeping original.")
                 markdown = original_markdown
@@ -4272,6 +4489,38 @@ def main() -> int:
             return 2
 
         LOGGER.info("Docling output: pages=%d, markdown_chars=%d", len(pages), len(markdown))
+
+        layout_images = conversion.metadata.get("layout_markdown_images")
+        if isinstance(layout_images, dict):
+            conversion.metadata["layout_markdown_image_paths"] = sorted(
+                path for path in layout_images.keys() if isinstance(path, str) and path
+            )
+            conversion.metadata.pop("layout_markdown_images", None)
+            if args.out_md:
+                out_md_dir = os.path.dirname(args.out_md)
+                for rel_path, image_obj in layout_images.items():
+                    if not isinstance(rel_path, str) or not rel_path:
+                        continue
+                    target_path = rel_path
+                    if not os.path.isabs(rel_path):
+                        target_path = os.path.join(out_md_dir, rel_path)
+                    try:
+                        target_dir = os.path.dirname(target_path)
+                        if target_dir:
+                            os.makedirs(target_dir, exist_ok=True)
+                        if hasattr(image_obj, "save"):
+                            image_obj.save(target_path)
+                        else:
+                            try:
+                                import numpy as _np
+                                from PIL import Image as _PILImage
+
+                                if isinstance(image_obj, _np.ndarray):
+                                    _PILImage.fromarray(image_obj).save(target_path)
+                            except Exception:
+                                continue
+                    except Exception as exc:
+                        LOGGER.warning("Failed to save layout image %s: %s", rel_path, exc)
 
         try:
             with open(args.out_md, "w", encoding="utf-8") as handle:

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
-from ocr_paddle import ocr_pages_with_paddle, ocr_pages_with_paddle_structure
+from ocr_paddle import ocr_pages_with_paddle, ocr_pages_with_paddle_structure, ocr_pages_with_paddle_vl
 from ocr_tesseract import find_tesseract_path, ocr_pages_with_tesseract
 
 # Reduce noisy warnings and route them to logging
@@ -163,6 +163,18 @@ class DoclingProcessingConfig:
     )
     paddle_layout_recognize_boxes: bool = True
     paddle_layout_fail_on_zero: bool = False
+    # PaddleOCR-VL (optional, requires paddleocr[doc-parser])
+    paddle_use_vl: bool = False
+    paddle_vl_device: Optional[str] = None
+    paddle_vl_rec_backend: Optional[str] = None
+    paddle_vl_rec_server_url: Optional[str] = None
+    paddle_vl_rec_max_concurrency: Optional[int] = None
+    paddle_vl_rec_api_key: Optional[str] = None
+    paddle_vl_use_layout_detection: Optional[bool] = None
+    paddle_vl_use_chart_recognition: Optional[bool] = None
+    paddle_vl_format_block_content: Optional[bool] = None
+    paddle_vl_prompt_label: Optional[str] = None
+    paddle_vl_use_queues: Optional[bool] = None
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -1059,7 +1071,10 @@ def decide_ocr_route(
     low_quality = is_low_quality(quality, config)
     force_external_for_paddle_layout = bool(
         config.prefer_ocr_engine == "paddle"
-        and getattr(config, "paddle_use_paddlex_layout", False)
+        and (
+            getattr(config, "paddle_use_paddlex_layout", False)
+            or getattr(config, "paddle_use_vl", False)
+        )
         and config.ocr_mode != "off"
     )
     if config.ocr_mode == "off":
@@ -3047,7 +3062,13 @@ def run_external_ocr_pages(
     if progress_cb and progress_span > 0:
         label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
         progress_cb(progress_base, "ocr", f"{label} starting")
-    if engine == "paddle" and config.paddle_use_structure_v3:
+    if engine == "paddle" and config.paddle_use_vl:
+        LOGGER.info(
+            "External OCR starting: engine=%s (PaddleOCR-VL), dpi=%d",
+            engine,
+            effective_dpi,
+        )
+    elif engine == "paddle" and config.paddle_use_structure_v3:
         LOGGER.info(
             "External OCR starting: engine=%s (PP-Structure), dpi=%d",
             engine,
@@ -3080,6 +3101,33 @@ def run_external_ocr_pages(
     images = render_pdf_pages(pdf_path, effective_dpi)
     LOGGER.info("External OCR rendered pages: %d", len(images))
     if engine == "paddle":
+        if config.paddle_use_vl:
+            try:
+                pages, stats = ocr_pages_with_paddle_vl(
+                    images,
+                    normalize_languages_for_engine(languages, engine),
+                    config,
+                    helpers,
+                    progress_cb,
+                    progress_base,
+                    progress_span,
+                )
+                if ocr_pages_text_chars(pages) == 0:
+                    LOGGER.warning(
+                        "PaddleOCR-VL returned empty text; falling back to PaddleOCR."
+                    )
+                    return ocr_pages_with_paddle(
+                        images,
+                        normalize_languages_for_engine(languages, engine),
+                        config,
+                        helpers,
+                        progress_cb,
+                        progress_base,
+                        progress_span,
+                    )
+                return pages, stats
+            except Exception as exc:
+                LOGGER.warning("PaddleOCR-VL failed; falling back to PaddleOCR: %s", exc)
         if config.paddle_use_structure_v3:
             try:
                 return ocr_pages_with_paddle_structure(
@@ -3635,6 +3683,101 @@ def main() -> int:
         help="Disable PaddleX DocLayout path for Paddle OCR.",
     )
     parser.add_argument(
+        "--paddle-vl",
+        dest="paddle_use_vl",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL pipeline for Paddle OCR.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl",
+        dest="paddle_use_vl",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL pipeline for Paddle OCR.",
+    )
+    parser.add_argument(
+        "--paddle-vl-device",
+        help="PaddleOCR-VL device (e.g., cpu, gpu:0).",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-backend",
+        help="PaddleOCR-VL recognition backend (e.g., vllm-server).",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-server-url",
+        help="PaddleOCR-VL recognition server URL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-max-concurrency",
+        type=int,
+        help="PaddleOCR-VL max concurrency for recognition server.",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-api-key",
+        help="PaddleOCR-VL recognition server API key.",
+    )
+    parser.add_argument(
+        "--paddle-vl-use-layout-detection",
+        dest="paddle_vl_use_layout_detection",
+        action="store_true",
+        default=None,
+        help="Enable layout detection in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-use-layout-detection",
+        dest="paddle_vl_use_layout_detection",
+        action="store_false",
+        default=None,
+        help="Disable layout detection in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-use-chart-recognition",
+        dest="paddle_vl_use_chart_recognition",
+        action="store_true",
+        default=None,
+        help="Enable chart recognition in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-use-chart-recognition",
+        dest="paddle_vl_use_chart_recognition",
+        action="store_false",
+        default=None,
+        help="Disable chart recognition in PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-format-block-content",
+        dest="paddle_vl_format_block_content",
+        action="store_true",
+        default=None,
+        help="Format PaddleOCR-VL block content as markdown.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-format-block-content",
+        dest="paddle_vl_format_block_content",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL markdown formatting.",
+    )
+    parser.add_argument(
+        "--paddle-vl-prompt-label",
+        help="PaddleOCR-VL prompt label (ocr, formula, table, chart).",
+    )
+    parser.add_argument(
+        "--paddle-vl-use-queues",
+        dest="paddle_vl_use_queues",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL internal queues for large inputs.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-use-queues",
+        dest="paddle_vl_use_queues",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL internal queues.",
+    )
+    parser.add_argument(
         "--paddle-layout-model",
         help="PaddleX layout model (e.g., PP-DocLayout-L).",
     )
@@ -3842,6 +3985,28 @@ def main() -> int:
         config.paddle_target_max_side_px = args.paddle_target_max_side_px
     if args.paddle_use_paddlex_layout is not None:
         config.paddle_use_paddlex_layout = args.paddle_use_paddlex_layout
+    if args.paddle_use_vl is not None:
+        config.paddle_use_vl = args.paddle_use_vl
+    if args.paddle_vl_device:
+        config.paddle_vl_device = args.paddle_vl_device
+    if args.paddle_vl_rec_backend:
+        config.paddle_vl_rec_backend = args.paddle_vl_rec_backend
+    if args.paddle_vl_rec_server_url:
+        config.paddle_vl_rec_server_url = args.paddle_vl_rec_server_url
+    if args.paddle_vl_rec_max_concurrency is not None:
+        config.paddle_vl_rec_max_concurrency = args.paddle_vl_rec_max_concurrency
+    if args.paddle_vl_rec_api_key:
+        config.paddle_vl_rec_api_key = args.paddle_vl_rec_api_key
+    if args.paddle_vl_use_layout_detection is not None:
+        config.paddle_vl_use_layout_detection = args.paddle_vl_use_layout_detection
+    if args.paddle_vl_use_chart_recognition is not None:
+        config.paddle_vl_use_chart_recognition = args.paddle_vl_use_chart_recognition
+    if args.paddle_vl_format_block_content is not None:
+        config.paddle_vl_format_block_content = args.paddle_vl_format_block_content
+    if args.paddle_vl_prompt_label:
+        config.paddle_vl_prompt_label = args.paddle_vl_prompt_label
+    if args.paddle_vl_use_queues is not None:
+        config.paddle_vl_use_queues = args.paddle_vl_use_queues
     if args.paddle_layout_model:
         config.paddle_layout_model = args.paddle_layout_model
     if args.paddle_layout_threshold is not None:
@@ -4018,6 +4183,38 @@ def main() -> int:
             return 2
 
         LOGGER.info("Docling output: pages=%d, markdown_chars=%d", len(pages), len(markdown))
+
+        layout_images = conversion.metadata.get("layout_markdown_images")
+        if isinstance(layout_images, dict):
+            conversion.metadata["layout_markdown_image_paths"] = sorted(
+                path for path in layout_images.keys() if isinstance(path, str) and path
+            )
+            conversion.metadata.pop("layout_markdown_images", None)
+            if args.out_md:
+                out_md_dir = os.path.dirname(args.out_md)
+                for rel_path, image_obj in layout_images.items():
+                    if not isinstance(rel_path, str) or not rel_path:
+                        continue
+                    target_path = rel_path
+                    if not os.path.isabs(rel_path):
+                        target_path = os.path.join(out_md_dir, rel_path)
+                    try:
+                        target_dir = os.path.dirname(target_path)
+                        if target_dir:
+                            os.makedirs(target_dir, exist_ok=True)
+                        if hasattr(image_obj, "save"):
+                            image_obj.save(target_path)
+                        else:
+                            try:
+                                import numpy as _np
+                                from PIL import Image as _PILImage
+
+                                if isinstance(image_obj, _np.ndarray):
+                                    _PILImage.fromarray(image_obj).save(target_path)
+                            except Exception:
+                                continue
+                    except Exception as exc:
+                        LOGGER.warning("Failed to save layout image %s: %s", rel_path, exc)
 
         try:
             with open(args.out_md, "w", encoding="utf-8") as handle:

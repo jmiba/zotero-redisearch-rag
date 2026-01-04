@@ -4,14 +4,14 @@ PaddleOCR smoke test for a PDF or an image.
 
 How to run
 - From repository root:
-    - PDF: python tests/paddle_ocr_smoke.py --pdf /path/to/file.pdf [--dpi 300] [--pages 3] [--max-side 3500] [--dump] [--preview-len 500] [--print-text] [--out out.txt]
-    - Image: python tests/paddle_ocr_smoke.py --image /path/to/file.png [--max-side 3500] [--dump] [--preview-len 500] [--print-text] [--out out.txt]
+    - PDF: python tests/paddle_ocr_smoke.py --pdf /path/to/file.pdf [--dpi 300] [--pages 2] [--max-side 3000] [--dump] [--preview-len 500] [--print-text] [--out out.txt]
+    - Image: python tests/paddle_ocr_smoke.py --image /path/to/file.png [--max-side 3000] [--dump] [--preview-len 500] [--print-text] [--out out.txt]
 
 Options
 - --pdf: Path to a PDF to OCR. When set, the script renders the first N pages with pdf2image and runs PaddleOCR. Mutually exclusive with --image.
 - --image: Path to a single image (PNG/JPG/TIFF, etc.) to OCR. Mutually exclusive with --pdf.
 - --dpi: Maximum rasterization DPI for PDF pages (default 300). The effective DPI may be reduced when --max-side is set to avoid oversize images.
-- --pages: Number of first pages to OCR from the PDF (default 3). Automatically capped to the total page count.
+- --pages: Number of first pages to OCR from the PDF (default 2). Automatically capped to the total page count.
 - --max-side: Maximum pixel length of the longest side of the rendered page/image. Behavior:
     - PDF: target_dpi = max-side * 72 / max(page_width_points, page_height_points); effective_dpi = min(--dpi, target_dpi).
     - Image: the image is downscaled so max(width, height) <= max-side (Lanczos filter).
@@ -20,7 +20,8 @@ Options
 - --print-text: Print the full OCR text to stdout.
 - --out: Write the full OCR text to the specified file path.
 - --out-md: Write layout-labeled markdown output (only when layout OCR is used).
-- --pp-structure-v3: Use a layout pipeline instead of plain OCR (PaddleX layout first), with plain OCR fallback for text. Requires extra deps (cv2, shapely, pyclipper, paddlex).
+- --pp-structure-v3: Use a layout pipeline instead of plain OCR (PaddleX layout first), with plain OCR fallback for text. Requires extra deps (cv2, shapely, pyclipper, paddlex). Default off unless enabled explicitly.
+- --paddle-vl: Use PaddleOCR-VL (PaddleOCRVL) end-to-end pipeline instead of PaddleOCR/PP-Structure. Default on.
 
 OCR toggles
 - --doc-orientation / --no-doc-orientation: Enable/disable document orientation classification before OCR (default overridden in script defaults).
@@ -37,13 +38,29 @@ Layout tuning (with --pp-structure-v3)
 - --layout-nms: Enable NMS in layout post-processing.
  - --fail-on-zero-layout: Exit immediately if zero layout detections are produced.
 
+PaddleOCR-VL options (with --paddle-vl)
+- --paddle-vl-device: Inference device (cpu, gpu:0, etc.).
+- --paddle-vl-rec-backend: Recognition backend (e.g., vllm-server).
+- --paddle-vl-rec-server-url: Recognition server URL.
+- --paddle-vl-rec-max-concurrency: Max server concurrency.
+- --paddle-vl-rec-api-key: Recognition server API key.
+- --paddle-vl-use-layout-detection / --no-paddle-vl-use-layout-detection.
+- --paddle-vl-use-chart-recognition / --no-paddle-vl-use-chart-recognition.
+- --paddle-vl-format-block-content / --no-paddle-vl-format-block-content.
+- --paddle-vl-use-queues / --no-paddle-vl-use-queues.
+- --paddle-vl-prompt-label: Prompt label (ocr, formula, table, chart): If not forcing any prompt label for PaddleOCR‑VL, it uses its built‑in default. If you set it to a string like "ocr", "table", "formula", or "chart", the VL model will bias the prompt toward that task (and it only takes effect when use_layout_detection=False, per the PaddleOCR‑VL docs).
+
 Examples
 - python tests/paddle_ocr_smoke.py --pdf sample.pdf --pages 2 --print-text
 - python tests/paddle_ocr_smoke.py --image sample.png --dump --preview-len 300
+- python tests/paddle_ocr_smoke.py --pdf sample.pdf --paddle-vl --print-text
 
 Notes
 - Run inside your plugin virtualenv if you created one (pip install -r requirements.txt).
 - Requires: paddleocr, pillow, numpy; pdf2image for PDFs. On macOS, install Poppler for pdf2image (e.g., brew install poppler).
+- PaddleOCR-VL requires paddleocr[doc-parser].
+- PaddleOCR-VL markdown images are saved alongside --out-md output when available.
+- Defaults: --paddle-vl enabled; --pp-structure-v3 disabled; --dump enabled; --out-md -> tests/_ocr_output.md; --save-crops -> tests/_ocr_crops.
 - Default OCR language is English (lang="en"). To test another language, adjust ocr_kwargs["lang"].
 """
 import argparse
@@ -68,8 +85,8 @@ GENERAL_DEFAULTS = {
     "pages": 2,
     "max_side": 3000,
     "preview_len": 500,
-    "doc_orientation": False,
-    "doc_unwarping": False,
+    "doc_orientation": True,
+    "doc_unwarping": True,
     "textline_orientation": True,
 }
 
@@ -87,9 +104,24 @@ LAYOUT_DEFAULTS = {
     "crop_vbias": 0,                       # positive shifts padding downward (less top, more bottom)
 }
 
+VL_DEFAULTS = {
+    "paddle_vl_device": None,
+    "paddle_vl_rec_backend": None,
+    "paddle_vl_rec_server_url": None,
+    "paddle_vl_rec_max_concurrency": None,
+    "paddle_vl_rec_api_key": None,
+    "paddle_vl_use_layout_detection": True,
+    "paddle_vl_use_chart_recognition": True,
+    "paddle_vl_format_block_content": True,
+    "paddle_vl_use_queues": True,
+    "paddle_vl_prompt_label": None,
+}
+
 FLAGS_DEFAULTS = {
-    # Enable layout path by default unless CLI overrides
-    "pp_structure_v3": True,
+    # Enable PaddleOCR-VL by default unless CLI overrides
+    "paddle_vl": True,
+    # Disable layout path by default unless CLI overrides
+    "pp_structure_v3": False,
     # Enable dump output by default unless CLI overrides
     "dump": True,
     # Default path to save crops under the tests folder
@@ -167,6 +199,104 @@ def main() -> int:
             action="store_true",
             help="Use PP-StructureV3 layout detection pipeline for OCR",
         )
+    if bool_action is not None:
+        parser.add_argument(
+            "--paddle-vl",
+            dest="paddle_vl",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Enable/disable PaddleOCR-VL pipeline for OCR",
+        )
+    else:
+        parser.add_argument(
+            "--paddle-vl",
+            dest="paddle_vl",
+            action="store_true",
+            help="Use PaddleOCR-VL pipeline for OCR",
+        )
+    parser.add_argument(
+        "--paddle-vl-device",
+        help="PaddleOCR-VL device (e.g., cpu, gpu:0).",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-backend",
+        help="PaddleOCR-VL recognition backend (e.g., vllm-server).",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-server-url",
+        help="PaddleOCR-VL recognition server URL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-max-concurrency",
+        type=int,
+        help="PaddleOCR-VL max concurrency for recognition server.",
+    )
+    parser.add_argument(
+        "--paddle-vl-rec-api-key",
+        help="PaddleOCR-VL recognition server API key.",
+    )
+    try:
+        bool_action = argparse.BooleanOptionalAction  # type: ignore[attr-defined]
+    except Exception:
+        bool_action = None
+    if bool_action is not None:
+        parser.add_argument(
+            "--paddle-vl-use-layout-detection",
+            dest="paddle_vl_use_layout_detection",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Enable/disable layout detection in PaddleOCR-VL.",
+        )
+        parser.add_argument(
+            "--paddle-vl-use-chart-recognition",
+            dest="paddle_vl_use_chart_recognition",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Enable/disable chart recognition in PaddleOCR-VL.",
+        )
+        parser.add_argument(
+            "--paddle-vl-format-block-content",
+            dest="paddle_vl_format_block_content",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Enable/disable markdown formatting for PaddleOCR-VL block content.",
+        )
+        parser.add_argument(
+            "--paddle-vl-use-queues",
+            dest="paddle_vl_use_queues",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Enable/disable internal queues for PaddleOCR-VL.",
+        )
+    else:
+        parser.add_argument(
+            "--paddle-vl-use-layout-detection",
+            dest="paddle_vl_use_layout_detection",
+            action="store_true",
+            help="Enable layout detection in PaddleOCR-VL.",
+        )
+        parser.add_argument(
+            "--paddle-vl-use-chart-recognition",
+            dest="paddle_vl_use_chart_recognition",
+            action="store_true",
+            help="Enable chart recognition in PaddleOCR-VL.",
+        )
+        parser.add_argument(
+            "--paddle-vl-format-block-content",
+            dest="paddle_vl_format_block_content",
+            action="store_true",
+            help="Enable markdown formatting for PaddleOCR-VL block content.",
+        )
+        parser.add_argument(
+            "--paddle-vl-use-queues",
+            dest="paddle_vl_use_queues",
+            action="store_true",
+            help="Enable internal queues for PaddleOCR-VL.",
+        )
+    parser.add_argument(
+        "--paddle-vl-prompt-label",
+        help="PaddleOCR-VL prompt label (ocr, formula, table, chart).",
+    )
     # OCR toggles
     try:
         bool_action = argparse.BooleanOptionalAction  # type: ignore[attr-defined]
@@ -289,6 +419,8 @@ def main() -> int:
     # Apply override defaults when CLI flags are not provided
     if getattr(args, "pp_structure_v3", None) is None:
         args.pp_structure_v3 = FLAGS_DEFAULTS["pp_structure_v3"]
+    if getattr(args, "paddle_vl", None) is None:
+        args.paddle_vl = FLAGS_DEFAULTS["paddle_vl"]
     if not _cli_provided("--dump") and not getattr(args, "dump", False):
         args.dump = FLAGS_DEFAULTS["dump"]
 
@@ -300,6 +432,32 @@ def main() -> int:
         args.max_side = GENERAL_DEFAULTS["max_side"]
     if not _cli_provided("--preview-len") and args.preview_len is None:
         args.preview_len = GENERAL_DEFAULTS["preview_len"]
+
+    if args.paddle_vl and args.pp_structure_v3:
+        print("PaddleOCR-VL enabled; ignoring --pp-structure-v3.")
+        args.pp_structure_v3 = False
+
+    if args.paddle_vl:
+        if not _cli_provided("--paddle-vl-device") and args.paddle_vl_device is None:
+            args.paddle_vl_device = VL_DEFAULTS["paddle_vl_device"]
+        if not _cli_provided("--paddle-vl-rec-backend") and args.paddle_vl_rec_backend is None:
+            args.paddle_vl_rec_backend = VL_DEFAULTS["paddle_vl_rec_backend"]
+        if not _cli_provided("--paddle-vl-rec-server-url") and args.paddle_vl_rec_server_url is None:
+            args.paddle_vl_rec_server_url = VL_DEFAULTS["paddle_vl_rec_server_url"]
+        if not _cli_provided("--paddle-vl-rec-max-concurrency") and args.paddle_vl_rec_max_concurrency is None:
+            args.paddle_vl_rec_max_concurrency = VL_DEFAULTS["paddle_vl_rec_max_concurrency"]
+        if not _cli_provided("--paddle-vl-rec-api-key") and args.paddle_vl_rec_api_key is None:
+            args.paddle_vl_rec_api_key = VL_DEFAULTS["paddle_vl_rec_api_key"]
+        if getattr(args, "paddle_vl_use_layout_detection", None) is None:
+            args.paddle_vl_use_layout_detection = VL_DEFAULTS["paddle_vl_use_layout_detection"]
+        if getattr(args, "paddle_vl_use_chart_recognition", None) is None:
+            args.paddle_vl_use_chart_recognition = VL_DEFAULTS["paddle_vl_use_chart_recognition"]
+        if getattr(args, "paddle_vl_format_block_content", None) is None:
+            args.paddle_vl_format_block_content = VL_DEFAULTS["paddle_vl_format_block_content"]
+        if getattr(args, "paddle_vl_use_queues", None) is None:
+            args.paddle_vl_use_queues = VL_DEFAULTS["paddle_vl_use_queues"]
+        if not _cli_provided("--paddle-vl-prompt-label") and args.paddle_vl_prompt_label is None:
+            args.paddle_vl_prompt_label = VL_DEFAULTS["paddle_vl_prompt_label"]
 
     if args.pp_structure_v3:
         if not _cli_provided("--layout-model") and args.layout_model is None:
@@ -458,6 +616,243 @@ def main() -> int:
             print(f"Pillow is required for image OCR: {exc}")
             return 2
         images = [Image.open(args.image)]
+
+    if args.paddle_vl:
+        try:
+            from paddleocr import PaddleOCRVL
+        except Exception as exc:
+            print(f"Failed to import PaddleOCRVL: {exc}")
+            return 2
+
+        def _vl_result_to_dict(res: object) -> dict | None:
+            if isinstance(res, dict):
+                return res
+            to_dict = getattr(res, "to_dict", None)
+            if callable(to_dict):
+                try:
+                    converted = to_dict()
+                    if isinstance(converted, dict):
+                        return converted
+                except Exception:
+                    return None
+            for attr in ("res", "result", "json"):
+                val = getattr(res, attr, None)
+                if isinstance(val, dict):
+                    return val
+            return None
+
+        def _vl_extract_markdown(res: object) -> tuple[str | None, dict | None]:
+            md_info = getattr(res, "markdown", None)
+            if isinstance(md_info, dict):
+                for key in ("markdown", "markdown_text", "text", "content"):
+                    val = md_info.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val, md_info
+                return None, md_info
+            if isinstance(md_info, str) and md_info.strip():
+                return md_info, None
+            return None, None
+
+        def _vl_extract_markdown_images(md_info: dict | None) -> dict:
+            if not isinstance(md_info, dict):
+                return {}
+            images = md_info.get("markdown_images")
+            return images if isinstance(images, dict) else {}
+
+        def _vl_extract_block_text(res: object) -> str:
+            res_dict = _vl_result_to_dict(res)
+            if not isinstance(res_dict, dict):
+                return ""
+            if "res" in res_dict and isinstance(res_dict["res"], dict):
+                res_dict = res_dict["res"]
+            blocks = res_dict.get("parsing_res_list") or res_dict.get("layout_parsing_res") or []
+            if not isinstance(blocks, list):
+                return ""
+            lines: list[str] = []
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                text_val = block.get("block_content") or block.get("content") or block.get("text")
+                if isinstance(text_val, str) and text_val.strip():
+                    lines.append(text_val.strip())
+            return "\n".join(lines).strip()
+
+        def _strip_markup(text: str) -> str:
+            import re as _re
+            text = _re.sub(r"<[^>]+>", " ", text)
+            text = _re.sub(r"!\[[^\]]*]\([^)]+\)", " ", text)
+            text = _re.sub(r"\s+", " ", text)
+            return text.strip()
+
+        pipeline_kwargs: dict = {}
+        if getattr(args, "doc_orientation", None) is not None:
+            pipeline_kwargs["use_doc_orientation_classify"] = bool(args.doc_orientation)
+        if getattr(args, "doc_unwarping", None) is not None:
+            pipeline_kwargs["use_doc_unwarping"] = bool(args.doc_unwarping)
+        if getattr(args, "paddle_vl_use_layout_detection", None) is not None:
+            pipeline_kwargs["use_layout_detection"] = bool(args.paddle_vl_use_layout_detection)
+        if getattr(args, "paddle_vl_use_chart_recognition", None) is not None:
+            pipeline_kwargs["use_chart_recognition"] = bool(args.paddle_vl_use_chart_recognition)
+        if getattr(args, "paddle_vl_format_block_content", None) is not None:
+            pipeline_kwargs["format_block_content"] = bool(args.paddle_vl_format_block_content)
+        if getattr(args, "paddle_vl_device", None):
+            pipeline_kwargs["device"] = str(args.paddle_vl_device)
+        if getattr(args, "paddle_vl_rec_backend", None):
+            pipeline_kwargs["vl_rec_backend"] = str(args.paddle_vl_rec_backend)
+        if getattr(args, "paddle_vl_rec_server_url", None):
+            pipeline_kwargs["vl_rec_server_url"] = str(args.paddle_vl_rec_server_url)
+        if getattr(args, "paddle_vl_rec_max_concurrency", None) is not None:
+            pipeline_kwargs["vl_rec_max_concurrency"] = int(args.paddle_vl_rec_max_concurrency)
+        if getattr(args, "paddle_vl_rec_api_key", None):
+            pipeline_kwargs["vl_rec_api_key"] = str(args.paddle_vl_rec_api_key)
+
+        predict_kwargs: dict = {}
+        if getattr(args, "doc_orientation", None) is not None:
+            predict_kwargs["use_doc_orientation_classify"] = bool(args.doc_orientation)
+        if getattr(args, "doc_unwarping", None) is not None:
+            predict_kwargs["use_doc_unwarping"] = bool(args.doc_unwarping)
+        if getattr(args, "paddle_vl_use_layout_detection", None) is not None:
+            predict_kwargs["use_layout_detection"] = bool(args.paddle_vl_use_layout_detection)
+        if getattr(args, "paddle_vl_use_chart_recognition", None) is not None:
+            predict_kwargs["use_chart_recognition"] = bool(args.paddle_vl_use_chart_recognition)
+        if getattr(args, "paddle_vl_format_block_content", None) is not None:
+            predict_kwargs["format_block_content"] = bool(args.paddle_vl_format_block_content)
+        if getattr(args, "layout_threshold", None) is not None:
+            predict_kwargs["layout_threshold"] = args.layout_threshold
+        if getattr(args, "layout_nms", None) is not None:
+            predict_kwargs["layout_nms"] = bool(args.layout_nms)
+        if getattr(args, "layout_unclip", None) is not None:
+            predict_kwargs["layout_unclip_ratio"] = args.layout_unclip
+        if getattr(args, "layout_merge", None):
+            predict_kwargs["layout_merge_bboxes_mode"] = args.layout_merge
+        if getattr(args, "paddle_vl_prompt_label", None):
+            predict_kwargs["prompt_label"] = str(args.paddle_vl_prompt_label)
+        if getattr(args, "paddle_vl_use_queues", None) is not None:
+            predict_kwargs["use_queues"] = bool(args.paddle_vl_use_queues)
+
+        try:
+            pipeline = PaddleOCRVL(**pipeline_kwargs)
+        except Exception as exc:
+            print(f"PaddleOCR-VL failed: {exc}")
+            return 2
+
+        page_texts: list[str] = []
+        markdown_items: list[dict] = []
+        markdown_images: dict[str, object] = {}
+        for idx, image in enumerate(images, start=1):
+            print(f"Page {idx} rendered size: {image.width}x{image.height}")
+            if args.max_side and args.max_side > 0:
+                max_side_px = max(image.width, image.height)
+                if max_side_px > args.max_side:
+                    scale = args.max_side / max_side_px
+                    new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+                    image = image.resize(new_size, resample=_PILImage.LANCZOS)
+                    print(f"Page {idx} downscaled to: {image.width}x{image.height}")
+            image = image.convert("RGB")
+            img_arr = np.array(image)
+            try:
+                results = pipeline.predict(img_arr, **predict_kwargs)
+            except Exception as exc:
+                print(f"PaddleOCR-VL failed on page {idx}: {exc}")
+                return 2
+            if not results:
+                print(f"Page {idx} text chars: 0")
+                page_texts.append("")
+                continue
+            res = results[0]
+            if args.dump:
+                try:
+                    print(f"PaddleOCR-VL result {idx} type: {type(res)}")
+                    if hasattr(res, "print"):
+                        res.print()
+                except Exception:
+                    pass
+            md_text, md_info = _vl_extract_markdown(res)
+            if md_info:
+                markdown_items.append(md_info)
+            markdown_images.update(_vl_extract_markdown_images(md_info))
+            text = _vl_extract_block_text(res)
+            if not text and md_text:
+                text = _strip_markup(md_text)
+            text = str(text or "").strip()
+            page_texts.append(text)
+            print(f"Page {idx} text chars: {len(text)}")
+
+        layout_markdown = None
+        if markdown_items:
+            concat = getattr(pipeline, "concatenate_markdown_pages", None)
+            if callable(concat):
+                try:
+                    layout_markdown = concat(markdown_items)
+                except Exception:
+                    layout_markdown = None
+            else:
+                page_markdown = []
+                for md in markdown_items:
+                    if not isinstance(md, dict):
+                        continue
+                    text_val = md.get("markdown") or md.get("markdown_text") or md.get("text") or md.get("content")
+                    if isinstance(text_val, str) and text_val.strip():
+                        page_markdown.append(text_val.strip())
+                layout_markdown = "\n\n".join(page_markdown)
+
+        if args.out_md and markdown_images:
+            out_md_dir = os.path.dirname(args.out_md)
+            for rel_path, image_obj in markdown_images.items():
+                if not isinstance(rel_path, str) or not rel_path:
+                    continue
+                target_path = rel_path
+                if not os.path.isabs(rel_path):
+                    target_path = os.path.join(out_md_dir, rel_path)
+                try:
+                    target_dir = os.path.dirname(target_path)
+                    if target_dir:
+                        os.makedirs(target_dir, exist_ok=True)
+                    if hasattr(image_obj, "save"):
+                        image_obj.save(target_path)
+                    else:
+                        try:
+                            from PIL import Image as _PILImage2
+                            if isinstance(image_obj, np.ndarray):
+                                _PILImage2.fromarray(image_obj).save(target_path)
+                        except Exception:
+                            continue
+                except Exception as exc:
+                    print(f"Failed to save PaddleOCR-VL image {rel_path}: {exc}")
+
+        text = "\n".join([t for t in page_texts if t]).strip()
+        if not text and isinstance(layout_markdown, str) and layout_markdown.strip():
+            text = layout_markdown.strip()
+
+        print(f"Text chars: {len(text)}")
+        if text:
+            preview_len = max(0, int(args.preview_len))
+            if preview_len:
+                preview = text.replace("\n", " ")
+                print(f"Preview: {preview[:preview_len]}")
+            if args.print_text:
+                print(text)
+            if args.out:
+                try:
+                    with open(args.out, "w", encoding="utf-8") as handle:
+                        handle.write(text)
+                except Exception as exc:
+                    print(f"Failed to write OCR text to {args.out}: {exc}")
+            if args.out_md:
+                try:
+                    md_text = layout_markdown or text
+                    if md_text:
+                        md_dir = os.path.dirname(args.out_md)
+                        if md_dir:
+                            os.makedirs(md_dir, exist_ok=True)
+                        with open(args.out_md, "w", encoding="utf-8") as handle:
+                            handle.write(md_text)
+                except Exception as exc:
+                    print(f"Failed to write layout markdown to {args.out_md}: {exc}")
+            return 0
+
+        print("No text extracted.")
+        return 2
 
     def _paddle_obj_to_dict(obj: object) -> dict | None:
         if obj is None:

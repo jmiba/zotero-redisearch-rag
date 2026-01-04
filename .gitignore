@@ -22,6 +22,7 @@ Temporary Items
 
 # Test data
 tests/_ocr_crops/
+tests/imgs/
 
 # Node
 node_modules/
@@ -29,6 +30,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Python caches
+__pycache__/
 
 # Python virtualenv
 .venv/

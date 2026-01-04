@@ -1397,6 +1397,190 @@ def ocr_pages_with_paddle_structure(
     return pages, {"layout_used": True, "layout_model": config.paddle_structure_version}
 
 
+def ocr_pages_with_paddle_vl(
+    images: Sequence[Any],
+    languages: str,
+    config: Any,
+    helpers: Dict[str, Any],
+    progress_cb: Optional[Any] = None,
+    progress_base: int = 0,
+    progress_span: int = 0,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    global LOGGER
+    LOGGER = helpers.get("logger", LOGGER)
+    ocr_pages_text_chars = helpers["ocr_pages_text_chars"]
+
+    try:
+        import numpy as np
+        from paddleocr import PaddleOCRVL
+    except Exception as exc:
+        raise RuntimeError(f"PaddleOCR-VL dependencies missing (install paddleocr[doc-parser]): {exc}") from exc
+
+    pipeline_kwargs: Dict[str, Any] = {}
+    if getattr(config, "paddle_use_doc_orientation_classify", None) is not None:
+        pipeline_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
+    if getattr(config, "paddle_use_doc_unwarping", None) is not None:
+        pipeline_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
+    if getattr(config, "paddle_vl_use_layout_detection", None) is not None:
+        pipeline_kwargs["use_layout_detection"] = bool(config.paddle_vl_use_layout_detection)
+    if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
+        pipeline_kwargs["use_chart_recognition"] = bool(config.paddle_vl_use_chart_recognition)
+    if getattr(config, "paddle_vl_format_block_content", None) is not None:
+        pipeline_kwargs["format_block_content"] = bool(config.paddle_vl_format_block_content)
+    if getattr(config, "paddle_vl_device", None):
+        pipeline_kwargs["device"] = str(config.paddle_vl_device)
+    if getattr(config, "paddle_vl_rec_backend", None):
+        pipeline_kwargs["vl_rec_backend"] = str(config.paddle_vl_rec_backend)
+    if getattr(config, "paddle_vl_rec_server_url", None):
+        pipeline_kwargs["vl_rec_server_url"] = str(config.paddle_vl_rec_server_url)
+    if getattr(config, "paddle_vl_rec_max_concurrency", None) is not None:
+        pipeline_kwargs["vl_rec_max_concurrency"] = int(config.paddle_vl_rec_max_concurrency)
+    if getattr(config, "paddle_vl_rec_api_key", None):
+        pipeline_kwargs["vl_rec_api_key"] = str(config.paddle_vl_rec_api_key)
+
+    predict_kwargs: Dict[str, Any] = {}
+    if getattr(config, "paddle_use_doc_orientation_classify", None) is not None:
+        predict_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
+    if getattr(config, "paddle_use_doc_unwarping", None) is not None:
+        predict_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
+    if getattr(config, "paddle_vl_use_layout_detection", None) is not None:
+        predict_kwargs["use_layout_detection"] = bool(config.paddle_vl_use_layout_detection)
+    if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
+        predict_kwargs["use_chart_recognition"] = bool(config.paddle_vl_use_chart_recognition)
+    if getattr(config, "paddle_vl_format_block_content", None) is not None:
+        predict_kwargs["format_block_content"] = bool(config.paddle_vl_format_block_content)
+    if getattr(config, "paddle_layout_threshold", None) is not None:
+        predict_kwargs["layout_threshold"] = config.paddle_layout_threshold
+    if getattr(config, "paddle_layout_nms", None) is not None:
+        predict_kwargs["layout_nms"] = bool(config.paddle_layout_nms)
+    if getattr(config, "paddle_layout_unclip", None) is not None:
+        predict_kwargs["layout_unclip_ratio"] = config.paddle_layout_unclip
+    if getattr(config, "paddle_layout_merge", None):
+        predict_kwargs["layout_merge_bboxes_mode"] = config.paddle_layout_merge
+    if getattr(config, "paddle_vl_prompt_label", None):
+        predict_kwargs["prompt_label"] = str(config.paddle_vl_prompt_label)
+    if getattr(config, "paddle_vl_use_queues", None) is not None:
+        predict_kwargs["use_queues"] = bool(config.paddle_vl_use_queues)
+
+    pipeline = PaddleOCRVL(**pipeline_kwargs)
+
+    def _result_to_dict(res: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(res, dict):
+            return res
+        to_dict = getattr(res, "to_dict", None)
+        if callable(to_dict):
+            try:
+                converted = to_dict()
+                if isinstance(converted, dict):
+                    return converted
+            except Exception:
+                return None
+        for attr in ("res", "result", "json"):
+            val = getattr(res, attr, None)
+            if isinstance(val, dict):
+                return val
+        return None
+
+    def _extract_markdown(res: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        md_info = getattr(res, "markdown", None)
+        if isinstance(md_info, dict):
+            for key in ("markdown", "markdown_text", "text", "content"):
+                val = md_info.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val, md_info
+            return None, md_info
+        if isinstance(md_info, str) and md_info.strip():
+            return md_info, None
+        return None, None
+
+    def _extract_block_text(res: Any) -> str:
+        res_dict = _result_to_dict(res)
+        if not isinstance(res_dict, dict):
+            return ""
+        if "res" in res_dict and isinstance(res_dict["res"], dict):
+            res_dict = res_dict["res"]
+        blocks = res_dict.get("parsing_res_list") or res_dict.get("layout_parsing_res") or []
+        if not isinstance(blocks, list):
+            return ""
+        lines: List[str] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            text_val = block.get("block_content") or block.get("content") or block.get("text")
+            if isinstance(text_val, str) and text_val.strip():
+                lines.append(text_val.strip())
+        return "\n".join(lines).strip()
+
+    def _strip_markup(text: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"!\[[^\\]]*\\]\\([^)]+\\)", " ", text)
+        text = re.sub(r"\\s+", " ", text)
+        return text.strip()
+
+    pages: List[Dict[str, Any]] = []
+    markdown_items: List[Dict[str, Any]] = []
+    markdown_images: Dict[str, Any] = {}
+    total = max(1, len(images))
+    if progress_cb and progress_span > 0:
+        progress_cb(progress_base, "ocr", "Paddle OCR-VL initializing")
+
+    for idx, image in enumerate(images, start=1):
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int((idx - 1) / total * progress_span)
+            progress_cb(percent, "ocr", f"Paddle OCR-VL page {idx}/{total}")
+        try:
+            img = image.convert("RGB") if hasattr(image, "convert") else image
+        except Exception:
+            img = image
+        img_arr = np.array(img)
+        results = pipeline.predict(img_arr, **predict_kwargs)
+        if not results:
+            pages.append({"page_num": idx, "text": ""})
+            continue
+        res = results[0]
+        md_text, md_info = _extract_markdown(res)
+        if md_info:
+            markdown_items.append(md_info)
+            md_images = md_info.get("markdown_images")
+            if isinstance(md_images, dict):
+                markdown_images.update(md_images)
+        text = _extract_block_text(res)
+        if not text and md_text:
+            text = _strip_markup(md_text)
+        pages.append({"page_num": idx, "text": (text or "").strip()})
+        if progress_cb and progress_span > 0:
+            percent = progress_base + int(idx / total * progress_span)
+            progress_cb(percent, "ocr", f"Paddle OCR-VL page {idx}/{total}")
+
+    layout_markdown = None
+    if markdown_items:
+        concat = getattr(pipeline, "concatenate_markdown_pages", None)
+        if callable(concat):
+            try:
+                layout_markdown = concat(markdown_items)
+            except Exception:
+                layout_markdown = None
+        else:
+            page_texts = [md.get("markdown") or md.get("markdown_text") or "" for md in markdown_items if isinstance(md, dict)]
+            layout_markdown = "\n\n".join([t for t in page_texts if isinstance(t, str) and t.strip()])
+
+    text_chars = ocr_pages_text_chars(pages)
+    LOGGER.info(
+        "PaddleOCR-VL OCR complete: pages=%d, text_chars=%d",
+        len(pages),
+        text_chars,
+    )
+    stats: Dict[str, Any] = {
+        "layout_used": True,
+        "layout_model": "PaddleOCR-VL",
+    }
+    if isinstance(layout_markdown, str) and layout_markdown.strip():
+        stats["layout_markdown"] = layout_markdown
+    if markdown_images:
+        stats["layout_markdown_images"] = markdown_images
+    return pages, stats
+
+
 def ocr_pages_with_paddle(
     images: Sequence[Any],
     languages: str,

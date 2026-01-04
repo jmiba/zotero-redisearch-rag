@@ -4,7 +4,7 @@ markdown
 markdown-it-py
 numpy
 opencv-python
-paddleocr
+paddleocr[doc-parser]
 paddlepaddle==3.2.2
 paddlex[ocr]
 pdf2image
