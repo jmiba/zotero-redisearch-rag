@@ -22,6 +22,7 @@ Options
 - --out-md: Write layout-labeled markdown output (only when layout OCR is used).
 - --pp-structure-v3: Use a layout pipeline instead of plain OCR (PaddleX layout first), with plain OCR fallback for text. Requires extra deps (cv2, shapely, pyclipper, paddlex). Default off unless enabled explicitly.
 - --paddle-vl: Use PaddleOCR-VL (PaddleOCRVL) end-to-end pipeline instead of PaddleOCR/PP-Structure. Default on.
+- Recommended for PaddleOCR-VL: --no-doc-unwarping --no-doc-orientation --paddle-vl-prompt-label ocr --layout-unclip 1.2 --layout-threshold 0.2
 
 OCR toggles
 - --doc-orientation / --no-doc-orientation: Enable/disable document orientation classification before OCR (default overridden in script defaults).
@@ -49,6 +50,12 @@ PaddleOCR-VL options (with --paddle-vl)
 - --paddle-vl-format-block-content / --no-paddle-vl-format-block-content.
 - --paddle-vl-use-queues / --no-paddle-vl-use-queues.
 - --paddle-vl-prompt-label: Prompt label (ocr, formula, table, chart): If not forcing any prompt label for PaddleOCR‑VL, it uses its built‑in default. If you set it to a string like "ocr", "table", "formula", or "chart", the VL model will bias the prompt toward that task (and it only takes effect when use_layout_detection=False, per the PaddleOCR‑VL docs).
+- --paddle-vl-repetition-penalty: Repetition penalty for VL generation.
+- --paddle-vl-temperature: Temperature for VL generation.
+- --paddle-vl-top-p: Top-p nucleus sampling for VL generation.
+- --paddle-vl-min-pixels: Minimum pixel count for VL input resizing.
+- --paddle-vl-max-pixels: Maximum pixel count for VL input resizing.
+- --paddle-vl-layout-nms: Enable/disable layout NMS inside PaddleOCR‑VL.
 
 Examples
 - python tests/paddle_ocr_smoke.py --pdf sample.pdf --pages 2 --print-text
@@ -85,17 +92,17 @@ GENERAL_DEFAULTS = {
     "pages": 2,
     "max_side": 3000,
     "preview_len": 500,
-    "doc_orientation": True,
-    "doc_unwarping": True,
+    "doc_orientation": False,
+    "doc_unwarping": False,
     "textline_orientation": True,
 }
 
 LAYOUT_DEFAULTS = {
     "layout_model": "PP-DocLayout-L",     # or PP-DocLayout-M / PP-DocLayout-S
-    "layout_threshold": 0.5,               # keep lower-confidence boxes
+    "layout_threshold": 0.3,               # keep lower-confidence boxes
     "layout_img_size": 6000,               # larger input can help two-column pages
-    "layout_merge": "large",              # keep both inner and outer boxes
-    "layout_unclip": 1.07,                  # expand boxes slightly
+    "layout_merge": "small",              # keep both inner and outer boxes
+    "layout_unclip": 1.1,                  # expand boxes slightly
     "layout_device": None,                 # e.g., "cpu" or "gpu:0"; None = PaddleX default
     "layout_nms": True,                    # enable NMS postprocessing
     "fail_on_zero_layout": True,
@@ -113,8 +120,15 @@ VL_DEFAULTS = {
     "paddle_vl_use_layout_detection": True,
     "paddle_vl_use_chart_recognition": True,
     "paddle_vl_format_block_content": True,
-    "paddle_vl_use_queues": True,
-    "paddle_vl_prompt_label": None,
+    "paddle_vl_use_queues": False,
+    "paddle_vl_prompt_label": "ocr",
+    "paddle_vl_layout_nms": True,
+    # not supported by local model:
+    "paddle_vl_repetition_penalty": None,
+    "paddle_vl_temperature": None,
+    "paddle_vl_top_p": None,
+    "paddle_vl_min_pixels": None,
+    "paddle_vl_max_pixels": None, 
 }
 
 FLAGS_DEFAULTS = {
@@ -268,6 +282,13 @@ def main() -> int:
             default=None,
             help="Enable/disable internal queues for PaddleOCR-VL.",
         )
+        parser.add_argument(
+            "--paddle-vl-layout-nms",
+            dest="paddle_vl_layout_nms",
+            action=bool_action,  # type: ignore[arg-type]
+            default=None,
+            help="Enable/disable layout NMS inside PaddleOCR-VL.",
+        )
     else:
         parser.add_argument(
             "--paddle-vl-use-layout-detection",
@@ -293,9 +314,40 @@ def main() -> int:
             action="store_true",
             help="Enable internal queues for PaddleOCR-VL.",
         )
+        parser.add_argument(
+            "--paddle-vl-layout-nms",
+            dest="paddle_vl_layout_nms",
+            action="store_true",
+            help="Enable layout NMS inside PaddleOCR-VL.",
+        )
     parser.add_argument(
         "--paddle-vl-prompt-label",
         help="PaddleOCR-VL prompt label (ocr, formula, table, chart).",
+    )
+    parser.add_argument(
+        "--paddle-vl-repetition-penalty",
+        type=float,
+        help="PaddleOCR-VL repetition penalty.",
+    )
+    parser.add_argument(
+        "--paddle-vl-temperature",
+        type=float,
+        help="PaddleOCR-VL temperature.",
+    )
+    parser.add_argument(
+        "--paddle-vl-top-p",
+        type=float,
+        help="PaddleOCR-VL top-p nucleus sampling value.",
+    )
+    parser.add_argument(
+        "--paddle-vl-min-pixels",
+        type=int,
+        help="PaddleOCR-VL minimum input pixel count.",
+    )
+    parser.add_argument(
+        "--paddle-vl-max-pixels",
+        type=int,
+        help="PaddleOCR-VL maximum input pixel count.",
     )
     # OCR toggles
     try:
@@ -458,6 +510,24 @@ def main() -> int:
             args.paddle_vl_use_queues = VL_DEFAULTS["paddle_vl_use_queues"]
         if not _cli_provided("--paddle-vl-prompt-label") and args.paddle_vl_prompt_label is None:
             args.paddle_vl_prompt_label = VL_DEFAULTS["paddle_vl_prompt_label"]
+        if not _cli_provided("--paddle-vl-repetition-penalty") and args.paddle_vl_repetition_penalty is None:
+            args.paddle_vl_repetition_penalty = VL_DEFAULTS["paddle_vl_repetition_penalty"]
+        if not _cli_provided("--paddle-vl-temperature") and args.paddle_vl_temperature is None:
+            args.paddle_vl_temperature = VL_DEFAULTS["paddle_vl_temperature"]
+        if not _cli_provided("--paddle-vl-top-p") and args.paddle_vl_top_p is None:
+            args.paddle_vl_top_p = VL_DEFAULTS["paddle_vl_top_p"]
+        if not _cli_provided("--paddle-vl-min-pixels") and args.paddle_vl_min_pixels is None:
+            args.paddle_vl_min_pixels = VL_DEFAULTS["paddle_vl_min_pixels"]
+        if not _cli_provided("--paddle-vl-max-pixels") and args.paddle_vl_max_pixels is None:
+            args.paddle_vl_max_pixels = VL_DEFAULTS["paddle_vl_max_pixels"]
+        if getattr(args, "paddle_vl_layout_nms", None) is None:
+            args.paddle_vl_layout_nms = VL_DEFAULTS["paddle_vl_layout_nms"]
+        if not _cli_provided("--layout-threshold") and args.layout_threshold is None:
+            args.layout_threshold = LAYOUT_DEFAULTS["layout_threshold"]
+        if not _cli_provided("--layout-unclip") and args.layout_unclip is None:
+            args.layout_unclip = LAYOUT_DEFAULTS["layout_unclip"]
+        if not _cli_provided("--layout-merge") and args.layout_merge is None:
+            args.layout_merge = LAYOUT_DEFAULTS["layout_merge"]
 
     if args.pp_structure_v3:
         if not _cli_provided("--layout-model") and args.layout_model is None:
@@ -684,6 +754,72 @@ def main() -> int:
             text = _re.sub(r"\s+", " ", text)
             return text.strip()
 
+        import re as _re
+        _PAGE_JOIN_STRUCTURAL_RE = _re.compile(r"^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|\||!\[|<|```|>)")
+        _PAGE_JOIN_SENTENCE_START_RE = _re.compile(r"^[\"'“”‘’(\[]*[a-zäöüß]")
+        _PAGE_JOIN_WORD_START_RE = _re.compile(r"^[\"'“”‘’(\[]*[A-Za-zÄÖÜäöüß0-9]")
+
+        def _is_structural_line(line: str) -> bool:
+            stripped = line.strip()
+            if not stripped:
+                return True
+            return bool(_PAGE_JOIN_STRUCTURAL_RE.match(stripped))
+
+        def _stitch_text_pair(prev_text: str, next_text: str) -> tuple[str, str, bool]:
+            prev_lines = str(prev_text or "").splitlines()
+            next_lines = str(next_text or "").splitlines()
+
+            prev_idx = next((i for i in range(len(prev_lines) - 1, -1, -1) if prev_lines[i].strip()), None)
+            next_idx = next((i for i in range(len(next_lines)) if next_lines[i].strip()), None)
+            if prev_idx is None or next_idx is None:
+                return prev_text, next_text, False
+
+            prev_line = prev_lines[prev_idx].rstrip()
+            next_line = next_lines[next_idx].lstrip()
+            if _is_structural_line(prev_line) or _is_structural_line(next_line):
+                return prev_text, next_text, False
+
+            if _re.search(r"[A-Za-zÄÖÜäöüß0-9]-\s*$", prev_line) and _PAGE_JOIN_WORD_START_RE.match(next_line):
+                joined = _re.sub(r"-\s*$", "", prev_line) + next_line.lstrip()
+                prev_lines[prev_idx] = joined
+                next_lines.pop(next_idx)
+                while next_lines and not next_lines[0].strip():
+                    next_lines.pop(0)
+                return "\n".join(prev_lines), "\n".join(next_lines), True
+
+            if (
+                _re.search(r"[A-Za-zÄÖÜäöüß0-9]$", prev_line)
+                and not _re.search(r"[.!?]$", prev_line)
+                and _PAGE_JOIN_SENTENCE_START_RE.match(next_line)
+            ):
+                prev_lines[prev_idx] = f"{prev_line.rstrip()} {next_line.lstrip()}"
+                next_lines.pop(next_idx)
+                while next_lines and not next_lines[0].strip():
+                    next_lines.pop(0)
+                return "\n".join(prev_lines), "\n".join(next_lines), True
+
+            return prev_text, next_text, False
+
+        def _stitch_pages(
+            page_texts: list[str],
+            markdown_pages: list[str] | None = None,
+        ) -> int:
+            if len(page_texts) < 2:
+                return 0
+            stitched = 0
+            for idx in range(len(page_texts) - 1):
+                new_prev, new_next, changed = _stitch_text_pair(page_texts[idx], page_texts[idx + 1])
+                if changed:
+                    page_texts[idx] = new_prev
+                    page_texts[idx + 1] = new_next
+                    stitched += 1
+                if markdown_pages is not None and idx < len(markdown_pages) - 1:
+                    md_prev, md_next, md_changed = _stitch_text_pair(markdown_pages[idx], markdown_pages[idx + 1])
+                    if md_changed:
+                        markdown_pages[idx] = md_prev
+                        markdown_pages[idx + 1] = md_next
+            return stitched
+
         pipeline_kwargs: dict = {}
         if getattr(args, "doc_orientation", None) is not None:
             pipeline_kwargs["use_doc_orientation_classify"] = bool(args.doc_orientation)
@@ -719,7 +855,9 @@ def main() -> int:
             predict_kwargs["format_block_content"] = bool(args.paddle_vl_format_block_content)
         if getattr(args, "layout_threshold", None) is not None:
             predict_kwargs["layout_threshold"] = args.layout_threshold
-        if getattr(args, "layout_nms", None) is not None:
+        if getattr(args, "paddle_vl_layout_nms", None) is not None:
+            predict_kwargs["layout_nms"] = bool(args.paddle_vl_layout_nms)
+        elif getattr(args, "layout_nms", None) is not None:
             predict_kwargs["layout_nms"] = bool(args.layout_nms)
         if getattr(args, "layout_unclip", None) is not None:
             predict_kwargs["layout_unclip_ratio"] = args.layout_unclip
@@ -729,6 +867,16 @@ def main() -> int:
             predict_kwargs["prompt_label"] = str(args.paddle_vl_prompt_label)
         if getattr(args, "paddle_vl_use_queues", None) is not None:
             predict_kwargs["use_queues"] = bool(args.paddle_vl_use_queues)
+        if getattr(args, "paddle_vl_repetition_penalty", None) is not None:
+            predict_kwargs["repetition_penalty"] = args.paddle_vl_repetition_penalty
+        if getattr(args, "paddle_vl_temperature", None) is not None:
+            predict_kwargs["temperature"] = args.paddle_vl_temperature
+        if getattr(args, "paddle_vl_top_p", None) is not None:
+            predict_kwargs["top_p"] = args.paddle_vl_top_p
+        if getattr(args, "paddle_vl_min_pixels", None) is not None:
+            predict_kwargs["min_pixels"] = args.paddle_vl_min_pixels
+        if getattr(args, "paddle_vl_max_pixels", None) is not None:
+            predict_kwargs["max_pixels"] = args.paddle_vl_max_pixels
 
         try:
             pipeline = PaddleOCRVL(**pipeline_kwargs)
@@ -738,6 +886,7 @@ def main() -> int:
 
         page_texts: list[str] = []
         markdown_items: list[dict] = []
+        markdown_pages: list[str] = []
         markdown_images: dict[str, object] = {}
         for idx, image in enumerate(images, start=1):
             print(f"Page {idx} rendered size: {image.width}x{image.height}")
@@ -758,6 +907,7 @@ def main() -> int:
             if not results:
                 print(f"Page {idx} text chars: 0")
                 page_texts.append("")
+                markdown_pages.append("")
                 continue
             res = results[0]
             if args.dump:
@@ -768,6 +918,7 @@ def main() -> int:
                 except Exception:
                     pass
             md_text, md_info = _vl_extract_markdown(res)
+            markdown_pages.append(md_text or "")
             if md_info:
                 markdown_items.append(md_info)
             markdown_images.update(_vl_extract_markdown_images(md_info))
@@ -795,6 +946,12 @@ def main() -> int:
                     if isinstance(text_val, str) and text_val.strip():
                         page_markdown.append(text_val.strip())
                 layout_markdown = "\n\n".join(page_markdown)
+
+        stitched = _stitch_pages(page_texts, markdown_pages if markdown_pages else None)
+        if stitched:
+            print(f"Stitched {stitched} page break(s) across pages")
+        if markdown_pages and any(page.strip() for page in markdown_pages):
+            layout_markdown = "\n\n".join(markdown_pages)
 
         if args.out_md and markdown_images:
             out_md_dir = os.path.dirname(args.out_md)

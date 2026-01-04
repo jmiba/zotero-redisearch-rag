@@ -1357,8 +1357,9 @@ def ocr_pages_with_paddle_vl(
         pipeline_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
     if getattr(config, "paddle_use_doc_unwarping", None) is not None:
         pipeline_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
-    if getattr(config, "paddle_vl_use_layout_detection", None) is not None:
-        pipeline_kwargs["use_layout_detection"] = bool(config.paddle_vl_use_layout_detection)
+    use_layout_detection = getattr(config, "paddle_vl_use_layout_detection", None)
+    if use_layout_detection is not None:
+        pipeline_kwargs["use_layout_detection"] = bool(use_layout_detection)
     if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
         pipeline_kwargs["use_chart_recognition"] = bool(config.paddle_vl_use_chart_recognition)
     if getattr(config, "paddle_vl_format_block_content", None) is not None:
@@ -1379,21 +1380,33 @@ def ocr_pages_with_paddle_vl(
         predict_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
     if getattr(config, "paddle_use_doc_unwarping", None) is not None:
         predict_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
-    if getattr(config, "paddle_vl_use_layout_detection", None) is not None:
-        predict_kwargs["use_layout_detection"] = bool(config.paddle_vl_use_layout_detection)
+    if use_layout_detection is not None:
+        predict_kwargs["use_layout_detection"] = bool(use_layout_detection)
     if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
         predict_kwargs["use_chart_recognition"] = bool(config.paddle_vl_use_chart_recognition)
     if getattr(config, "paddle_vl_format_block_content", None) is not None:
         predict_kwargs["format_block_content"] = bool(config.paddle_vl_format_block_content)
-    if getattr(config, "paddle_layout_threshold", None) is not None:
-        predict_kwargs["layout_threshold"] = config.paddle_layout_threshold
-    if getattr(config, "paddle_layout_nms", None) is not None:
-        predict_kwargs["layout_nms"] = bool(config.paddle_layout_nms)
-    if getattr(config, "paddle_layout_unclip", None) is not None:
-        predict_kwargs["layout_unclip_ratio"] = config.paddle_layout_unclip
-    if getattr(config, "paddle_layout_merge", None):
-        predict_kwargs["layout_merge_bboxes_mode"] = config.paddle_layout_merge
-    if getattr(config, "paddle_vl_prompt_label", None):
+    layout_threshold = getattr(config, "paddle_vl_layout_threshold", None)
+    if layout_threshold is None:
+        layout_threshold = getattr(config, "paddle_layout_threshold", None)
+    if layout_threshold is not None:
+        predict_kwargs["layout_threshold"] = layout_threshold
+    layout_nms = getattr(config, "paddle_vl_layout_nms", None)
+    if layout_nms is None:
+        layout_nms = getattr(config, "paddle_layout_nms", None)
+    if layout_nms is not None:
+        predict_kwargs["layout_nms"] = bool(layout_nms)
+    layout_unclip = getattr(config, "paddle_vl_layout_unclip", None)
+    if layout_unclip is None:
+        layout_unclip = getattr(config, "paddle_layout_unclip", None)
+    if layout_unclip is not None:
+        predict_kwargs["layout_unclip_ratio"] = layout_unclip
+    layout_merge = getattr(config, "paddle_vl_layout_merge", None)
+    if layout_merge is None:
+        layout_merge = getattr(config, "paddle_layout_merge", None)
+    if layout_merge:
+        predict_kwargs["layout_merge_bboxes_mode"] = layout_merge
+    if getattr(config, "paddle_vl_prompt_label", None) and use_layout_detection is False:
         predict_kwargs["prompt_label"] = str(config.paddle_vl_prompt_label)
     if getattr(config, "paddle_vl_use_queues", None) is not None:
         predict_kwargs["use_queues"] = bool(config.paddle_vl_use_queues)
@@ -1512,8 +1525,8 @@ def ocr_pages_with_paddle_vl(
 
     def _strip_markup(text: str) -> str:
         text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"!\[[^\\]]*\\]\\([^)]+\\)", " ", text)
-        text = re.sub(r"\\s+", " ", text)
+        text = re.sub(r"!\[[^\]]*]\([^)]+\)", " ", text)
+        text = re.sub(r"\s+", " ", text)
         return text.strip()
 
     pages: List[Dict[str, Any]] = []

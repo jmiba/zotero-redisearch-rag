@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import json
 import math
 import logging
@@ -37,7 +38,14 @@ SPELLCHECKER_CACHE: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\n")
+    try:
+        sys.stderr.write(message + "\n")
+    except BrokenPipeError:
+        return
+    except OSError as exc:
+        if exc.errno == errno.EPIPE:
+            return
+        raise
 
 
 ProgressCallback = Callable[[int, str, str], None]
@@ -49,14 +57,27 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
             return None
         return _noop
 
+    broken_pipe = False
+
     def _emit(percent: int, stage: str, message: str) -> None:
+        nonlocal broken_pipe
+        if broken_pipe:
+            return
         payload = {
             "type": "progress",
             "percent": max(0, min(100, int(percent))),
             "stage": stage,
             "message": message,
         }
-        print(json.dumps(payload), flush=True)
+        try:
+            print(json.dumps(payload), flush=True)
+        except BrokenPipeError:
+            broken_pipe = True
+        except OSError as exc:
+            if exc.errno == errno.EPIPE:
+                broken_pipe = True
+                return
+            raise
 
     return _emit
 
@@ -133,14 +154,12 @@ class DoclingProcessingConfig:
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
-    ocr_overlay_dpi: int = 400
-    paddle_max_dpi: int = 600
+    ocr_overlay_dpi: int = 300
+    paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 6000
-    paddle_use_doc_orientation_classify: bool = True
-    paddle_use_doc_unwarping: bool = True
+    paddle_use_doc_orientation_classify: bool = False
+    paddle_use_doc_unwarping: bool = False
     paddle_use_textline_orientation: bool = True
-    # Enable PP-StructureV3 layout parsing by default to mirror the smoke test's
-    # layout-first approach. Can be disabled via CLI: --no-paddle-structure-v3
     paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
@@ -165,9 +184,9 @@ class DoclingProcessingConfig:
     )
     paddle_layout_recognize_boxes: bool = True
     paddle_layout_fail_on_zero: bool = True
-    paddle_layout_save_crops: Optional[str] = "../../../../.zotero-redisearch-rag/tmp/paddle_crops"
+    paddle_layout_save_crops: Optional[str] = None
     paddle_dump: bool = False
-    paddle_layout_markdown_out: Optional[str] = "../../../../.zotero-redisearch-rag/tmp/paddle_output.md"
+    paddle_layout_markdown_out: Optional[str] = None
     # PaddleOCR-VL (optional, requires paddleocr[doc-parser])
     paddle_use_vl: bool = True
     paddle_vl_device: Optional[str] = None
@@ -179,7 +198,11 @@ class DoclingProcessingConfig:
     paddle_vl_use_chart_recognition: Optional[bool] = True
     paddle_vl_format_block_content: Optional[bool] = True
     paddle_vl_prompt_label: Optional[str] = None
-    paddle_vl_use_queues: Optional[bool] = True
+    paddle_vl_use_queues: Optional[bool] = False
+    paddle_vl_layout_threshold: Optional[float] = 0.3
+    paddle_vl_layout_nms: Optional[bool] = True
+    paddle_vl_layout_unclip: Optional[float] = 1.2
+    paddle_vl_layout_merge: Optional[str] = "small"
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -3942,6 +3965,34 @@ def main() -> int:
         help="Disable PaddleOCR-VL internal queues.",
     )
     parser.add_argument(
+        "--paddle-vl-layout-threshold",
+        type=float,
+        help="Layout score threshold for PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-unclip",
+        type=float,
+        help="Layout unclip ratio for PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-merge",
+        help="Layout merge mode for PaddleOCR-VL (small, large, union).",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-nms",
+        dest="paddle_vl_layout_nms",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-layout-nms",
+        dest="paddle_vl_layout_nms",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
         "--paddle-layout-model",
         help="PaddleX layout model (e.g., PP-DocLayout-L).",
     )
@@ -4259,6 +4310,14 @@ def main() -> int:
         config.paddle_vl_prompt_label = args.paddle_vl_prompt_label
     if args.paddle_vl_use_queues is not None:
         config.paddle_vl_use_queues = args.paddle_vl_use_queues
+    if args.paddle_vl_layout_threshold is not None:
+        config.paddle_vl_layout_threshold = args.paddle_vl_layout_threshold
+    if args.paddle_vl_layout_unclip is not None:
+        config.paddle_vl_layout_unclip = args.paddle_vl_layout_unclip
+    if args.paddle_vl_layout_merge:
+        config.paddle_vl_layout_merge = args.paddle_vl_layout_merge
+    if args.paddle_vl_layout_nms is not None:
+        config.paddle_vl_layout_nms = args.paddle_vl_layout_nms
     if args.paddle_layout_model:
         config.paddle_layout_model = args.paddle_layout_model
     if args.paddle_layout_threshold is not None:
@@ -4319,7 +4378,7 @@ def main() -> int:
 
     config.llm_correct = build_llm_cleanup_callback(config)
 
-    if config.paddle_layout_save_crops:
+    if paddle_save_crops:
         reset_debug_directory(config.paddle_layout_save_crops)
 
     # Proactively build spellchecker once to record backend info; will be reused lazily later

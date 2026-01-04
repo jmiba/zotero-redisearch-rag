@@ -48,6 +48,7 @@ item_json: {{item_json_yaml}}`,tagSanitizeMode:"kebab",noteBodyTemplate:"{{pdf_b
 `};var qe={"docling_extract.py":`#!/usr/bin/env python3
 # zotero-redisearch-rag tool version: 0.3.4
 import argparse
+import errno
 import json
 import math
 import logging
@@ -85,7 +86,14 @@ SPELLCHECKER_CACHE: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\\n")
+    try:
+        sys.stderr.write(message + "\\n")
+    except BrokenPipeError:
+        return
+    except OSError as exc:
+        if exc.errno == errno.EPIPE:
+            return
+        raise
 
 
 ProgressCallback = Callable[[int, str, str], None]
@@ -97,14 +105,27 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
             return None
         return _noop
 
+    broken_pipe = False
+
     def _emit(percent: int, stage: str, message: str) -> None:
+        nonlocal broken_pipe
+        if broken_pipe:
+            return
         payload = {
             "type": "progress",
             "percent": max(0, min(100, int(percent))),
             "stage": stage,
             "message": message,
         }
-        print(json.dumps(payload), flush=True)
+        try:
+            print(json.dumps(payload), flush=True)
+        except BrokenPipeError:
+            broken_pipe = True
+        except OSError as exc:
+            if exc.errno == errno.EPIPE:
+                broken_pipe = True
+                return
+            raise
 
     return _emit
 
@@ -177,18 +198,16 @@ class DoclingProcessingConfig:
     boilerplate_edge_lines: int = 3
     boilerplate_ngram_size: int = 3
     boilerplate_near_dup_threshold: float = 0.82
-    postprocess_markdown: bool = True
+    postprocess_markdown: bool = False
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
-    ocr_overlay_dpi: int = 400
-    paddle_max_dpi: int = 600
+    ocr_overlay_dpi: int = 300
+    paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 6000
-    paddle_use_doc_orientation_classify: bool = True
-    paddle_use_doc_unwarping: bool = True
+    paddle_use_doc_orientation_classify: bool = False
+    paddle_use_doc_unwarping: bool = False
     paddle_use_textline_orientation: bool = True
-    # Enable PP-StructureV3 layout parsing by default to mirror the smoke test's
-    # layout-first approach. Can be disabled via CLI: --no-paddle-structure-v3
     paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
@@ -213,9 +232,9 @@ class DoclingProcessingConfig:
     )
     paddle_layout_recognize_boxes: bool = True
     paddle_layout_fail_on_zero: bool = True
-    paddle_layout_save_crops: Optional[str] = "../../../../.zotero-redisearch-rag/tmp/paddle_crops"
+    paddle_layout_save_crops: Optional[str] = None
     paddle_dump: bool = False
-    paddle_layout_markdown_out: Optional[str] = "../../../../.zotero-redisearch-rag/tmp/paddle_output.md"
+    paddle_layout_markdown_out: Optional[str] = None
     # PaddleOCR-VL (optional, requires paddleocr[doc-parser])
     paddle_use_vl: bool = True
     paddle_vl_device: Optional[str] = None
@@ -227,7 +246,11 @@ class DoclingProcessingConfig:
     paddle_vl_use_chart_recognition: Optional[bool] = True
     paddle_vl_format_block_content: Optional[bool] = True
     paddle_vl_prompt_label: Optional[str] = None
-    paddle_vl_use_queues: Optional[bool] = True
+    paddle_vl_use_queues: Optional[bool] = False
+    paddle_vl_layout_threshold: Optional[float] = 0.3
+    paddle_vl_layout_nms: Optional[bool] = True
+    paddle_vl_layout_unclip: Optional[float] = 1.2
+    paddle_vl_layout_merge: Optional[str] = "small"
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -2112,6 +2135,27 @@ def postprocess_text(
         cleaned = config.llm_correct(cleaned)
     return cleaned
 
+def postprocess_text_light(
+    text: str,
+    config: DoclingProcessingConfig,
+    languages: str,
+    wordlist: Sequence[str],
+    for_markdown: bool = False,
+) -> str:
+    if not text:
+        return text
+    cleaned = dehyphenate_text(text)
+    cleaned = replace_ligatures(cleaned)
+    cleaned = normalize_display_markdown(cleaned) if for_markdown else normalize_whitespace(cleaned)
+    hs = build_spellchecker_for_languages(config, languages) if config.enable_hunspell else None
+    if config.enable_dictionary_correction or hs is not None:
+        cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
+    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
+    if should_apply_llm_correction(cleaned, config) and config.llm_correct:
+        LOGGER.info("LLM cleanup applied (light mode)")
+        cleaned = config.llm_correct(cleaned)
+    return cleaned
+
 def export_markdown(doc: Any) -> str:
     for method_name in ("export_to_markdown", "to_markdown", "export_to_md"):
         method = getattr(doc, method_name, None)
@@ -3969,6 +4013,34 @@ def main() -> int:
         help="Disable PaddleOCR-VL internal queues.",
     )
     parser.add_argument(
+        "--paddle-vl-layout-threshold",
+        type=float,
+        help="Layout score threshold for PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-unclip",
+        type=float,
+        help="Layout unclip ratio for PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-merge",
+        help="Layout merge mode for PaddleOCR-VL (small, large, union).",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-nms",
+        dest="paddle_vl_layout_nms",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-layout-nms",
+        dest="paddle_vl_layout_nms",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
         "--paddle-layout-model",
         help="PaddleX layout model (e.g., PP-DocLayout-L).",
     )
@@ -4286,6 +4358,14 @@ def main() -> int:
         config.paddle_vl_prompt_label = args.paddle_vl_prompt_label
     if args.paddle_vl_use_queues is not None:
         config.paddle_vl_use_queues = args.paddle_vl_use_queues
+    if args.paddle_vl_layout_threshold is not None:
+        config.paddle_vl_layout_threshold = args.paddle_vl_layout_threshold
+    if args.paddle_vl_layout_unclip is not None:
+        config.paddle_vl_layout_unclip = args.paddle_vl_layout_unclip
+    if args.paddle_vl_layout_merge:
+        config.paddle_vl_layout_merge = args.paddle_vl_layout_merge
+    if args.paddle_vl_layout_nms is not None:
+        config.paddle_vl_layout_nms = args.paddle_vl_layout_nms
     if args.paddle_layout_model:
         config.paddle_layout_model = args.paddle_layout_model
     if args.paddle_layout_threshold is not None:
@@ -4346,7 +4426,7 @@ def main() -> int:
 
     config.llm_correct = build_llm_cleanup_callback(config)
 
-    if config.paddle_layout_save_crops:
+    if paddle_save_crops:
         reset_debug_directory(config.paddle_layout_save_crops)
 
     # Proactively build spellchecker once to record backend info; will be reused lazily later
@@ -4398,13 +4478,31 @@ def main() -> int:
             except Exception as exc:
                 LOGGER.warning("Failed to write Paddle layout markdown to %s: %s", layout_md_path, exc)
         prefer_layout_markdown = external_ocr_used and layout_markdown_available
+        layout_engine_used = bool(conversion.metadata.get("layout_used")) or bool(conversion.metadata.get("layout_model"))
+        layout_engine_configured = bool(
+            external_ocr_used
+            and (
+                getattr(config, "paddle_use_vl", False)
+                or getattr(config, "paddle_use_structure_v3", False)
+                or getattr(config, "paddle_use_paddlex_layout", False)
+            )
+        )
+        layout_engine_active = layout_markdown_available or layout_engine_used or layout_engine_configured
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        should_postprocess = config.enable_post_correction and not prefer_layout_markdown
-        if config.enable_post_correction and prefer_layout_markdown:
+        postprocess_mode = "none"
+        if config.enable_post_correction:
+            if layout_engine_active:
+                postprocess_mode = "light"
+            elif not prefer_layout_markdown:
+                postprocess_mode = "full"
+        if config.enable_post_correction and postprocess_mode == "none":
             LOGGER.info("Skipping OCR post-processing to preserve Paddle layout output.")
-        if should_postprocess:
+        elif postprocess_mode == "light":
+            LOGGER.info("Using light OCR post-processing for layout output.")
+        if postprocess_mode in ("full", "light"):
             wordlist = prepare_dictionary_words(config)
+        if postprocess_mode == "full":
             allow_missing_space = ocr_used
             def safe_postprocess(text: str, label: Optional[str]) -> str:
                 processed = postprocess_text(
@@ -4422,6 +4520,14 @@ def main() -> int:
                 return processed
 
             postprocess_fn = lambda text, label=None: safe_postprocess(text, label)
+        elif postprocess_mode == "light":
+            postprocess_fn = lambda text, label=None: postprocess_text_light(
+                text,
+                config,
+                languages,
+                wordlist,
+                for_markdown=False,
+            )
 
         if postprocess_fn:
             total_pages = len(pages)
@@ -4439,20 +4545,28 @@ def main() -> int:
 
         markdown = conversion.markdown
         original_markdown = markdown
-        if config.enable_post_correction and config.postprocess_markdown and should_postprocess:
-            wordlist = prepare_dictionary_words(config)
-            allow_missing_space = ocr_used
+        if config.enable_post_correction and config.postprocess_markdown and postprocess_mode in ("full", "light"):
             if progress_cb:
                 progress_cb(100, "postprocess_markdown", "Postprocess markdown...")
-            processed_markdown = postprocess_text(
-                markdown,
-                config,
-                languages,
-                wordlist,
-                allow_missing_space=allow_missing_space,
-                progress_cb=progress_cb,
-                progress_label="markdown",
-            )
+            if postprocess_mode == "full":
+                allow_missing_space = ocr_used
+                processed_markdown = postprocess_text(
+                    markdown,
+                    config,
+                    languages,
+                    wordlist,
+                    allow_missing_space=allow_missing_space,
+                    progress_cb=progress_cb,
+                    progress_label="markdown",
+                )
+            else:
+                processed_markdown = postprocess_text_light(
+                    markdown,
+                    config,
+                    languages,
+                    wordlist,
+                    for_markdown=True,
+                )
             if original_markdown.strip() and not processed_markdown.strip():
                 LOGGER.warning("Postprocess removed all markdown; keeping original.")
                 markdown = original_markdown
@@ -5929,8 +6043,9 @@ def ocr_pages_with_paddle_vl(
         pipeline_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
     if getattr(config, "paddle_use_doc_unwarping", None) is not None:
         pipeline_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
-    if getattr(config, "paddle_vl_use_layout_detection", None) is not None:
-        pipeline_kwargs["use_layout_detection"] = bool(config.paddle_vl_use_layout_detection)
+    use_layout_detection = getattr(config, "paddle_vl_use_layout_detection", None)
+    if use_layout_detection is not None:
+        pipeline_kwargs["use_layout_detection"] = bool(use_layout_detection)
     if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
         pipeline_kwargs["use_chart_recognition"] = bool(config.paddle_vl_use_chart_recognition)
     if getattr(config, "paddle_vl_format_block_content", None) is not None:
@@ -5951,21 +6066,33 @@ def ocr_pages_with_paddle_vl(
         predict_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
     if getattr(config, "paddle_use_doc_unwarping", None) is not None:
         predict_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
-    if getattr(config, "paddle_vl_use_layout_detection", None) is not None:
-        predict_kwargs["use_layout_detection"] = bool(config.paddle_vl_use_layout_detection)
+    if use_layout_detection is not None:
+        predict_kwargs["use_layout_detection"] = bool(use_layout_detection)
     if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
         predict_kwargs["use_chart_recognition"] = bool(config.paddle_vl_use_chart_recognition)
     if getattr(config, "paddle_vl_format_block_content", None) is not None:
         predict_kwargs["format_block_content"] = bool(config.paddle_vl_format_block_content)
-    if getattr(config, "paddle_layout_threshold", None) is not None:
-        predict_kwargs["layout_threshold"] = config.paddle_layout_threshold
-    if getattr(config, "paddle_layout_nms", None) is not None:
-        predict_kwargs["layout_nms"] = bool(config.paddle_layout_nms)
-    if getattr(config, "paddle_layout_unclip", None) is not None:
-        predict_kwargs["layout_unclip_ratio"] = config.paddle_layout_unclip
-    if getattr(config, "paddle_layout_merge", None):
-        predict_kwargs["layout_merge_bboxes_mode"] = config.paddle_layout_merge
-    if getattr(config, "paddle_vl_prompt_label", None):
+    layout_threshold = getattr(config, "paddle_vl_layout_threshold", None)
+    if layout_threshold is None:
+        layout_threshold = getattr(config, "paddle_layout_threshold", None)
+    if layout_threshold is not None:
+        predict_kwargs["layout_threshold"] = layout_threshold
+    layout_nms = getattr(config, "paddle_vl_layout_nms", None)
+    if layout_nms is None:
+        layout_nms = getattr(config, "paddle_layout_nms", None)
+    if layout_nms is not None:
+        predict_kwargs["layout_nms"] = bool(layout_nms)
+    layout_unclip = getattr(config, "paddle_vl_layout_unclip", None)
+    if layout_unclip is None:
+        layout_unclip = getattr(config, "paddle_layout_unclip", None)
+    if layout_unclip is not None:
+        predict_kwargs["layout_unclip_ratio"] = layout_unclip
+    layout_merge = getattr(config, "paddle_vl_layout_merge", None)
+    if layout_merge is None:
+        layout_merge = getattr(config, "paddle_layout_merge", None)
+    if layout_merge:
+        predict_kwargs["layout_merge_bboxes_mode"] = layout_merge
+    if getattr(config, "paddle_vl_prompt_label", None) and use_layout_detection is False:
         predict_kwargs["prompt_label"] = str(config.paddle_vl_prompt_label)
     if getattr(config, "paddle_vl_use_queues", None) is not None:
         predict_kwargs["use_queues"] = bool(config.paddle_vl_use_queues)
@@ -6084,8 +6211,8 @@ def ocr_pages_with_paddle_vl(
 
     def _strip_markup(text: str) -> str:
         text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"!\\[[^\\\\]]*\\\\]\\\\([^)]+\\\\)", " ", text)
-        text = re.sub(r"\\\\s+", " ", text)
+        text = re.sub(r"!\\[[^\\]]*]\\([^)]+\\)", " ", text)
+        text = re.sub(r"\\s+", " ", text)
         return text.strip()
 
     pages: List[Dict[str, Any]] = []
@@ -11972,25 +12099,20 @@ langcodes[data]
 markdown
 markdown-it-py
 numpy
-opencv-python
 paddleocr[doc-parser]
 paddlepaddle==3.2.2
-paddlex[ocr]
 pdf2image
 pillow
-pyclipper
 pypdf
 pytesseract
 pyzotero
 redis
 requests
-shapely
 stopwordsiso
 tqdm
 wordfreq
 
 # Optional for language normalization and spellchecking
-langcodes
 # hunspell  # Disabled: fails to build on macOS/Python 3.13, use spylls fallback
 spylls
 `,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.3.4

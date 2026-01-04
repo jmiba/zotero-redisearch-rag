@@ -3,24 +3,19 @@ langcodes[data]
 markdown
 markdown-it-py
 numpy
-opencv-python
 paddleocr[doc-parser]
 paddlepaddle==3.2.2
-paddlex[ocr]
 pdf2image
 pillow
-pyclipper
 pypdf
 pytesseract
 pyzotero
 redis
 requests
-shapely
 stopwordsiso
 tqdm
 wordfreq
 
 # Optional for language normalization and spellchecking
-langcodes
 # hunspell  # Disabled: fails to build on macOS/Python 3.13, use spylls fallback
 spylls
