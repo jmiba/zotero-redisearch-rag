@@ -6,6 +6,8 @@
 - Chat queries now handle embedding dimension mismatches by offering a drop/rebuild and retrying after a successful rebuild.
 - Import/chat now surface embedding-provider failures encountered during rebuilds with clearer guidance.
 - Import and Zotero group lookups now show a toast when the local Zotero API is unreachable.
+- Docling OCR now supports PaddleOCR API endpoints (PaddleOCR-VL / PP-StructureV3) with engine selection and API key settings.
+- Indexed text now labels image captions explicitly for retrieval.
 - Python env now defaults to a shared user cache folder so multiple vaults can reuse it.
 - Added a setting to choose between shared and per-vault Python env locations.
 - Python path now defaults to blank and auto-detects interpreters when setting up the env.

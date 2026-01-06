@@ -212,6 +212,7 @@ Key settings:
    - Chat model (select via Refresh), temperature, history size, panel location
 - Docling / OCR cleanup
    - OCR mode and quality threshold; chunking mode
+   - OCR engine selection (Tesseract/local Paddle/PaddleOCR API) and Paddle OCR API key (get a free key at https://aistudio.baidu.com/paddleocr)
    - Optional LLM cleanup (provider/profile, model, temperature, thresholds)
 - Saved chats folder: where exported chat notes are stored
 - Citations: Prefer Obsidian note for citations (toggle)
@@ -279,6 +280,7 @@ If you want Web API file downloads, your Zotero library must be synced and the A
 - Force: always OCR.
 
 You can adjust the quality threshold in settings.
+If you want PaddleOCR API OCR, set the Paddle OCR API key (https://aistudio.baidu.com/paddleocr) and select a Paddle API engine (PP-StructureV3 or PaddleOCR-VL) in Settings.
 
 ## Troubleshooting
 
