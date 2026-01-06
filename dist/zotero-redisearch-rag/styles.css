@@ -301,6 +301,10 @@
   opacity: 0.75;
 }
 
+.zrr-sync-badge--chunk-end.zrr-sync-badge--page {
+  display: none;
+}
+
 .zrr-sync-badge.is-excluded {
   border-color: var(--background-modifier-error);
   color: var(--text-error);

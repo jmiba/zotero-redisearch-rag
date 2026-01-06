@@ -286,6 +286,7 @@ def delete_existing_chunk_keys(
 def markdown_to_text(text: str) -> str:
     if not text:
         return ""
+    text = strip_image_references(text)
     try:
         import markdown as md
     except Exception:
@@ -300,6 +301,42 @@ def markdown_to_text(text: str) -> str:
     stripped = re.sub(r"[ \t]+", " ", stripped)
     stripped = re.sub(r"\s*\n\s*", "\n", stripped)
     return stripped.strip()
+
+
+_OBSIDIAN_IMAGE_RE = re.compile(r"!\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]")
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[(?P<label>[^\]]*)]\([^)]+\)")
+_HTML_IMAGE_RE = re.compile(r"<img[^>]*>", re.IGNORECASE)
+
+
+def strip_image_references(text: str) -> str:
+    if not text:
+        return ""
+    def _image_marker(label: str) -> str:
+        label = label.strip()
+        if label:
+            return f" Image caption: {label} "
+        return " Image "
+
+    def obsidian_repl(match: re.Match[str]) -> str:
+        label = (match.group("label") or "").strip()
+        return _image_marker(label)
+
+    def markdown_repl(match: re.Match[str]) -> str:
+        label = (match.group("label") or "").strip()
+        return _image_marker(label)
+
+    def html_repl(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        alt_match = re.search(r"\balt=(['\"])(?P<alt>[^'\"]*)\1", tag, re.IGNORECASE)
+        if alt_match:
+            alt = (alt_match.group("alt") or "").strip()
+            return _image_marker(alt)
+        return _image_marker("")
+
+    text = _OBSIDIAN_IMAGE_RE.sub(obsidian_repl, text)
+    text = _MARKDOWN_IMAGE_RE.sub(markdown_repl, text)
+    text = _HTML_IMAGE_RE.sub(html_repl, text)
+    return text
 
 
 def split_paragraphs(text: str) -> List[str]:
@@ -390,6 +427,7 @@ def split_for_embedding(text: str, max_chars: int, overlap_chars: int) -> List[s
 def markdown_to_index_text(text: str) -> str:
     if not text:
         return ""
+    text = strip_image_references(text)
     try:
         from markdown_it import MarkdownIt
     except Exception:

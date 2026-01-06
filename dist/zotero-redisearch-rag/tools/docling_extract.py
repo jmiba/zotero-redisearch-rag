@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import base64
+import errno
 import json
 import math
 import logging
@@ -8,7 +10,10 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
@@ -37,7 +42,14 @@ SPELLCHECKER_CACHE: Dict[str, Any] = {}
 
 
 def eprint(message: str) -> None:
-    sys.stderr.write(message + "\n")
+    try:
+        sys.stderr.write(message + "\n")
+    except BrokenPipeError:
+        return
+    except OSError as exc:
+        if exc.errno == errno.EPIPE:
+            return
+        raise
 
 
 ProgressCallback = Callable[[int, str, str], None]
@@ -49,14 +61,27 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
             return None
         return _noop
 
+    broken_pipe = False
+
     def _emit(percent: int, stage: str, message: str) -> None:
+        nonlocal broken_pipe
+        if broken_pipe:
+            return
         payload = {
             "type": "progress",
             "percent": max(0, min(100, int(percent))),
             "stage": stage,
             "message": message,
         }
-        print(json.dumps(payload), flush=True)
+        try:
+            print(json.dumps(payload), flush=True)
+        except BrokenPipeError:
+            broken_pipe = True
+        except OSError as exc:
+            if exc.errno == errno.EPIPE:
+                broken_pipe = True
+                return
+            raise
 
     return _emit
 
@@ -65,7 +90,7 @@ def make_progress_emitter(enabled: bool) -> ProgressCallback:
 class DoclingProcessingConfig:
     ocr_mode: str = "auto"
     prefer_ocr_engine: str = "paddle"
-    fallback_ocr_engine: str = "paddle"
+    fallback_ocr_engine: str = "tesseract"
     language_hint: Optional[str] = None
     default_lang_german: str = "deu+eng"
     default_lang_english: str = "eng"
@@ -129,19 +154,17 @@ class DoclingProcessingConfig:
     boilerplate_edge_lines: int = 3
     boilerplate_ngram_size: int = 3
     boilerplate_near_dup_threshold: float = 0.82
-    postprocess_markdown: bool = True
+    postprocess_markdown: bool = False
     analysis_max_pages: int = 5
     analysis_sample_strategy: str = "middle"
     ocr_dpi: int = 300
-    ocr_overlay_dpi: int = 400
+    ocr_overlay_dpi: int = 300
     paddle_max_dpi: int = 300
-    paddle_target_max_side_px: int = 3500
-    paddle_use_doc_orientation_classify: bool = True
-    paddle_use_doc_unwarping: bool = True
+    paddle_target_max_side_px: int = 6000
+    paddle_use_doc_orientation_classify: bool = False
+    paddle_use_doc_unwarping: bool = False
     paddle_use_textline_orientation: bool = True
-    # Enable PP-StructureV3 layout parsing by default to mirror the smoke test's
-    # layout-first approach. Can be disabled via CLI: --no-paddle-structure-v3
-    paddle_use_structure_v3: bool = True
+    paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
     paddle_structure_footer_ratio: float = 0.05
@@ -151,10 +174,12 @@ class DoclingProcessingConfig:
     # PaddleX DocLayout extraction (mirrors paddle_ocr_smoke.py layout path).
     paddle_use_paddlex_layout: bool = True
     paddle_layout_model: str = "PP-DocLayout-L"
-    paddle_layout_threshold: float = 0.5
-    paddle_layout_img_size: Optional[int] = None
-    paddle_layout_merge: str = "small"
-    paddle_layout_unclip: float = 1.05
+    paddle_layout_threshold: float = 0.3
+    paddle_layout_img_size: Optional[int] = 6000
+    paddle_layout_merge: str = "large"
+    paddle_layout_unclip: float = 1.06
+    paddle_crop_padding: int = 60
+    paddle_crop_vbias: int = 6
     paddle_layout_device: Optional[str] = None
     paddle_layout_nms: bool = True
     paddle_layout_keep_labels: str = (
@@ -162,7 +187,10 @@ class DoclingProcessingConfig:
         "body,section,text_block,textbox,textline,paragraph"
     )
     paddle_layout_recognize_boxes: bool = True
-    paddle_layout_fail_on_zero: bool = False
+    paddle_layout_fail_on_zero: bool = True
+    paddle_layout_save_crops: Optional[str] = None
+    paddle_dump: bool = False
+    paddle_layout_markdown_out: Optional[str] = None
     # PaddleOCR-VL (optional, requires paddleocr[doc-parser])
     paddle_use_vl: bool = False
     paddle_vl_device: Optional[str] = None
@@ -170,11 +198,31 @@ class DoclingProcessingConfig:
     paddle_vl_rec_server_url: Optional[str] = None
     paddle_vl_rec_max_concurrency: Optional[int] = None
     paddle_vl_rec_api_key: Optional[str] = None
-    paddle_vl_use_layout_detection: Optional[bool] = None
-    paddle_vl_use_chart_recognition: Optional[bool] = None
-    paddle_vl_format_block_content: Optional[bool] = None
-    paddle_vl_prompt_label: Optional[str] = None
-    paddle_vl_use_queues: Optional[bool] = None
+    paddle_vl_use_layout_detection: Optional[bool] = True
+    paddle_vl_use_chart_recognition: Optional[bool] = True
+    paddle_vl_format_block_content: Optional[bool] = True
+    paddle_vl_prompt_label: Optional[str] = "ocr"
+    paddle_vl_use_queues: Optional[bool] = False
+    paddle_vl_layout_threshold: Optional[float] = 0.3
+    paddle_vl_layout_nms: Optional[bool] = True
+    paddle_vl_layout_unclip: Optional[float] = 1.2
+    paddle_vl_layout_merge: Optional[str] = "small"
+    paddle_vl_api_disable: bool = False
+    paddle_vl_api_url: Optional[str] = None
+    paddle_vl_api_token: Optional[str] = None
+    paddle_vl_api_timeout_sec: int = 120
+    paddle_vl_markdown_ignore_labels: Optional[Sequence[str]] = field(
+        default_factory=lambda: ["header_image", "footer_image", "aside_text"]
+    )
+    paddle_vl_repetition_penalty: Optional[float] = 1.0
+    paddle_vl_temperature: Optional[float] = 0.0
+    paddle_vl_top_p: Optional[float] = 1.0
+    paddle_vl_min_pixels: Optional[int] = 147384
+    paddle_vl_max_pixels: Optional[int] = 2822400
+    paddle_structure_api_disable: bool = False
+    paddle_structure_api_url: Optional[str] = None
+    paddle_structure_api_token: Optional[str] = None
+    paddle_structure_api_timeout_sec: int = 120
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -252,6 +300,94 @@ def normalize_display_markdown(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+_IMG_TAG_RE = re.compile(r"<img[^>]*?>", re.IGNORECASE)
+_DIV_IMG_TAG_RE = re.compile(r"<div[^>]*>\s*<img[^>]*?>\s*</div>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_image_filename(src: str) -> Optional[str]:
+    if not src:
+        return None
+    if src.startswith("data:"):
+        return None
+    path = src
+    if src.startswith(("http://", "https://")):
+        try:
+            path = urllib.parse.urlparse(src).path
+        except Exception:
+            path = src
+    filename = os.path.basename(path)
+    return filename or None
+
+
+def _extract_img_attr(tag: str, attr: str) -> Optional[str]:
+    match = re.search(rf"\b{re.escape(attr)}=(['\"])(?P<val>[^'\"]*)\1", tag, re.IGNORECASE)
+    if match:
+        return match.group("val")
+    return None
+
+
+def _obsidian_image_link(
+    src: str,
+    alt_text: Optional[str] = None,
+    image_labels: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    filename = _extract_image_filename(src)
+    if not filename:
+        return None
+    label = None
+    if image_labels:
+        label = image_labels.get(filename) or image_labels.get(src)
+    if not label and alt_text:
+        label = alt_text.strip() or None
+    if label:
+        return f"![[{filename}|{label}]]"
+    return f"![[{filename}]]"
+
+
+def convert_html_images_to_obsidian(
+    markdown: str,
+    image_labels: Optional[Dict[str, str]] = None,
+) -> str:
+    if not markdown:
+        return ""
+
+    def replace_div(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src = _extract_img_attr(tag, "src")
+        alt_text = _extract_img_attr(tag, "alt")
+        if not src:
+            return tag
+        link = _obsidian_image_link(src, alt_text=alt_text, image_labels=image_labels)
+        return link if link else match.group(0)
+
+    def replace_img(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src = _extract_img_attr(tag, "src")
+        alt_text = _extract_img_attr(tag, "alt")
+        if not src:
+            return tag
+        link = _obsidian_image_link(src, alt_text=alt_text, image_labels=image_labels)
+        return link if link else match.group(0)
+
+    updated = _DIV_IMG_TAG_RE.sub(replace_div, markdown)
+    updated = _IMG_TAG_RE.sub(replace_img, updated)
+    return updated
+
+
+def remap_layout_image_keys(layout_images: Dict[str, Any]) -> Dict[str, Any]:
+    remapped: Dict[str, Any] = {}
+    for key, value in layout_images.items():
+        new_key = key
+        if isinstance(key, str):
+            filename = _extract_image_filename(key)
+            if filename:
+                new_key = filename
+        if new_key in remapped:
+            LOGGER.warning("Duplicate layout image key after remap: %s", new_key)
+            continue
+        remapped[new_key] = value
+    return remapped
+
 
 def normalize_chunk_whitespace(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", " ")
@@ -297,6 +433,18 @@ def normalize_chunk_whitespace(text: str) -> str:
     result = "\n".join(out_lines)
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
+
+
+def reset_debug_directory(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.exists(path):
+            os.remove(path)
+    except Exception as exc:
+        LOGGER.warning("Failed to clear debug directory %s: %s", path, exc)
 
 
 def reflow_page_text(text: str) -> str:
@@ -747,6 +895,32 @@ def select_wordfreq_languages(languages: str) -> List[str]:
         selected.append("de")
     if any(token in lang for token in ("eng", "en", "english")):
         selected.append("en")
+    if any(token in lang for token in ("fra", "fr", "french", "francais", "français")):
+        selected.append("fr")
+    if any(token in lang for token in ("spa", "es", "spanish", "espanol", "español")):
+        selected.append("es")
+    if any(token in lang for token in ("ita", "it", "italian", "italiano")):
+        selected.append("it")
+    if any(token in lang for token in ("pol", "pl", "polish", "polski")):
+        selected.append("pl")
+    if any(token in lang for token in ("por", "pt", "portuguese", "português", "portugues")):
+        selected.append("pt")
+    if any(token in lang for token in ("nld", "dut", "nl", "dutch", "nederlands")):
+        selected.append("nl")
+    if any(token in lang for token in ("swe", "sv", "swedish", "svenska")):
+        selected.append("sv")
+    if any(token in lang for token in ("nor", "no", "norsk", "bokmal", "bokmål", "nynorsk")):
+        selected.append("no")
+    if any(token in lang for token in ("dan", "da", "danish", "dansk")):
+        selected.append("da")
+    if any(token in lang for token in ("fin", "fi", "finnish", "suomi")):
+        selected.append("fi")
+    if any(token in lang for token in ("rus", "ru", "russian", "рус")):
+        selected.append("ru")
+    if any(token in lang for token in ("ces", "cze", "cs", "czech", "čeština", "cesky", "česky")):
+        selected.append("cs")
+    if any(token in lang for token in ("ell", "el", "greek", "ελληνικά")):
+        selected.append("el")
     if not selected:
         selected.append("en")
     return selected
@@ -976,6 +1150,28 @@ def select_language_set(
                 return "fra+eng"  # French + English fallback
             if code == "pol":
                 return "pol+eng"  # Polish + English fallback
+            if code == "ita":
+                return "ita+eng"  # Italian + English fallback
+            if code == "spa":
+                return "spa+eng"  # Spanish + English fallback
+            if code == "por":
+                return "por+eng"  # Portuguese + English fallback
+            if code == "nld" or code == "dut":
+                return "nld+eng"  # Dutch + English fallback
+            if code == "swe":
+                return "swe+eng"  # Swedish + English fallback
+            if code == "nor":
+                return "nor+eng"  # Norwegian + English fallback
+            if code == "dan":
+                return "dan+eng"  # Danish + English fallback
+            if code == "fin":
+                return "fin+eng"  # Finnish + English fallback
+            if code == "rus":
+                return "rus+eng"  # Russian + English fallback
+            if code == "ces" or code == "cze":
+                return "ces+eng"  # Czech + English fallback
+            if code == "ell" or code == "gre":
+                return "ell+eng"  # Greek + English fallback
             # Add more as needed
             return code
         except Exception:
@@ -991,6 +1187,15 @@ def select_language_set(
         (r"(\bit\b|_it\b|-it\b|ita|italian|italiano)", "ita+eng"),
         (r"(\bes\b|_es\b|-es\b|spa|spanish|espanol|español)", "spa+eng"),
         (r"(\bpl\b|_pl\b|-pl\b|pol|polish|polski)", "pol+eng"),
+        (r"(\bpt\b|_pt\b|-pt\b|por|portuguese|português|portugues)", "por+eng"),
+        (r"(\bnl\b|_nl\b|-nl\b|nld|dut|dutch|nederlands)", "nld+eng"),
+        (r"(\bsv\b|_sv\b|-sv\b|swe|swedish|svenska)", "swe+eng"),
+        (r"(\bno\b|_no\b|-no\b|nor|norsk|bokmal|bokmål|nynorsk)", "nor+eng"),
+        (r"(\bda\b|_da\b|-da\b|dan|danish|dansk)", "dan+eng"),
+        (r"(\bfi\b|_fi\b|-fi\b|fin|finnish|suomi)", "fin+eng"),
+        (r"(\bru\b|_ru\b|-ru\b|rus|russian|рус)", "rus+eng"),
+        (r"(\bcs\b|_cs\b|-cs\b|ces|cze|czech|čeština|cesky|česky)", "ces+eng"),
+        (r"(\bel\b|_el\b|-el\b|ell|greek|ελληνικά)", "ell+eng"),
     ]:
         if re.search(pattern, name):
             return lang_code
@@ -1018,6 +1223,10 @@ def normalize_languages_for_engine(languages: str, engine: str) -> str:
                 "spa": "spanish",
                 "pl": "polish",
                 "pol": "polish",
+                "pt": "portuguese",
+                "por": "portuguese",
+                "ru": "russian",
+                "rus": "russian",
             }
             alpha2 = code.to_alpha2()
             alpha3 = code.to_alpha3()
@@ -1045,17 +1254,7 @@ def get_pdf_max_page_points(pdf_path: str, max_pages: int = 3) -> Optional[float
             page = reader.pages[idx]
             width = float(page.mediabox.width)
             height = float(page.mediabox.height)
-            try:
-                user_unit = float(getattr(page, "user_unit", None) or page.get("/UserUnit", 1.0))
-            except Exception:
-                user_unit = 1.0
-            # Normalize to 1/72" points; some scanned PDFs use fractional user units (e.g., 0.25)
-            # which otherwise inflate the detected page size and force a low DPI cap.
-            if not math.isfinite(user_unit) or user_unit <= 0:
-                user_unit = 1.0
-            width_pt = width * user_unit
-            height_pt = height * user_unit
-            max_side = max(max_side, width_pt, height_pt)
+            max_side = max(max_side, width, height)
         return max_side or None
     except Exception:
         return None
@@ -1260,6 +1459,18 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
             "en_US": ("en", "en_US"),
             "en_GB": ("en", "en_GB"),
             "fr_FR": ("fr_FR", "fr"),
+            "es_ES": ("es", "es"),
+            "it_IT": ("it_IT", "it_IT"),
+            "pl_PL": ("pl_PL", "pl_PL"),
+            "pt_PT": ("pt_PT", "pt_PT"),
+            "pt_BR": ("pt_BR", "pt_BR"),
+            "nl_NL": ("nl_NL", "nl_NL"),
+            "sv_SE": ("sv_SE", "sv_SE"),
+            "da_DK": ("da_DK", "da_DK"),
+            "fi_FI": ("fi_FI", "fi_FI"),
+            "ru_RU": ("ru_RU", "ru_RU"),
+            "cs_CZ": ("cs_CZ", "cs_CZ"),
+            "el_GR": ("el_GR", "el_GR"),
         }
         lang_code = None
         lang = (languages or "").lower()
@@ -1267,8 +1478,30 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
             lang_code = "de_DE"
         elif any(t in lang for t in ("en", "eng", "english")):
             lang_code = "en_US"
-        elif any(t in lang for t in ("fr", "fra", "french", "francais")):
+        elif any(t in lang for t in ("fr", "fra", "french", "francais", "français")):
             lang_code = "fr_FR"
+        elif any(t in lang for t in ("es", "spa", "spanish", "espanol", "español")):
+            lang_code = "es_ES"
+        elif any(t in lang for t in ("it", "ita", "italian", "italiano")):
+            lang_code = "it_IT"
+        elif any(t in lang for t in ("pl", "pol", "polish", "polski")):
+            lang_code = "pl_PL"
+        elif any(t in lang for t in ("pt", "por", "portuguese", "português", "portugues")):
+            lang_code = "pt_PT"
+        elif any(t in lang for t in ("nl", "nld", "dut", "dutch", "nederlands")):
+            lang_code = "nl_NL"
+        elif any(t in lang for t in ("sv", "swe", "swedish", "svenska")):
+            lang_code = "sv_SE"
+        elif any(t in lang for t in ("da", "dan", "danish", "dansk")):
+            lang_code = "da_DK"
+        elif any(t in lang for t in ("fi", "fin", "finnish", "suomi")):
+            lang_code = "fi_FI"
+        elif any(t in lang for t in ("ru", "rus", "russian", "рус")):
+            lang_code = "ru_RU"
+        elif any(t in lang for t in ("cs", "ces", "cze", "czech", "čeština", "česky", "cesky")):
+            lang_code = "cs_CZ"
+        elif any(t in lang for t in ("el", "ell", "greek", "ελληνικά")):
+            lang_code = "el_GR"
         if not lang_code:
             lang_code = "en_US"
         folder, prefix = repo_map.get(lang_code, (lang_code, lang_code))
@@ -1962,6 +2195,27 @@ def postprocess_text(
         cleaned = config.llm_correct(cleaned)
     return cleaned
 
+def postprocess_text_light(
+    text: str,
+    config: DoclingProcessingConfig,
+    languages: str,
+    wordlist: Sequence[str],
+    for_markdown: bool = False,
+) -> str:
+    if not text:
+        return text
+    cleaned = dehyphenate_text(text)
+    cleaned = replace_ligatures(cleaned)
+    cleaned = normalize_display_markdown(cleaned) if for_markdown else normalize_whitespace(cleaned)
+    hs = build_spellchecker_for_languages(config, languages) if config.enable_hunspell else None
+    if config.enable_dictionary_correction or hs is not None:
+        cleaned = apply_dictionary_correction(cleaned, wordlist, hs)
+    cleaned = apply_umlaut_corrections(cleaned, languages, wordlist, hs)
+    if should_apply_llm_correction(cleaned, config) and config.llm_correct:
+        LOGGER.info("LLM cleanup applied (light mode)")
+        cleaned = config.llm_correct(cleaned)
+    return cleaned
+
 def export_markdown(doc: Any) -> str:
     for method_name in ("export_to_markdown", "to_markdown", "export_to_md"):
         method = getattr(doc, method_name, None)
@@ -2077,21 +2331,25 @@ def extract_pages_from_pdf(
 def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     sections: List[Dict[str, Any]] = []
     current_title = ""
+    current_heading = ""
     current_lines: List[str] = []
 
     def flush() -> None:
-        nonlocal current_title, current_lines
-        if current_title or current_lines:
+        nonlocal current_title, current_heading, current_lines
+        if current_title or current_heading or current_lines:
             sections.append({
                 "title": current_title.strip(),
+                "heading": current_heading.strip(),
                 "text": "\n".join(current_lines).strip(),
             })
         current_title = ""
+        current_heading = ""
         current_lines = []
 
     for line in markdown.splitlines():
         if line.startswith("#"):
             flush()
+            current_heading = line.rstrip()
             current_title = line.lstrip("#").strip()
         else:
             current_lines.append(line)
@@ -3059,9 +3317,11 @@ def run_external_ocr_pages(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_dpi = dpi or config.ocr_dpi
     helpers = _external_ocr_helpers()
+    helpers["ocr_source_path"] = pdf_path
     if progress_cb and progress_span > 0:
         label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
-        progress_cb(progress_base, "ocr", f"{label} starting")
+        # Use a neutral initializing message; inner routines will promptly override with page counters
+        progress_cb(progress_base, "ocr", f"{label} initializing")
     if engine == "paddle" and config.paddle_use_vl:
         LOGGER.info(
             "External OCR starting: engine=%s (PaddleOCR-VL), dpi=%d",
@@ -3082,8 +3342,17 @@ def run_external_ocr_pages(
         )
     if engine == "paddle":
         max_side_points = get_pdf_max_page_points(pdf_path)
+        orig_effective_dpi = effective_dpi
         if max_side_points and config.paddle_target_max_side_px > 0:
             target_dpi = int(config.paddle_target_max_side_px * 72 / max_side_points)
+            if target_dpi > 0:
+                LOGGER.info(
+                    "Paddle OCR target DPI: page max side=%.1f pts, limit=%d px -> %d DPI (requested=%d)",
+                    max_side_points,
+                    config.paddle_target_max_side_px,
+                    target_dpi,
+                    orig_effective_dpi,
+                )
             if target_dpi > 0 and target_dpi < effective_dpi:
                 LOGGER.info(
                     "Paddle OCR DPI adjusted for page size: %d -> %d",
@@ -3100,6 +3369,19 @@ def run_external_ocr_pages(
             effective_dpi = config.paddle_max_dpi
     images = render_pdf_pages(pdf_path, effective_dpi)
     LOGGER.info("External OCR rendered pages: %d", len(images))
+    if images:
+        try:
+            sample_w, sample_h = images[0].size  # type: ignore[attr-defined]
+        except Exception:
+            sample_w = sample_h = 0
+        if sample_w and sample_h:
+            LOGGER.info(
+                "External OCR sample page: %dx%d px @ %d DPI (engine=%s)",
+                sample_w,
+                sample_h,
+                effective_dpi,
+                engine,
+            )
     if engine == "paddle":
         if config.paddle_use_vl:
             try:
@@ -3130,7 +3412,7 @@ def run_external_ocr_pages(
                 LOGGER.warning("PaddleOCR-VL failed; falling back to PaddleOCR: %s", exc)
         if config.paddle_use_structure_v3:
             try:
-                return ocr_pages_with_paddle_structure(
+                pages, stats = ocr_pages_with_paddle_structure(
                     images,
                     normalize_languages_for_engine(languages, engine),
                     config,
@@ -3139,6 +3421,20 @@ def run_external_ocr_pages(
                     progress_base,
                     progress_span,
                 )
+                if ocr_pages_text_chars(pages) == 0:
+                    LOGGER.warning(
+                        "PP-Structure returned empty text; falling back to PaddleOCR."
+                    )
+                    return ocr_pages_with_paddle(
+                        images,
+                        normalize_languages_for_engine(languages, engine),
+                        config,
+                        helpers,
+                        progress_cb,
+                        progress_base,
+                        progress_span,
+                    )
+                return pages, stats
             except Exception as exc:
                 LOGGER.warning("PP-StructureV3 failed; falling back to PaddleOCR: %s", exc)
         return ocr_pages_with_paddle(
@@ -3349,7 +3645,10 @@ def convert_pdf_with_docling(
                     )
                     pages = ocr_pages
                     external_ocr_used = True
-                    if config.postprocess_markdown and not markdown.strip():
+                    layout_markdown = ocr_stats.get("layout_markdown")
+                    if isinstance(layout_markdown, str) and layout_markdown.strip():
+                        markdown = layout_markdown
+                    elif config.postprocess_markdown and not markdown.strip():
                         markdown = "\n\n".join(page.get("text", "") for page in ocr_pages)
                 else:
                     ocr_stats = {}
@@ -3545,25 +3844,34 @@ def build_chunks_page(
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
     heading_map: Optional[Dict[int, List[str]]] = None,
     table_map: Optional[Dict[int, List[str]]] = None,
+    preserve_markdown: bool = False,
 ) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     total_pages = len(pages)
     for page in pages:
-        raw_text = str(page.get("text", ""))
+        raw_markdown = page.get("markdown") if preserve_markdown else None
+        if isinstance(raw_markdown, str) and raw_markdown.strip():
+            raw_text = raw_markdown
+            apply_postprocess = False
+        else:
+            raw_text = str(page.get("text", ""))
+            apply_postprocess = True
         page_num = int(page.get("page_num", 0))
-        if postprocess:
+        if postprocess and apply_postprocess:
             raw_text = postprocess(raw_text, f"page {page_num}/{total_pages}")
         raw_text = clean_chunk_text(raw_text, config)
-        if table_map:
-            tables = table_map.get(page_num, [])
-            if tables:
-                raw_text = inject_markdown_tables(raw_text, tables)
-        if heading_map:
-            titles = heading_map.get(page_num, [])
-            if titles:
-                raw_text = inject_headings_inline(raw_text, titles)
+        if apply_postprocess:
+            if table_map:
+                tables = table_map.get(page_num, [])
+                if tables:
+                    raw_text = inject_markdown_tables(raw_text, tables)
+            if heading_map:
+                titles = heading_map.get(page_num, [])
+                if titles:
+                    raw_text = inject_headings_inline(raw_text, titles)
         cleaned = normalize_display_markdown(raw_text)
-        cleaned = reflow_page_text(cleaned)
+        if apply_postprocess:
+            cleaned = reflow_page_text(cleaned)
         if not cleaned:
             continue
         chunk_id = f"p{page_num}"
@@ -3584,22 +3892,30 @@ def build_chunks_section(
     pages: List[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
+    preserve_markdown: bool = False,
 ) -> List[Dict[str, Any]]:
     sections = split_markdown_sections(markdown)
     chunks: List[Dict[str, Any]] = []
     seen_ids: Dict[str, int] = {}
 
     if not sections:
-        return build_chunks_page(doc_id, pages, config=config)
+        return build_chunks_page(doc_id, pages, config=config, preserve_markdown=preserve_markdown)
 
     total_sections = len(sections)
     for idx, section in enumerate(sections, start=1):
         title = section.get("title", "")
+        heading_line = section.get("heading", "")
         text = section.get("text", "")
-        if postprocess:
-            text = postprocess(text, f"section {idx}/{total_sections}")
-        text = clean_chunk_text(text, config)
-        if not text.strip():
+        if preserve_markdown and isinstance(heading_line, str) and heading_line.strip():
+            display_text = f"{heading_line}\n\n{text}".strip() if text else heading_line.strip()
+            apply_postprocess = False
+        else:
+            display_text = text
+            apply_postprocess = True
+        if postprocess and apply_postprocess:
+            display_text = postprocess(display_text, f"section {idx}/{total_sections}")
+        display_text = clean_chunk_text(display_text, config)
+        if not display_text.strip():
             continue
         base_id = slugify(title) or f"section-{idx}"
         if base_id in seen_ids:
@@ -3609,7 +3925,7 @@ def build_chunks_section(
             seen_ids[base_id] = 1
         max_chars = config.max_chunk_chars if config else 0
         overlap_chars = config.chunk_overlap_chars if config else 0
-        segments = split_text_by_size(text, max_chars, overlap_chars)
+        segments = split_text_by_size(display_text, max_chars, overlap_chars)
         for seg_idx, segment in enumerate(segments, start=1):
             cleaned = normalize_display_markdown(segment)
             if not cleaned:
@@ -3634,11 +3950,22 @@ def main() -> int:
     parser.add_argument("--doc-id", help="Document identifier")
     parser.add_argument("--out-json", help="Output JSON path")
     parser.add_argument("--out-md", help="Output markdown path")
+    parser.add_argument("--config-json", help="Optional path to a JSON config file (default: docling_config.json under the cache root)")
     parser.add_argument("--log-file", help="Optional path to write a detailed log file")
     parser.add_argument("--spellchecker-info-out", help="Optional path to write spellchecker backend info JSON")
     parser.add_argument("--chunking", choices=["page", "section"], default="page")
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
+    parser.add_argument(
+        "--prefer-ocr-engine",
+        choices=["paddle", "tesseract"],
+        help="Preferred external OCR engine when available.",
+    )
+    parser.add_argument(
+        "--fallback-ocr-engine",
+        choices=["paddle", "tesseract"],
+        help="Fallback external OCR engine when the preferred engine is unavailable.",
+    )
     parser.add_argument(
         "--paddle-structure-v3",
         dest="paddle_structure_v3",
@@ -3656,6 +3983,33 @@ def main() -> int:
     parser.add_argument(
         "--paddle-structure-version",
         help="Override Paddle PP-Structure version (e.g., PP-StructureV3)",
+    )
+    parser.add_argument(
+        "--paddle-structure-api",
+        dest="paddle_structure_api_disable",
+        action="store_false",
+        default=None,
+        help="Enable PP-StructureV3 API (overrides local Paddle structure).",
+    )
+    parser.add_argument(
+        "--no-paddle-structure-api",
+        dest="paddle_structure_api_disable",
+        action="store_true",
+        default=None,
+        help="Disable PP-StructureV3 API.",
+    )
+    parser.add_argument(
+        "--paddle-structure-api-url",
+        help="PP-StructureV3 API URL.",
+    )
+    parser.add_argument(
+        "--paddle-structure-api-token",
+        help="PP-StructureV3 API token.",
+    )
+    parser.add_argument(
+        "--paddle-structure-api-timeout",
+        type=int,
+        help="PP-StructureV3 API timeout in seconds.",
     )
     parser.add_argument(
         "--paddle-max-dpi",
@@ -3778,6 +4132,90 @@ def main() -> int:
         help="Disable PaddleOCR-VL internal queues.",
     )
     parser.add_argument(
+        "--paddle-vl-layout-threshold",
+        type=float,
+        help="Layout score threshold for PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-unclip",
+        type=float,
+        help="Layout unclip ratio for PaddleOCR-VL.",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-merge",
+        help="Layout merge mode for PaddleOCR-VL (small, large, union).",
+    )
+    parser.add_argument(
+        "--paddle-vl-layout-nms",
+        dest="paddle_vl_layout_nms",
+        action="store_true",
+        default=None,
+        help="Enable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-layout-nms",
+        dest="paddle_vl_layout_nms",
+        action="store_false",
+        default=None,
+        help="Disable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
+        "--paddle-vl-api",
+        dest="paddle_vl_api_disable",
+        action="store_false",
+        default=None,
+        help="Enable PaddleOCR-VL API.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-api",
+        dest="paddle_vl_api_disable",
+        action="store_true",
+        default=None,
+        help="Disable PaddleOCR-VL API.",
+    )
+    parser.add_argument(
+        "--paddle-vl-api-url",
+        help="PaddleOCR-VL API URL (overrides local PaddleOCR-VL).",
+    )
+    parser.add_argument(
+        "--paddle-vl-api-token",
+        help="PaddleOCR-VL API token.",
+    )
+    parser.add_argument(
+        "--paddle-vl-api-timeout",
+        type=int,
+        help="PaddleOCR-VL API timeout in seconds.",
+    )
+    parser.add_argument(
+        "--paddle-vl-markdown-ignore-labels",
+        help="Comma-separated list of layout labels to ignore in API markdown output.",
+    )
+    parser.add_argument(
+        "--paddle-vl-repetition-penalty",
+        type=float,
+        help="PaddleOCR-VL API repetition penalty.",
+    )
+    parser.add_argument(
+        "--paddle-vl-temperature",
+        type=float,
+        help="PaddleOCR-VL API temperature.",
+    )
+    parser.add_argument(
+        "--paddle-vl-top-p",
+        type=float,
+        help="PaddleOCR-VL API top-p.",
+    )
+    parser.add_argument(
+        "--paddle-vl-min-pixels",
+        type=int,
+        help="PaddleOCR-VL API min pixels.",
+    )
+    parser.add_argument(
+        "--paddle-vl-max-pixels",
+        type=int,
+        help="PaddleOCR-VL API max pixels.",
+    )
+    parser.add_argument(
         "--paddle-layout-model",
         help="PaddleX layout model (e.g., PP-DocLayout-L).",
     )
@@ -3807,6 +4245,14 @@ def main() -> int:
     parser.add_argument(
         "--paddle-layout-keep-labels",
         help="Comma-separated list of PaddleX layout labels to OCR.",
+    )
+    parser.add_argument(
+        "--paddle-layout-save-crops",
+        help="Directory to write Paddle layout crop images for debugging.",
+    )
+    parser.add_argument(
+        "--paddle-layout-md-out",
+        help="Path to write raw Paddle layout markdown output for debugging.",
     )
     parser.add_argument(
         "--paddle-layout-recognize-boxes",
@@ -3840,6 +4286,11 @@ def main() -> int:
         "--paddle-layout-fail-on-zero",
         action="store_true",
         help="Fail if PaddleX layout detects zero boxes.",
+    )
+    parser.add_argument(
+        "--paddle-dump",
+        action="store_true",
+        help="Enable verbose Paddle layout diagnostics (similar to smoke test).",
     )
     parser.add_argument(
         "--max-chunk-chars",
@@ -3926,6 +4377,18 @@ def main() -> int:
         return 2
 
     logging.basicConfig(level=logging.INFO)
+    # Ensure Docling's internal modules emit INFO logs so the CLI log file captures
+    # each pipeline stage (external OCR, layout, etc.).
+    for logger_name in [
+        "docling",
+        "docling.backend",
+        "docling.models",
+        "docling.pipeline",
+        "docling.pipeline.standard_pdf_pipeline",
+        "docling_extract",
+        "ocr_paddle",
+    ]:
+        logging.getLogger(logger_name).setLevel(logging.INFO)
     # If a log file was requested, add a file handler
     if args.log_file:
         try:
@@ -3938,6 +4401,67 @@ def main() -> int:
         except Exception as exc:
             eprint(f"Failed to set up log file {args.log_file}: {exc}")
 
+    def _resolve_config_path() -> Optional[str]:
+        if args.config_json:
+            return args.config_json
+        try:
+            if args.out_json:
+                out_dir = os.path.abspath(os.path.dirname(args.out_json))
+                root_dir = os.path.abspath(os.path.join(out_dir, os.pardir))
+                return os.path.join(root_dir, "docling_config.json")
+        except Exception:
+            return None
+        return None
+
+    def _load_config_overrides(path: Optional[str]) -> Dict[str, Any]:
+        if not path or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:
+            LOGGER.warning("Failed to read config file %s: %s", path, exc)
+        return {}
+
+    _CONFIG_FIELDS = {f.name for f in fields(DoclingProcessingConfig)}
+
+    def _maybe_write_default_config(path: Optional[str]) -> None:
+        if not path:
+            return
+        if os.path.isfile(path):
+            return
+        try:
+            default_cfg = DoclingProcessingConfig()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(asdict(default_cfg), fh, indent=2)
+            LOGGER.info("Wrote default Docling config to %s", path)
+        except Exception as exc:
+            LOGGER.warning("Failed to write default config file %s: %s", path, exc)
+
+    def _apply_config_overrides(cfg: DoclingProcessingConfig, overrides: Dict[str, Any], source: Optional[str]) -> None:
+        if not overrides:
+            return
+        applied: List[str] = []
+        for key, val in overrides.items():
+            if key in _CONFIG_FIELDS:
+                setattr(cfg, key, val)
+                applied.append(key)
+        if applied:
+            label = source or "config file"
+            LOGGER.info(
+                "Applied %d config override(s) from %s: %s",
+                len(applied),
+                label,
+                ", ".join(sorted(applied)),
+            )
+
+
+    config_path = _resolve_config_path()
+    _maybe_write_default_config(config_path)
+    config_overrides = _load_config_overrides(config_path)
 
     if not os.path.isfile(args.pdf):
         eprint(f"PDF not found: {args.pdf}")
@@ -3945,6 +4469,7 @@ def main() -> int:
 
     if args.quality_only:
         config = DoclingProcessingConfig(ocr_mode=args.ocr)
+        _apply_config_overrides(config, config_overrides, config_path)
         if args.force_ocr_low_quality:
             config.force_ocr_on_low_quality_text = True
         if args.quality_threshold is not None:
@@ -3969,16 +4494,29 @@ def main() -> int:
         return 2
 
     config = DoclingProcessingConfig(ocr_mode=args.ocr)
+    _apply_config_overrides(config, config_overrides, config_path)
     if args.force_ocr_low_quality:
         config.force_ocr_on_low_quality_text = True
     if args.quality_threshold is not None:
         config.quality_confidence_threshold = args.quality_threshold
     if args.language_hint:
         config.language_hint = args.language_hint
+    if args.prefer_ocr_engine:
+        config.prefer_ocr_engine = args.prefer_ocr_engine
+    if args.fallback_ocr_engine:
+        config.fallback_ocr_engine = args.fallback_ocr_engine
     if args.paddle_structure_v3 is not None:
         config.paddle_use_structure_v3 = args.paddle_structure_v3
     if args.paddle_structure_version:
         config.paddle_structure_version = args.paddle_structure_version
+    if args.paddle_structure_api_disable is not None:
+        config.paddle_structure_api_disable = args.paddle_structure_api_disable
+    if args.paddle_structure_api_url:
+        config.paddle_structure_api_url = args.paddle_structure_api_url
+    if args.paddle_structure_api_token:
+        config.paddle_structure_api_token = args.paddle_structure_api_token
+    if args.paddle_structure_api_timeout is not None:
+        config.paddle_structure_api_timeout_sec = args.paddle_structure_api_timeout
     if args.paddle_max_dpi is not None:
         config.paddle_max_dpi = args.paddle_max_dpi
     if args.paddle_target_max_side_px is not None:
@@ -4007,6 +4545,34 @@ def main() -> int:
         config.paddle_vl_prompt_label = args.paddle_vl_prompt_label
     if args.paddle_vl_use_queues is not None:
         config.paddle_vl_use_queues = args.paddle_vl_use_queues
+    if args.paddle_vl_layout_threshold is not None:
+        config.paddle_vl_layout_threshold = args.paddle_vl_layout_threshold
+    if args.paddle_vl_layout_unclip is not None:
+        config.paddle_vl_layout_unclip = args.paddle_vl_layout_unclip
+    if args.paddle_vl_layout_merge:
+        config.paddle_vl_layout_merge = args.paddle_vl_layout_merge
+    if args.paddle_vl_layout_nms is not None:
+        config.paddle_vl_layout_nms = args.paddle_vl_layout_nms
+    if args.paddle_vl_api_disable is not None:
+        config.paddle_vl_api_disable = args.paddle_vl_api_disable
+    if args.paddle_vl_api_url:
+        config.paddle_vl_api_url = args.paddle_vl_api_url
+    if args.paddle_vl_api_token:
+        config.paddle_vl_api_token = args.paddle_vl_api_token
+    if args.paddle_vl_api_timeout is not None:
+        config.paddle_vl_api_timeout_sec = args.paddle_vl_api_timeout
+    if args.paddle_vl_markdown_ignore_labels:
+        config.paddle_vl_markdown_ignore_labels = args.paddle_vl_markdown_ignore_labels
+    if args.paddle_vl_repetition_penalty is not None:
+        config.paddle_vl_repetition_penalty = args.paddle_vl_repetition_penalty
+    if args.paddle_vl_temperature is not None:
+        config.paddle_vl_temperature = args.paddle_vl_temperature
+    if args.paddle_vl_top_p is not None:
+        config.paddle_vl_top_p = args.paddle_vl_top_p
+    if args.paddle_vl_min_pixels is not None:
+        config.paddle_vl_min_pixels = args.paddle_vl_min_pixels
+    if args.paddle_vl_max_pixels is not None:
+        config.paddle_vl_max_pixels = args.paddle_vl_max_pixels
     if args.paddle_layout_model:
         config.paddle_layout_model = args.paddle_layout_model
     if args.paddle_layout_threshold is not None:
@@ -4021,12 +4587,21 @@ def main() -> int:
         config.paddle_layout_device = args.paddle_layout_device
     if args.paddle_layout_keep_labels:
         config.paddle_layout_keep_labels = args.paddle_layout_keep_labels
+    paddle_layout_md_out = args.paddle_layout_md_out or os.environ.get("ZRR_PADDLE_LAYOUT_MD_OUT")
+    if paddle_layout_md_out:
+        config.paddle_layout_markdown_out = paddle_layout_md_out
     if args.paddle_layout_recognize_boxes is not None:
         config.paddle_layout_recognize_boxes = args.paddle_layout_recognize_boxes
     if args.paddle_layout_nms is not None:
         config.paddle_layout_nms = args.paddle_layout_nms
     if args.paddle_layout_fail_on_zero:
         config.paddle_layout_fail_on_zero = True
+    paddle_save_crops = args.paddle_layout_save_crops or os.environ.get("ZRR_PADDLE_SAVE_CROPS")
+    if paddle_save_crops:
+        config.paddle_layout_save_crops = paddle_save_crops
+    env_paddle_dump = os.environ.get("ZRR_PADDLE_DUMP")
+    if args.paddle_dump or (env_paddle_dump and env_paddle_dump.strip().lower() not in {"", "0", "false", "no"}):
+        config.paddle_dump = True
     if args.max_chunk_chars is not None:
         config.max_chunk_chars = args.max_chunk_chars
     if args.chunk_overlap_chars is not None:
@@ -4057,6 +4632,9 @@ def main() -> int:
         config.llm_correction_min_quality = args.llm_cleanup_min_quality
 
     config.llm_correct = build_llm_cleanup_callback(config)
+
+    if paddle_save_crops:
+        reset_debug_directory(config.paddle_layout_save_crops)
 
     # Proactively build spellchecker once to record backend info; will be reused lazily later
     spell_langs = select_language_set(config.language_hint, args.pdf, config)
@@ -4095,14 +4673,43 @@ def main() -> int:
         layout_markdown_value = conversion.metadata.get("layout_markdown")
         external_ocr_used = bool(conversion.metadata.get("external_ocr_used"))
         layout_markdown_available = isinstance(layout_markdown_value, str) and bool(layout_markdown_value.strip())
+        if layout_markdown_available and config.paddle_layout_markdown_out:
+            layout_md_path = config.paddle_layout_markdown_out
+            try:
+                out_dir = os.path.dirname(layout_md_path)
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                with open(layout_md_path, "w", encoding="utf-8") as fh:
+                    fh.write(str(layout_markdown_value))
+                LOGGER.info("Wrote Paddle layout markdown to %s", layout_md_path)
+            except Exception as exc:
+                LOGGER.warning("Failed to write Paddle layout markdown to %s: %s", layout_md_path, exc)
         prefer_layout_markdown = external_ocr_used and layout_markdown_available
+        layout_engine_used = bool(conversion.metadata.get("layout_used")) or bool(conversion.metadata.get("layout_model"))
+        layout_engine_configured = bool(
+            external_ocr_used
+            and (
+                getattr(config, "paddle_use_vl", False)
+                or getattr(config, "paddle_use_structure_v3", False)
+                or getattr(config, "paddle_use_paddlex_layout", False)
+            )
+        )
+        layout_engine_active = layout_markdown_available or layout_engine_used or layout_engine_configured
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        should_postprocess = config.enable_post_correction and not prefer_layout_markdown
-        if config.enable_post_correction and prefer_layout_markdown:
+        postprocess_mode = "none"
+        if config.enable_post_correction:
+            if layout_engine_active:
+                postprocess_mode = "light"
+            elif not prefer_layout_markdown:
+                postprocess_mode = "full"
+        if config.enable_post_correction and postprocess_mode == "none":
             LOGGER.info("Skipping OCR post-processing to preserve Paddle layout output.")
-        if should_postprocess:
+        elif postprocess_mode == "light":
+            LOGGER.info("Using light OCR post-processing for layout output.")
+        if postprocess_mode in ("full", "light"):
             wordlist = prepare_dictionary_words(config)
+        if postprocess_mode == "full":
             allow_missing_space = ocr_used
             def safe_postprocess(text: str, label: Optional[str]) -> str:
                 processed = postprocess_text(
@@ -4120,37 +4727,61 @@ def main() -> int:
                 return processed
 
             postprocess_fn = lambda text, label=None: safe_postprocess(text, label)
+        elif postprocess_mode == "light":
+            postprocess_fn = lambda text, label=None: postprocess_text_light(
+                text,
+                config,
+                languages,
+                wordlist,
+                for_markdown=False,
+            )
 
         if postprocess_fn:
             total_pages = len(pages)
             updated_pages: List[Dict[str, Any]] = []
             for idx, page in enumerate(pages, start=1):
                 label = f"page {idx}/{total_pages}"
-                updated_pages.append({
+                updated_page = {
                     "page_num": page.get("page_num", idx),
                     "text": postprocess_fn(str(page.get("text", "")), label),
-                })
+                }
+                if isinstance(page, dict) and "markdown" in page:
+                    updated_page["markdown"] = page.get("markdown")
+                updated_pages.append(updated_page)
             pages = updated_pages
             if ocr_pages_text_chars(pages) == 0 and ocr_pages_text_chars(original_pages) > 0:
                 LOGGER.warning("Postprocess removed all page text; keeping original pages.")
                 pages = original_pages
 
         markdown = conversion.markdown
+        if external_ocr_used:
+            if layout_markdown_available:
+                markdown = layout_markdown_value
+            else:
+                markdown = "\n\n".join(page.get("text", "") for page in pages)
         original_markdown = markdown
-        if config.enable_post_correction and config.postprocess_markdown and should_postprocess:
-            wordlist = prepare_dictionary_words(config)
-            allow_missing_space = ocr_used
+        if config.enable_post_correction and config.postprocess_markdown and postprocess_mode in ("full", "light"):
             if progress_cb:
                 progress_cb(100, "postprocess_markdown", "Postprocess markdown...")
-            processed_markdown = postprocess_text(
-                markdown,
-                config,
-                languages,
-                wordlist,
-                allow_missing_space=allow_missing_space,
-                progress_cb=progress_cb,
-                progress_label="markdown",
-            )
+            if postprocess_mode == "full":
+                allow_missing_space = ocr_used
+                processed_markdown = postprocess_text(
+                    markdown,
+                    config,
+                    languages,
+                    wordlist,
+                    allow_missing_space=allow_missing_space,
+                    progress_cb=progress_cb,
+                    progress_label="markdown",
+                )
+            else:
+                processed_markdown = postprocess_text_light(
+                    markdown,
+                    config,
+                    languages,
+                    wordlist,
+                    for_markdown=True,
+                )
             if original_markdown.strip() and not processed_markdown.strip():
                 LOGGER.warning("Postprocess removed all markdown; keeping original.")
                 markdown = original_markdown
@@ -4168,11 +4799,36 @@ def main() -> int:
                 pages = pre_boilerplate_pages
                 markdown = pre_boilerplate_markdown
 
-        if external_ocr_used:
-            if layout_markdown_available:
-                markdown = layout_markdown_value
-            else:
-                markdown = "\n\n".join(page.get("text", "") for page in pages)
+        if external_ocr_used and not layout_markdown_available:
+            markdown = "\n\n".join(page.get("text", "") for page in pages)
+
+        if prefer_layout_markdown:
+            image_labels = conversion.metadata.get("layout_markdown_image_labels")
+            if not isinstance(image_labels, dict):
+                image_labels = None
+            markdown = convert_html_images_to_obsidian(markdown, image_labels=image_labels)
+            if isinstance(pages, list):
+                for page in pages:
+                    if isinstance(page, dict) and isinstance(page.get("markdown"), str):
+                        page["markdown"] = convert_html_images_to_obsidian(
+                            page["markdown"],
+                            image_labels=image_labels,
+                        )
+            layout_images = conversion.metadata.get("layout_markdown_images")
+            if isinstance(layout_images, dict):
+                remapped_images = remap_layout_image_keys(layout_images)
+                conversion.metadata["layout_markdown_images"] = remapped_images
+                if isinstance(image_labels, dict):
+                    remapped_labels: Dict[str, str] = {}
+                    for key, label in image_labels.items():
+                        if not isinstance(key, str) or not isinstance(label, str):
+                            continue
+                        filename = _extract_image_filename(key)
+                        if filename:
+                            remapped_labels.setdefault(filename, label)
+                        else:
+                            remapped_labels.setdefault(key, label)
+                    conversion.metadata["layout_markdown_image_labels"] = remapped_labels
 
         if not markdown.strip():
             LOGGER.warning("Markdown empty; rebuilding from %d pages", len(pages))
@@ -4204,15 +4860,35 @@ def main() -> int:
                             os.makedirs(target_dir, exist_ok=True)
                         if hasattr(image_obj, "save"):
                             image_obj.save(target_path)
-                        else:
-                            try:
-                                import numpy as _np
-                                from PIL import Image as _PILImage
+                            continue
+                        if isinstance(image_obj, str):
+                            image_ref = image_obj.strip()
+                            if image_ref.startswith("data:") and "base64," in image_ref:
+                                try:
+                                    _, encoded = image_ref.split("base64,", 1)
+                                    data = base64.b64decode(encoded)
+                                    with open(target_path, "wb") as handle:
+                                        handle.write(data)
+                                    continue
+                                except Exception as exc:
+                                    LOGGER.warning("Failed to decode data URI for %s: %s", rel_path, exc)
+                            if image_ref.startswith(("http://", "https://")):
+                                try:
+                                    with urllib.request.urlopen(image_ref, timeout=30) as resp:
+                                        content = resp.read()
+                                    with open(target_path, "wb") as handle:
+                                        handle.write(content)
+                                    continue
+                                except (urllib.error.URLError, ValueError) as exc:
+                                    LOGGER.warning("Failed to download layout image %s: %s", rel_path, exc)
+                        try:
+                            import numpy as _np
+                            from PIL import Image as _PILImage
 
-                                if isinstance(image_obj, _np.ndarray):
-                                    _PILImage.fromarray(image_obj).save(target_path)
-                            except Exception:
-                                continue
+                            if isinstance(image_obj, _np.ndarray):
+                                _PILImage.fromarray(image_obj).save(target_path)
+                        except Exception:
+                            continue
                     except Exception as exc:
                         LOGGER.warning("Failed to save layout image %s: %s", rel_path, exc)
 
@@ -4223,6 +4899,7 @@ def main() -> int:
             eprint(f"Failed to write markdown: {exc}")
             return 2
 
+        preserve_markdown_chunks = prefer_layout_markdown
         if args.chunking == "section":
             chunks = build_chunks_section(
                 args.doc_id,
@@ -4230,6 +4907,7 @@ def main() -> int:
                 pages,
                 config=config,
                 postprocess=postprocess_fn,
+                preserve_markdown=preserve_markdown_chunks,
             )
         else:
             heading_map = build_page_heading_map(markdown, pages, config)
@@ -4241,6 +4919,7 @@ def main() -> int:
                 postprocess=postprocess_fn,
                 heading_map=heading_map,
                 table_map=table_map,
+                preserve_markdown=preserve_markdown_chunks,
             )
     except Exception as exc:
         eprint(f"Failed to build chunks: {exc}")

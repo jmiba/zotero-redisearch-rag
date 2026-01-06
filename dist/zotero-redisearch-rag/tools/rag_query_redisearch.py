@@ -203,6 +203,36 @@ def get_field_types(client: redis.Redis, index: str) -> Dict[str, str]:
     return field_types
 
 
+def get_index_vector_dim(
+    client: redis.Redis, index_name: str, field_name: str = "embedding"
+) -> Optional[int]:
+    try:
+        info = client.execute_command("FT.INFO", index_name)
+    except Exception:
+        return None
+    info_map = parse_info_map(info)
+    attributes = info_map.get("attributes") or info_map.get("fields") or []
+    if not isinstance(attributes, (list, tuple)):
+        return None
+    for attr in attributes:
+        if not isinstance(attr, (list, tuple)):
+            continue
+        attr_map: Dict[str, Any] = {}
+        for i in range(0, len(attr) - 1, 2):
+            attr_map[str(decode_value(attr[i]))] = decode_value(attr[i + 1])
+        name = attr_map.get("attribute") or attr_map.get("identifier") or attr_map.get("name")
+        if name != field_name:
+            continue
+        if str(attr_map.get("type", "")).upper() != "VECTOR":
+            continue
+        dim_value = attr_map.get("dimension") or attr_map.get("dim")
+        try:
+            return int(dim_value)
+        except Exception:
+            return None
+    return None
+
+
 _QUERY_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "into", "over",
     "under", "after", "before", "were", "was", "are", "is", "its", "their",
@@ -747,17 +777,18 @@ def main() -> int:
     parser.add_argument("--history-file", help="Optional JSON file with recent chat history")
     args = parser.parse_args()
 
+    client = redis.Redis.from_url(args.redis_url, decode_responses=False)
     try:
         embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, args.query)
-        if len(embedding) != 768:
-            raise RuntimeError(f"Embedding dim mismatch: {len(embedding)}")
+        embedding_dim = len(embedding)
+        index_dim = get_index_vector_dim(client, args.index)
+        if index_dim and index_dim != embedding_dim:
+            raise RuntimeError(f"Embedding dim mismatch: index={index_dim} model={embedding_dim}")
         embedding = normalize_vector(embedding)
         vec = vector_to_bytes(embedding)
     except Exception as exc:
         eprint(f"Failed to embed query: {exc}")
         return 2
-
-    client = redis.Redis.from_url(args.redis_url, decode_responses=False)
     keywords = extract_keywords(args.query)
 
     base_k = args.k
