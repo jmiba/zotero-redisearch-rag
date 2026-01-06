@@ -1,7 +1,20 @@
 import { App, DropdownComponent, PluginSettingTab, Setting, TextComponent } from "obsidian";
 
 export type OcrMode = "auto" | "force_low_quality" | "force";
+export type OcrEngine =
+  | "auto"
+  | "tesseract"
+  | "paddle_structure_local"
+  | "paddle_vl_local"
+  | "paddle_structure_api"
+  | "paddle_vl_api";
 export type ChunkingMode = "page" | "section";
+
+export type OcrEngineAvailability = {
+  tesseract: boolean;
+  paddleStructureLocal: boolean;
+  paddleVlLocal: boolean;
+};
 
 export const CACHE_ROOT = ".zotero-redisearch-rag";
 export const ITEM_CACHE_DIR = `${CACHE_ROOT}/items`;
@@ -47,8 +60,12 @@ export interface ZoteroRagSettings {
   chatTemperature: number;
   chatHistoryMessages: number;
   ocrMode: OcrMode;
+  ocrEngine: OcrEngine;
   chunkingMode: ChunkingMode;
   ocrQualityThreshold: number;
+  paddleApiKey: string;
+  paddleVlApiUrl: string;
+  paddleStructureApiUrl: string;
   enableLlmCleanup: boolean;
   llmCleanupBaseUrl: string;
   llmCleanupApiKey: string;
@@ -166,6 +183,10 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   ocrMode: "auto",
   ocrQualityThreshold: 0.5,
   chunkingMode: "page",
+  ocrEngine: "auto",
+  paddleApiKey: "",
+  paddleVlApiUrl: "",
+  paddleStructureApiUrl: "",
 
   // OCR cleanup
   enableLlmCleanup: false,
@@ -213,6 +234,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     fetchEmbeddingModelOptions: () => Promise<Array<{ value: string; label: string }>>;
     fetchChatModelOptions: () => Promise<Array<{ value: string; label: string }>>;
     fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
+    detectOcrEngines?: () => Promise<OcrEngineAvailability>;
     startRedisStack: (silent?: boolean) => Promise<void>;
     setupPythonEnv: () => Promise<void>;
     reindexRedisFromCache: () => Promise<boolean>;
@@ -232,6 +254,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       fetchEmbeddingModelOptions: () => Promise<Array<{ value: string; label: string }>>;
       fetchChatModelOptions: () => Promise<Array<{ value: string; label: string }>>;
       fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
+      detectOcrEngines?: () => Promise<OcrEngineAvailability>;
       startRedisStack: (silent?: boolean) => Promise<void>;
       setupPythonEnv: () => Promise<void>;
       reindexRedisFromCache: () => Promise<boolean>;
@@ -736,6 +759,133 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     
     containerEl.createEl("h2", { text: "Docling" });
 
+    let ocrEngineDropdown: DropdownComponent | null = null;
+
+    const applyOcrEngineOptions = (
+      options: Array<{ value: OcrEngine; label: string }>
+    ) => {
+      if (!ocrEngineDropdown) {
+        return;
+      }
+      const current = this.plugin.settings.ocrEngine;
+      const values = new Set(options.map((option) => option.value));
+      if (!values.has(current)) {
+        options = options.concat([
+          { value: current, label: `Current (unavailable): ${current}` },
+        ]);
+      }
+      ocrEngineDropdown.selectEl.options.length = 0;
+      for (const option of options) {
+        ocrEngineDropdown.addOption(option.value, option.label);
+      }
+      ocrEngineDropdown.setValue(current);
+    };
+
+    const refreshOcrEngineOptions = async () => {
+      if (!ocrEngineDropdown) {
+        return;
+      }
+      ocrEngineDropdown.setDisabled(true);
+      let availability: OcrEngineAvailability = {
+        tesseract: false,
+        paddleStructureLocal: false,
+        paddleVlLocal: false,
+      };
+      if (this.plugin.detectOcrEngines) {
+        try {
+          availability = await this.plugin.detectOcrEngines();
+        } catch {
+          availability = {
+            tesseract: false,
+            paddleStructureLocal: false,
+            paddleVlLocal: false,
+          };
+        }
+      }
+      const options: Array<{ value: OcrEngine; label: string }> = [
+        { value: "auto", label: "Auto (default)" },
+      ];
+      if (availability.tesseract) {
+        options.push({ value: "tesseract", label: "Tesseract (local)" });
+      }
+      if (availability.paddleStructureLocal) {
+        options.push({ value: "paddle_structure_local", label: "Paddle PP-StructureV3 (local)" });
+      }
+      if (availability.paddleVlLocal) {
+        options.push({ value: "paddle_vl_local", label: "PaddleOCR-VL (local)" });
+      }
+      const apiKey = (this.plugin.settings.paddleApiKey || "").trim();
+      if (apiKey) {
+        options.push({ value: "paddle_structure_api", label: "PP-StructureV3 API" });
+        options.push({ value: "paddle_vl_api", label: "PaddleOCR-VL API" });
+      }
+      applyOcrEngineOptions(options);
+      ocrEngineDropdown.setDisabled(false);
+    };
+
+    const paddleApiKeySetting = new Setting(containerEl)
+      .setName("Paddle OCR API key")
+      .setDesc("API token for PaddleOCR-VL / PP-StructureV3 endpoints. Get a free API key at ");
+    const paddleApiLink = document.createElement("a");
+    paddleApiLink.href = "https://aistudio.baidu.com/paddleocr";
+    paddleApiLink.textContent = "https://aistudio.baidu.com/paddleocr";
+    paddleApiLink.target = "_blank";
+    paddleApiLink.rel = "noopener noreferrer";
+    paddleApiKeySetting.descEl.appendChild(paddleApiLink);
+    paddleApiKeySetting.descEl.append(".");
+    paddleApiKeySetting
+      .addText((text) => {
+        maskApiKeyInput(text);
+        text
+          .setPlaceholder("your-api-token")
+          .setValue(this.plugin.settings.paddleApiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.paddleApiKey = value.trim();
+            await this.plugin.saveSettings();
+            await refreshOcrEngineOptions();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("PaddleOCR-VL API URL")
+      .setDesc("Optional override for the PaddleOCR-VL API endpoint.")
+      .addText((text) =>
+        text
+          .setPlaceholder("https://.../layout-parsing")
+          .setValue(this.plugin.settings.paddleVlApiUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.paddleVlApiUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("PP-StructureV3 API URL")
+      .setDesc("API endpoint for PP-StructureV3 (see Baidu AI Studio docs).")
+      .addText((text) =>
+        text
+          .setPlaceholder("https://.../pp-structure")
+          .setValue(this.plugin.settings.paddleStructureApiUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.paddleStructureApiUrl = value.trim();
+            await this.plugin.saveSettings();
+            await refreshOcrEngineOptions();
+          })
+      );
+    
+    new Setting(containerEl)
+      .setName("OCR engine")
+      .setDesc("Select the OCR engine to use when OCR is required.")
+      .addDropdown((dropdown) => {
+        ocrEngineDropdown = dropdown;
+        dropdown.addOption("auto", "Auto (default)");
+        dropdown.setValue(this.plugin.settings.ocrEngine);
+        dropdown.onChange(async (value: string) => {
+          this.plugin.settings.ocrEngine = value as OcrEngine;
+          await this.plugin.saveSettings();
+        });
+      });
+
     new Setting(containerEl)
       .setName("OCR mode")
       .setDesc("auto: skip OCR when text is readable; force if bad: OCR only when text looks poor; force: always OCR.")
@@ -778,6 +928,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    void refreshOcrEngineOptions();
     
     containerEl.createEl("h2", { text: "OCR cleanup" });
 

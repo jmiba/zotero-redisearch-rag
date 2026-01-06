@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import errno
 import json
 import math
@@ -9,7 +10,10 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass, fields, asdict
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import langcodes
 import warnings
@@ -188,7 +192,7 @@ class DoclingProcessingConfig:
     paddle_dump: bool = False
     paddle_layout_markdown_out: Optional[str] = None
     # PaddleOCR-VL (optional, requires paddleocr[doc-parser])
-    paddle_use_vl: bool = True
+    paddle_use_vl: bool = False
     paddle_vl_device: Optional[str] = None
     paddle_vl_rec_backend: Optional[str] = None
     paddle_vl_rec_server_url: Optional[str] = None
@@ -197,12 +201,28 @@ class DoclingProcessingConfig:
     paddle_vl_use_layout_detection: Optional[bool] = True
     paddle_vl_use_chart_recognition: Optional[bool] = True
     paddle_vl_format_block_content: Optional[bool] = True
-    paddle_vl_prompt_label: Optional[str] = None
+    paddle_vl_prompt_label: Optional[str] = "ocr"
     paddle_vl_use_queues: Optional[bool] = False
     paddle_vl_layout_threshold: Optional[float] = 0.3
     paddle_vl_layout_nms: Optional[bool] = True
     paddle_vl_layout_unclip: Optional[float] = 1.2
     paddle_vl_layout_merge: Optional[str] = "small"
+    paddle_vl_api_disable: bool = False
+    paddle_vl_api_url: Optional[str] = None
+    paddle_vl_api_token: Optional[str] = None
+    paddle_vl_api_timeout_sec: int = 120
+    paddle_vl_markdown_ignore_labels: Optional[Sequence[str]] = field(
+        default_factory=lambda: ["header_image", "footer_image", "aside_text"]
+    )
+    paddle_vl_repetition_penalty: Optional[float] = 1.0
+    paddle_vl_temperature: Optional[float] = 0.0
+    paddle_vl_top_p: Optional[float] = 1.0
+    paddle_vl_min_pixels: Optional[int] = 147384
+    paddle_vl_max_pixels: Optional[int] = 2822400
+    paddle_structure_api_disable: bool = False
+    paddle_structure_api_url: Optional[str] = None
+    paddle_structure_api_token: Optional[str] = None
+    paddle_structure_api_timeout_sec: int = 120
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -279,6 +299,94 @@ def normalize_display_markdown(text: str) -> str:
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+_IMG_TAG_RE = re.compile(r"<img[^>]*?>", re.IGNORECASE)
+_DIV_IMG_TAG_RE = re.compile(r"<div[^>]*>\s*<img[^>]*?>\s*</div>", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_image_filename(src: str) -> Optional[str]:
+    if not src:
+        return None
+    if src.startswith("data:"):
+        return None
+    path = src
+    if src.startswith(("http://", "https://")):
+        try:
+            path = urllib.parse.urlparse(src).path
+        except Exception:
+            path = src
+    filename = os.path.basename(path)
+    return filename or None
+
+
+def _extract_img_attr(tag: str, attr: str) -> Optional[str]:
+    match = re.search(rf"\b{re.escape(attr)}=(['\"])(?P<val>[^'\"]*)\1", tag, re.IGNORECASE)
+    if match:
+        return match.group("val")
+    return None
+
+
+def _obsidian_image_link(
+    src: str,
+    alt_text: Optional[str] = None,
+    image_labels: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    filename = _extract_image_filename(src)
+    if not filename:
+        return None
+    label = None
+    if image_labels:
+        label = image_labels.get(filename) or image_labels.get(src)
+    if not label and alt_text:
+        label = alt_text.strip() or None
+    if label:
+        return f"![[{filename}|{label}]]"
+    return f"![[{filename}]]"
+
+
+def convert_html_images_to_obsidian(
+    markdown: str,
+    image_labels: Optional[Dict[str, str]] = None,
+) -> str:
+    if not markdown:
+        return ""
+
+    def replace_div(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src = _extract_img_attr(tag, "src")
+        alt_text = _extract_img_attr(tag, "alt")
+        if not src:
+            return tag
+        link = _obsidian_image_link(src, alt_text=alt_text, image_labels=image_labels)
+        return link if link else match.group(0)
+
+    def replace_img(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        src = _extract_img_attr(tag, "src")
+        alt_text = _extract_img_attr(tag, "alt")
+        if not src:
+            return tag
+        link = _obsidian_image_link(src, alt_text=alt_text, image_labels=image_labels)
+        return link if link else match.group(0)
+
+    updated = _DIV_IMG_TAG_RE.sub(replace_div, markdown)
+    updated = _IMG_TAG_RE.sub(replace_img, updated)
+    return updated
+
+
+def remap_layout_image_keys(layout_images: Dict[str, Any]) -> Dict[str, Any]:
+    remapped: Dict[str, Any] = {}
+    for key, value in layout_images.items():
+        new_key = key
+        if isinstance(key, str):
+            filename = _extract_image_filename(key)
+            if filename:
+                new_key = filename
+        if new_key in remapped:
+            LOGGER.warning("Duplicate layout image key after remap: %s", new_key)
+            continue
+        remapped[new_key] = value
+    return remapped
 
 
 def normalize_chunk_whitespace(text: str) -> str:
@@ -2223,21 +2331,25 @@ def extract_pages_from_pdf(
 def split_markdown_sections(markdown: str) -> List[Dict[str, Any]]:
     sections: List[Dict[str, Any]] = []
     current_title = ""
+    current_heading = ""
     current_lines: List[str] = []
 
     def flush() -> None:
-        nonlocal current_title, current_lines
-        if current_title or current_lines:
+        nonlocal current_title, current_heading, current_lines
+        if current_title or current_heading or current_lines:
             sections.append({
                 "title": current_title.strip(),
+                "heading": current_heading.strip(),
                 "text": "\n".join(current_lines).strip(),
             })
         current_title = ""
+        current_heading = ""
         current_lines = []
 
     for line in markdown.splitlines():
         if line.startswith("#"):
             flush()
+            current_heading = line.rstrip()
             current_title = line.lstrip("#").strip()
         else:
             current_lines.append(line)
@@ -3205,6 +3317,7 @@ def run_external_ocr_pages(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     effective_dpi = dpi or config.ocr_dpi
     helpers = _external_ocr_helpers()
+    helpers["ocr_source_path"] = pdf_path
     if progress_cb and progress_span > 0:
         label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
         # Use a neutral initializing message; inner routines will promptly override with page counters
@@ -3731,25 +3844,34 @@ def build_chunks_page(
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
     heading_map: Optional[Dict[int, List[str]]] = None,
     table_map: Optional[Dict[int, List[str]]] = None,
+    preserve_markdown: bool = False,
 ) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     total_pages = len(pages)
     for page in pages:
-        raw_text = str(page.get("text", ""))
+        raw_markdown = page.get("markdown") if preserve_markdown else None
+        if isinstance(raw_markdown, str) and raw_markdown.strip():
+            raw_text = raw_markdown
+            apply_postprocess = False
+        else:
+            raw_text = str(page.get("text", ""))
+            apply_postprocess = True
         page_num = int(page.get("page_num", 0))
-        if postprocess:
+        if postprocess and apply_postprocess:
             raw_text = postprocess(raw_text, f"page {page_num}/{total_pages}")
         raw_text = clean_chunk_text(raw_text, config)
-        if table_map:
-            tables = table_map.get(page_num, [])
-            if tables:
-                raw_text = inject_markdown_tables(raw_text, tables)
-        if heading_map:
-            titles = heading_map.get(page_num, [])
-            if titles:
-                raw_text = inject_headings_inline(raw_text, titles)
+        if apply_postprocess:
+            if table_map:
+                tables = table_map.get(page_num, [])
+                if tables:
+                    raw_text = inject_markdown_tables(raw_text, tables)
+            if heading_map:
+                titles = heading_map.get(page_num, [])
+                if titles:
+                    raw_text = inject_headings_inline(raw_text, titles)
         cleaned = normalize_display_markdown(raw_text)
-        cleaned = reflow_page_text(cleaned)
+        if apply_postprocess:
+            cleaned = reflow_page_text(cleaned)
         if not cleaned:
             continue
         chunk_id = f"p{page_num}"
@@ -3770,22 +3892,30 @@ def build_chunks_section(
     pages: List[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
     postprocess: Optional[Callable[[str, Optional[str]], str]] = None,
+    preserve_markdown: bool = False,
 ) -> List[Dict[str, Any]]:
     sections = split_markdown_sections(markdown)
     chunks: List[Dict[str, Any]] = []
     seen_ids: Dict[str, int] = {}
 
     if not sections:
-        return build_chunks_page(doc_id, pages, config=config)
+        return build_chunks_page(doc_id, pages, config=config, preserve_markdown=preserve_markdown)
 
     total_sections = len(sections)
     for idx, section in enumerate(sections, start=1):
         title = section.get("title", "")
+        heading_line = section.get("heading", "")
         text = section.get("text", "")
-        if postprocess:
-            text = postprocess(text, f"section {idx}/{total_sections}")
-        text = clean_chunk_text(text, config)
-        if not text.strip():
+        if preserve_markdown and isinstance(heading_line, str) and heading_line.strip():
+            display_text = f"{heading_line}\n\n{text}".strip() if text else heading_line.strip()
+            apply_postprocess = False
+        else:
+            display_text = text
+            apply_postprocess = True
+        if postprocess and apply_postprocess:
+            display_text = postprocess(display_text, f"section {idx}/{total_sections}")
+        display_text = clean_chunk_text(display_text, config)
+        if not display_text.strip():
             continue
         base_id = slugify(title) or f"section-{idx}"
         if base_id in seen_ids:
@@ -3795,7 +3925,7 @@ def build_chunks_section(
             seen_ids[base_id] = 1
         max_chars = config.max_chunk_chars if config else 0
         overlap_chars = config.chunk_overlap_chars if config else 0
-        segments = split_text_by_size(text, max_chars, overlap_chars)
+        segments = split_text_by_size(display_text, max_chars, overlap_chars)
         for seg_idx, segment in enumerate(segments, start=1):
             cleaned = normalize_display_markdown(segment)
             if not cleaned:
@@ -3827,6 +3957,16 @@ def main() -> int:
     parser.add_argument("--ocr", choices=["auto", "force", "off"], default="auto")
     parser.add_argument("--language-hint", help="Language hint for OCR/quality (e.g., eng, deu, deu+eng)")
     parser.add_argument(
+        "--prefer-ocr-engine",
+        choices=["paddle", "tesseract"],
+        help="Preferred external OCR engine when available.",
+    )
+    parser.add_argument(
+        "--fallback-ocr-engine",
+        choices=["paddle", "tesseract"],
+        help="Fallback external OCR engine when the preferred engine is unavailable.",
+    )
+    parser.add_argument(
         "--paddle-structure-v3",
         dest="paddle_structure_v3",
         action="store_true",
@@ -3843,6 +3983,33 @@ def main() -> int:
     parser.add_argument(
         "--paddle-structure-version",
         help="Override Paddle PP-Structure version (e.g., PP-StructureV3)",
+    )
+    parser.add_argument(
+        "--paddle-structure-api",
+        dest="paddle_structure_api_disable",
+        action="store_false",
+        default=None,
+        help="Enable PP-StructureV3 API (overrides local Paddle structure).",
+    )
+    parser.add_argument(
+        "--no-paddle-structure-api",
+        dest="paddle_structure_api_disable",
+        action="store_true",
+        default=None,
+        help="Disable PP-StructureV3 API.",
+    )
+    parser.add_argument(
+        "--paddle-structure-api-url",
+        help="PP-StructureV3 API URL.",
+    )
+    parser.add_argument(
+        "--paddle-structure-api-token",
+        help="PP-StructureV3 API token.",
+    )
+    parser.add_argument(
+        "--paddle-structure-api-timeout",
+        type=int,
+        help="PP-StructureV3 API timeout in seconds.",
     )
     parser.add_argument(
         "--paddle-max-dpi",
@@ -3991,6 +4158,62 @@ def main() -> int:
         action="store_false",
         default=None,
         help="Disable PaddleOCR-VL layout NMS.",
+    )
+    parser.add_argument(
+        "--paddle-vl-api",
+        dest="paddle_vl_api_disable",
+        action="store_false",
+        default=None,
+        help="Enable PaddleOCR-VL API.",
+    )
+    parser.add_argument(
+        "--no-paddle-vl-api",
+        dest="paddle_vl_api_disable",
+        action="store_true",
+        default=None,
+        help="Disable PaddleOCR-VL API.",
+    )
+    parser.add_argument(
+        "--paddle-vl-api-url",
+        help="PaddleOCR-VL API URL (overrides local PaddleOCR-VL).",
+    )
+    parser.add_argument(
+        "--paddle-vl-api-token",
+        help="PaddleOCR-VL API token.",
+    )
+    parser.add_argument(
+        "--paddle-vl-api-timeout",
+        type=int,
+        help="PaddleOCR-VL API timeout in seconds.",
+    )
+    parser.add_argument(
+        "--paddle-vl-markdown-ignore-labels",
+        help="Comma-separated list of layout labels to ignore in API markdown output.",
+    )
+    parser.add_argument(
+        "--paddle-vl-repetition-penalty",
+        type=float,
+        help="PaddleOCR-VL API repetition penalty.",
+    )
+    parser.add_argument(
+        "--paddle-vl-temperature",
+        type=float,
+        help="PaddleOCR-VL API temperature.",
+    )
+    parser.add_argument(
+        "--paddle-vl-top-p",
+        type=float,
+        help="PaddleOCR-VL API top-p.",
+    )
+    parser.add_argument(
+        "--paddle-vl-min-pixels",
+        type=int,
+        help="PaddleOCR-VL API min pixels.",
+    )
+    parser.add_argument(
+        "--paddle-vl-max-pixels",
+        type=int,
+        help="PaddleOCR-VL API max pixels.",
     )
     parser.add_argument(
         "--paddle-layout-model",
@@ -4278,10 +4501,22 @@ def main() -> int:
         config.quality_confidence_threshold = args.quality_threshold
     if args.language_hint:
         config.language_hint = args.language_hint
+    if args.prefer_ocr_engine:
+        config.prefer_ocr_engine = args.prefer_ocr_engine
+    if args.fallback_ocr_engine:
+        config.fallback_ocr_engine = args.fallback_ocr_engine
     if args.paddle_structure_v3 is not None:
         config.paddle_use_structure_v3 = args.paddle_structure_v3
     if args.paddle_structure_version:
         config.paddle_structure_version = args.paddle_structure_version
+    if args.paddle_structure_api_disable is not None:
+        config.paddle_structure_api_disable = args.paddle_structure_api_disable
+    if args.paddle_structure_api_url:
+        config.paddle_structure_api_url = args.paddle_structure_api_url
+    if args.paddle_structure_api_token:
+        config.paddle_structure_api_token = args.paddle_structure_api_token
+    if args.paddle_structure_api_timeout is not None:
+        config.paddle_structure_api_timeout_sec = args.paddle_structure_api_timeout
     if args.paddle_max_dpi is not None:
         config.paddle_max_dpi = args.paddle_max_dpi
     if args.paddle_target_max_side_px is not None:
@@ -4318,6 +4553,26 @@ def main() -> int:
         config.paddle_vl_layout_merge = args.paddle_vl_layout_merge
     if args.paddle_vl_layout_nms is not None:
         config.paddle_vl_layout_nms = args.paddle_vl_layout_nms
+    if args.paddle_vl_api_disable is not None:
+        config.paddle_vl_api_disable = args.paddle_vl_api_disable
+    if args.paddle_vl_api_url:
+        config.paddle_vl_api_url = args.paddle_vl_api_url
+    if args.paddle_vl_api_token:
+        config.paddle_vl_api_token = args.paddle_vl_api_token
+    if args.paddle_vl_api_timeout is not None:
+        config.paddle_vl_api_timeout_sec = args.paddle_vl_api_timeout
+    if args.paddle_vl_markdown_ignore_labels:
+        config.paddle_vl_markdown_ignore_labels = args.paddle_vl_markdown_ignore_labels
+    if args.paddle_vl_repetition_penalty is not None:
+        config.paddle_vl_repetition_penalty = args.paddle_vl_repetition_penalty
+    if args.paddle_vl_temperature is not None:
+        config.paddle_vl_temperature = args.paddle_vl_temperature
+    if args.paddle_vl_top_p is not None:
+        config.paddle_vl_top_p = args.paddle_vl_top_p
+    if args.paddle_vl_min_pixels is not None:
+        config.paddle_vl_min_pixels = args.paddle_vl_min_pixels
+    if args.paddle_vl_max_pixels is not None:
+        config.paddle_vl_max_pixels = args.paddle_vl_max_pixels
     if args.paddle_layout_model:
         config.paddle_layout_model = args.paddle_layout_model
     if args.paddle_layout_threshold is not None:
@@ -4486,16 +4741,24 @@ def main() -> int:
             updated_pages: List[Dict[str, Any]] = []
             for idx, page in enumerate(pages, start=1):
                 label = f"page {idx}/{total_pages}"
-                updated_pages.append({
+                updated_page = {
                     "page_num": page.get("page_num", idx),
                     "text": postprocess_fn(str(page.get("text", "")), label),
-                })
+                }
+                if isinstance(page, dict) and "markdown" in page:
+                    updated_page["markdown"] = page.get("markdown")
+                updated_pages.append(updated_page)
             pages = updated_pages
             if ocr_pages_text_chars(pages) == 0 and ocr_pages_text_chars(original_pages) > 0:
                 LOGGER.warning("Postprocess removed all page text; keeping original pages.")
                 pages = original_pages
 
         markdown = conversion.markdown
+        if external_ocr_used:
+            if layout_markdown_available:
+                markdown = layout_markdown_value
+            else:
+                markdown = "\n\n".join(page.get("text", "") for page in pages)
         original_markdown = markdown
         if config.enable_post_correction and config.postprocess_markdown and postprocess_mode in ("full", "light"):
             if progress_cb:
@@ -4536,11 +4799,36 @@ def main() -> int:
                 pages = pre_boilerplate_pages
                 markdown = pre_boilerplate_markdown
 
-        if external_ocr_used:
-            if layout_markdown_available:
-                markdown = layout_markdown_value
-            else:
-                markdown = "\n\n".join(page.get("text", "") for page in pages)
+        if external_ocr_used and not layout_markdown_available:
+            markdown = "\n\n".join(page.get("text", "") for page in pages)
+
+        if prefer_layout_markdown:
+            image_labels = conversion.metadata.get("layout_markdown_image_labels")
+            if not isinstance(image_labels, dict):
+                image_labels = None
+            markdown = convert_html_images_to_obsidian(markdown, image_labels=image_labels)
+            if isinstance(pages, list):
+                for page in pages:
+                    if isinstance(page, dict) and isinstance(page.get("markdown"), str):
+                        page["markdown"] = convert_html_images_to_obsidian(
+                            page["markdown"],
+                            image_labels=image_labels,
+                        )
+            layout_images = conversion.metadata.get("layout_markdown_images")
+            if isinstance(layout_images, dict):
+                remapped_images = remap_layout_image_keys(layout_images)
+                conversion.metadata["layout_markdown_images"] = remapped_images
+                if isinstance(image_labels, dict):
+                    remapped_labels: Dict[str, str] = {}
+                    for key, label in image_labels.items():
+                        if not isinstance(key, str) or not isinstance(label, str):
+                            continue
+                        filename = _extract_image_filename(key)
+                        if filename:
+                            remapped_labels.setdefault(filename, label)
+                        else:
+                            remapped_labels.setdefault(key, label)
+                    conversion.metadata["layout_markdown_image_labels"] = remapped_labels
 
         if not markdown.strip():
             LOGGER.warning("Markdown empty; rebuilding from %d pages", len(pages))
@@ -4572,15 +4860,35 @@ def main() -> int:
                             os.makedirs(target_dir, exist_ok=True)
                         if hasattr(image_obj, "save"):
                             image_obj.save(target_path)
-                        else:
-                            try:
-                                import numpy as _np
-                                from PIL import Image as _PILImage
+                            continue
+                        if isinstance(image_obj, str):
+                            image_ref = image_obj.strip()
+                            if image_ref.startswith("data:") and "base64," in image_ref:
+                                try:
+                                    _, encoded = image_ref.split("base64,", 1)
+                                    data = base64.b64decode(encoded)
+                                    with open(target_path, "wb") as handle:
+                                        handle.write(data)
+                                    continue
+                                except Exception as exc:
+                                    LOGGER.warning("Failed to decode data URI for %s: %s", rel_path, exc)
+                            if image_ref.startswith(("http://", "https://")):
+                                try:
+                                    with urllib.request.urlopen(image_ref, timeout=30) as resp:
+                                        content = resp.read()
+                                    with open(target_path, "wb") as handle:
+                                        handle.write(content)
+                                    continue
+                                except (urllib.error.URLError, ValueError) as exc:
+                                    LOGGER.warning("Failed to download layout image %s: %s", rel_path, exc)
+                        try:
+                            import numpy as _np
+                            from PIL import Image as _PILImage
 
-                                if isinstance(image_obj, _np.ndarray):
-                                    _PILImage.fromarray(image_obj).save(target_path)
-                            except Exception:
-                                continue
+                            if isinstance(image_obj, _np.ndarray):
+                                _PILImage.fromarray(image_obj).save(target_path)
+                        except Exception:
+                            continue
                     except Exception as exc:
                         LOGGER.warning("Failed to save layout image %s: %s", rel_path, exc)
 
@@ -4591,6 +4899,7 @@ def main() -> int:
             eprint(f"Failed to write markdown: {exc}")
             return 2
 
+        preserve_markdown_chunks = prefer_layout_markdown
         if args.chunking == "section":
             chunks = build_chunks_section(
                 args.doc_id,
@@ -4598,6 +4907,7 @@ def main() -> int:
                 pages,
                 config=config,
                 postprocess=postprocess_fn,
+                preserve_markdown=preserve_markdown_chunks,
             )
         else:
             heading_map = build_page_heading_map(markdown, pages, config)
@@ -4609,6 +4919,7 @@ def main() -> int:
                 postprocess=postprocess_fn,
                 heading_map=heading_map,
                 table_map=table_map,
+                preserve_markdown=preserve_markdown_chunks,
             )
     except Exception as exc:
         eprint(f"Failed to build chunks: {exc}")

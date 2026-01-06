@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import logging
 import numbers
 import os
@@ -1309,6 +1310,37 @@ def ocr_pages_with_paddle_structure(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     global LOGGER
     LOGGER = helpers.get("logger", LOGGER)
+    structure_api_disabled = bool(getattr(config, "paddle_structure_api_disable", False))
+    structure_api_url = getattr(config, "paddle_structure_api_url", None) or os.getenv("PADDLE_STRUCTURE_API_URL")
+    structure_api_token = getattr(config, "paddle_structure_api_token", None) or os.getenv("PADDLE_STRUCTURE_API_TOKEN")
+    structure_api_timeout = getattr(config, "paddle_structure_api_timeout_sec", 120)
+    if structure_api_url and structure_api_token and not structure_api_disabled:
+        orig_url = getattr(config, "paddle_vl_api_url", None)
+        orig_token = getattr(config, "paddle_vl_api_token", None)
+        orig_timeout = getattr(config, "paddle_vl_api_timeout_sec", None)
+        orig_disable = getattr(config, "paddle_vl_api_disable", None)
+        setattr(config, "paddle_vl_api_url", structure_api_url)
+        setattr(config, "paddle_vl_api_token", structure_api_token)
+        setattr(config, "paddle_vl_api_timeout_sec", structure_api_timeout)
+        setattr(config, "paddle_vl_api_disable", False)
+        try:
+            pages, stats = ocr_pages_with_paddle_vl(
+                images,
+                languages,
+                config,
+                helpers,
+                progress_cb,
+                progress_base,
+                progress_span,
+            )
+        finally:
+            setattr(config, "paddle_vl_api_url", orig_url)
+            setattr(config, "paddle_vl_api_token", orig_token)
+            setattr(config, "paddle_vl_api_timeout_sec", orig_timeout)
+            setattr(config, "paddle_vl_api_disable", orig_disable)
+        if isinstance(stats, dict):
+            stats["layout_model"] = "PP-StructureV3 API"
+        return pages, stats
     if bool(getattr(config, "paddle_use_paddlex_layout", True)):
         try:
             return _paddlex_layout_ocr_pages(
@@ -1345,6 +1377,812 @@ def ocr_pages_with_paddle_vl(
     global LOGGER
     LOGGER = helpers.get("logger", LOGGER)
     ocr_pages_text_chars = helpers["ocr_pages_text_chars"]
+
+    api_url = getattr(config, "paddle_vl_api_url", None) or os.getenv("PADDLE_VL_API_URL")
+    api_token = getattr(config, "paddle_vl_api_token", None) or os.getenv("PADDLE_VL_API_TOKEN")
+    api_timeout = getattr(config, "paddle_vl_api_timeout_sec", 120)
+    source_path = helpers.get("ocr_source_path")
+
+    api_disabled = bool(getattr(config, "paddle_vl_api_disable", False))
+    if api_url and api_token and not api_disabled:
+        api_max_pages = 100
+        api_images = list(images) if images else []
+        source_page_count = None
+        if isinstance(source_path, str) and source_path.lower().endswith(".pdf") and os.path.isfile(source_path):
+            try:
+                from pypdf import PdfReader  # type: ignore
+                source_page_count = len(PdfReader(source_path).pages)
+            except Exception:
+                source_page_count = None
+        original_count = source_page_count if source_page_count else (len(api_images) if api_images else None)
+        if original_count and original_count > api_max_pages:
+            LOGGER.warning(
+                "PaddleOCR-VL API processes only the first %d pages; limiting API processing from %d pages.",
+                api_max_pages,
+                original_count,
+            )
+            if api_images:
+                api_images = api_images[:api_max_pages]
+        try:
+            import base64
+            import io
+            import requests
+        except Exception as exc:
+            raise RuntimeError(f"PaddleOCR-VL API dependencies missing: {exc}") from exc
+
+        headers = {
+            "Authorization": f"token {api_token}",
+            "Content-Type": "application/json",
+        }
+
+        def _normalize_ignore_labels(value: Any) -> Optional[List[str]]:
+            if not value:
+                return None
+            if isinstance(value, str):
+                labels = [item.strip() for item in value.split(",") if item.strip()]
+            elif isinstance(value, (list, tuple, set)):
+                labels = [str(item).strip() for item in value if str(item).strip()]
+            else:
+                labels = [str(value).strip()] if str(value).strip() else []
+            return labels or None
+
+        optional_payload: Dict[str, Any] = {}
+        ignore_labels = _normalize_ignore_labels(getattr(config, "paddle_vl_markdown_ignore_labels", None))
+        if ignore_labels:
+            optional_payload["markdownIgnoreLabels"] = ignore_labels
+        if getattr(config, "paddle_use_doc_orientation_classify", None) is not None:
+            optional_payload["useDocOrientationClassify"] = bool(config.paddle_use_doc_orientation_classify)
+        if getattr(config, "paddle_use_doc_unwarping", None) is not None:
+            optional_payload["useDocUnwarping"] = bool(config.paddle_use_doc_unwarping)
+        use_layout_detection = getattr(config, "paddle_vl_use_layout_detection", None)
+        if use_layout_detection is not None:
+            optional_payload["useLayoutDetection"] = bool(use_layout_detection)
+        if getattr(config, "paddle_vl_use_chart_recognition", None) is not None:
+            optional_payload["useChartRecognition"] = bool(config.paddle_vl_use_chart_recognition)
+        if getattr(config, "paddle_vl_prompt_label", None):
+            optional_payload["promptLabel"] = str(config.paddle_vl_prompt_label)
+        layout_nms = getattr(config, "paddle_vl_layout_nms", None)
+        if layout_nms is None:
+            layout_nms = getattr(config, "paddle_layout_nms", None)
+        if layout_nms is not None:
+            optional_payload["layoutNms"] = bool(layout_nms)
+        if getattr(config, "paddle_vl_repetition_penalty", None) is not None:
+            optional_payload["repetitionPenalty"] = getattr(config, "paddle_vl_repetition_penalty")
+        if getattr(config, "paddle_vl_temperature", None) is not None:
+            optional_payload["temperature"] = getattr(config, "paddle_vl_temperature")
+        if getattr(config, "paddle_vl_top_p", None) is not None:
+            optional_payload["topP"] = getattr(config, "paddle_vl_top_p")
+        if getattr(config, "paddle_vl_min_pixels", None) is not None:
+            optional_payload["minPixels"] = int(getattr(config, "paddle_vl_min_pixels"))
+        if getattr(config, "paddle_vl_max_pixels", None) is not None:
+            optional_payload["maxPixels"] = int(getattr(config, "paddle_vl_max_pixels"))
+
+        def _strip_markup(text: str) -> str:
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"!\[[^\]]*]\([^)]+\)", " ", text)
+            text = re.sub(r"\s+", " ", text)
+            return text.strip()
+
+        def _build_payload(file_bytes: bytes, file_type: int) -> Dict[str, Any]:
+            payload: Dict[str, Any] = {
+                "file": base64.b64encode(file_bytes).decode("ascii"),
+                "fileType": file_type,
+            }
+            payload.update(optional_payload)
+            return payload
+
+        def _shorten_text(value: str, limit: int = 240) -> str:
+            if len(value) <= limit:
+                return value
+            return f"{value[:limit]}...<truncated {len(value) - limit} chars>"
+
+        def _keys_preview(value: Dict[str, Any], limit: int = 12) -> List[str]:
+            keys = [str(k) for k in value.keys()]
+            keys.sort()
+            return keys[:limit]
+
+        def _collect_block_labels_summary(value: Any, counts: Dict[str, int], limit: int = 24) -> None:
+            if len(counts) >= limit:
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    key_str = str(key)
+                    if key_str in {
+                        "block_label",
+                        "blockLabel",
+                        "block_label_name",
+                        "blockLabelName",
+                        "block_label_type",
+                        "blockLabelType",
+                    }:
+                        if isinstance(item, str):
+                            label = item.strip()
+                            if label:
+                                counts[label] = counts.get(label, 0) + 1
+                        continue
+                    _collect_block_labels_summary(item, counts, limit)
+            elif isinstance(value, list):
+                for item in value:
+                    _collect_block_labels_summary(item, counts, limit)
+
+        def _summarize_layout_entry(entry: Any) -> Any:
+            if not isinstance(entry, dict):
+                return {"type": type(entry).__name__}
+            summary: Dict[str, Any] = {"keys": _keys_preview(entry)}
+            label_counts: Dict[str, int] = {}
+            _collect_block_labels_summary(entry, label_counts)
+            if label_counts:
+                summary["block_label_count"] = sum(label_counts.values())
+                top = sorted(label_counts.items(), key=lambda item: (-item[1], item[0]))
+                summary["block_label_values"] = [label for label, _ in top[:12]]
+            markdown = entry.get("markdown")
+            if isinstance(markdown, dict):
+                md_text = markdown.get("text") or markdown.get("markdown") or markdown.get("content")
+                if isinstance(md_text, str):
+                    summary["markdown_len"] = len(md_text)
+                    summary["markdown_preview"] = _shorten_text(md_text)
+                md_images = markdown.get("images") or markdown.get("markdown_images") or markdown.get("markdownImages")
+                if isinstance(md_images, dict):
+                    summary["markdown_images_count"] = len(md_images)
+                    summary["markdown_images_keys"] = _keys_preview(md_images, limit=6)
+            elif isinstance(markdown, str):
+                summary["markdown_len"] = len(markdown)
+                summary["markdown_preview"] = _shorten_text(markdown)
+            output_images = entry.get("outputImages")
+            if isinstance(output_images, dict):
+                summary["output_images_count"] = len(output_images)
+                summary["output_images_keys"] = _keys_preview(output_images, limit=6)
+            pruned = entry.get("prunedResult")
+            if isinstance(pruned, list):
+                summary["pruned_result_count"] = len(pruned)
+                preview: List[Dict[str, Any]] = []
+                for block in pruned[:5]:
+                    if not isinstance(block, dict):
+                        preview.append({"type": type(block).__name__})
+                        continue
+                    preview.append(_summarize_pruned_block(block))
+                summary["pruned_result_preview"] = preview
+            elif isinstance(pruned, dict):
+                summary["pruned_result_count"] = 1
+                preview: Dict[str, Any] = {"keys": _keys_preview(pruned, limit=12)}
+                parsing_list = pruned.get("parsing_res_list") if isinstance(pruned, dict) else None
+                if isinstance(parsing_list, list):
+                    preview["parsing_res_count"] = len(parsing_list)
+                    parsing_preview: List[Dict[str, Any]] = []
+                    for block in parsing_list[:5]:
+                        if not isinstance(block, dict):
+                            parsing_preview.append({"type": type(block).__name__})
+                            continue
+                        parsing_preview.append(_summarize_pruned_block(block))
+                    preview["parsing_res_preview"] = parsing_preview
+                summary["pruned_result_preview"] = preview
+            return summary
+
+        def _summarize_pruned_block(block: Dict[str, Any]) -> Dict[str, Any]:
+            def _find_string_by_keys(value: Any, keys: Set[str], depth: int = 0, limit: int = 3) -> Optional[str]:
+                if depth > limit:
+                    return None
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if key in keys and isinstance(item, str) and item.strip():
+                            return item.strip()
+                    for item in value.values():
+                        found = _find_string_by_keys(item, keys, depth + 1, limit)
+                        if found:
+                            return found
+                elif isinstance(value, list):
+                    for item in value[:5]:
+                        found = _find_string_by_keys(item, keys, depth + 1, limit)
+                        if found:
+                            return found
+                return None
+
+            def _find_bbox(value: Any, depth: int = 0, limit: int = 3) -> Optional[List[float]]:
+                if depth > limit:
+                    return None
+                if isinstance(value, (list, tuple)) and len(value) >= 4:
+                    try:
+                        return [round(float(x), 2) for x in value[:4]]
+                    except Exception:
+                        return None
+                if isinstance(value, dict):
+                    if all(k in value for k in ("x0", "y0", "x1", "y1")):
+                        try:
+                            return [
+                                round(float(value["x0"]), 2),
+                                round(float(value["y0"]), 2),
+                                round(float(value["x1"]), 2),
+                                round(float(value["y1"]), 2),
+                            ]
+                        except Exception:
+                            return None
+                    if all(k in value for k in ("left", "top", "width", "height")):
+                        try:
+                            left = float(value["left"])
+                            top = float(value["top"])
+                            return [
+                                round(left, 2),
+                                round(top, 2),
+                                round(left + float(value["width"]), 2),
+                                round(top + float(value["height"]), 2),
+                            ]
+                        except Exception:
+                            return None
+                    for item in value.values():
+                        found = _find_bbox(item, depth + 1, limit)
+                        if found:
+                            return found
+                if isinstance(value, list):
+                    for item in value[:5]:
+                        found = _find_bbox(item, depth + 1, limit)
+                        if found:
+                            return found
+                return None
+
+            preview: Dict[str, Any] = {}
+            for key in ("block_label", "blockLabel", "label", "type", "block_type", "blockType"):
+                val = block.get(key)
+                if isinstance(val, str) and val.strip():
+                    preview["block_label"] = val.strip()
+                    break
+            for key in ("id", "block_id", "blockId", "uuid", "uid"):
+                val = block.get(key)
+                if isinstance(val, (int, str)) and str(val).strip():
+                    preview[key] = str(val).strip()
+                    break
+            for key in ("parent_id", "parentId", "group_id", "groupId", "layout_id", "layoutId"):
+                val = block.get(key)
+                if isinstance(val, (int, str)) and str(val).strip():
+                    preview[key] = str(val).strip()
+            for key in ("image_id", "imageId", "img_id", "imgId", "image_index", "img_idx"):
+                val = block.get(key)
+                if isinstance(val, (int, str)) and str(val).strip():
+                    preview[key] = str(val).strip()
+                    break
+            image_keys = {
+                "image",
+                "img",
+                "image_path",
+                "imagePath",
+                "img_path",
+                "src",
+                "url",
+                "path",
+                "file",
+                "file_path",
+                "filePath",
+            }
+            image_ref = _find_string_by_keys(block, image_keys)
+            if image_ref:
+                preview["image_ref"] = image_ref
+            text_keys = {
+                "text",
+                "content",
+                "ocr_text",
+                "ocrText",
+                "caption",
+                "figure_caption",
+                "footnote",
+                "note",
+                "value",
+            }
+            text_val = _find_string_by_keys(block, text_keys)
+            if text_val:
+                preview["text_preview"] = _shorten_text(text_val, limit=160)
+            bbox_val = _find_bbox(block)
+            if bbox_val:
+                preview["bbox"] = bbox_val
+            preview["keys"] = _keys_preview(block, limit=12)
+            return preview
+
+        def _summarize_result(value: Any) -> Any:
+            if isinstance(value, dict):
+                summary: Dict[str, Any] = {"keys": _keys_preview(value)}
+                layout_key = None
+                layout_val = None
+                for key in (
+                    "layoutParsingResults",
+                    "layout_parsing_results",
+                    "layoutParsingResult",
+                    "layout_parsing_result",
+                ):
+                    if key in value:
+                        layout_key = key
+                        layout_val = value.get(key)
+                        break
+                if layout_key is not None:
+                    summary["layout_key"] = layout_key
+                    if isinstance(layout_val, list):
+                        summary["layout_count"] = len(layout_val)
+                        if layout_val:
+                            summary["layout_preview"] = _summarize_layout_entry(layout_val[0])
+                    elif layout_val is not None:
+                        summary["layout_count"] = 1
+                        summary["layout_preview"] = _summarize_layout_entry(layout_val)
+                return summary
+            if isinstance(value, list):
+                preview: Dict[str, Any] = {"list_len": len(value)}
+                if value:
+                    preview["first_item_type"] = type(value[0]).__name__
+                    if isinstance(value[0], dict):
+                        preview["first_item_keys"] = _keys_preview(value[0])
+                return preview
+            if isinstance(value, str):
+                return {"text_preview": _shorten_text(value)}
+            return {"type": type(value).__name__}
+
+        def _summarize_api_response(value: Any) -> Dict[str, Any]:
+            summary: Dict[str, Any] = {}
+            if isinstance(value, dict):
+                for key in ("code", "status", "message", "msg", "error", "error_msg", "errorMsg"):
+                    if key in value:
+                        summary[key] = _shorten_text(str(value.get(key)))
+                if "result" in value:
+                    summary["result"] = _summarize_result(value.get("result"))
+                else:
+                    summary["result"] = _summarize_result(value)
+                summary["keys"] = _keys_preview(value)
+                return summary
+            summary["result"] = _summarize_result(value)
+            return summary
+
+        def _request_api(file_bytes: bytes, file_type: int, label: str) -> Dict[str, Any]:
+            payload = _build_payload(file_bytes, file_type)
+            try:
+                response = requests.post(api_url, json=payload, headers=headers, timeout=api_timeout)
+            except Exception as exc:
+                raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): {exc}") from exc
+            if response.status_code != 200:
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    message = (
+                        "PaddleOCR-VL API rate limited (429): daily 3000-page limit reached. "
+                        "Wait for the quota reset or request whitelist access."
+                    )
+                    if retry_after:
+                        message = f"{message} Retry-After: {retry_after}"
+                    raise RuntimeError(message)
+                body = ""
+                try:
+                    body = response.text.strip()
+                except Exception:
+                    body = ""
+                raise RuntimeError(
+                    f"PaddleOCR-VL API request failed ({label}): status={response.status_code} {body}"
+                )
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise RuntimeError(f"PaddleOCR-VL API response parse failed ({label}): {exc}") from exc
+            summary = _summarize_api_response(data)
+            try:
+                LOGGER.info("PaddleOCR-VL API response (%s): %s", label, json.dumps(summary, ensure_ascii=True))
+            except Exception:
+                LOGGER.info("PaddleOCR-VL API response (%s): %r", label, summary)
+            return data
+
+        def _extract_layout_results(data: Any) -> List[Dict[str, Any]]:
+            if isinstance(data, dict):
+                def _is_success_message(value: Any) -> bool:
+                    if value is None:
+                        return False
+                    text = str(value).strip().lower()
+                    return text in {"success", "ok", "ok."}
+
+                error_code = data.get("errorCode")
+                if error_code is None:
+                    error_code = data.get("error_code")
+                error_msg = data.get("error_msg") or data.get("errorMsg")
+                error_field = data.get("error")
+                if error_msg is None and isinstance(error_field, dict):
+                    error_msg = error_field.get("message") or error_field.get("msg")
+                if error_code is not None:
+                    try:
+                        code_int = int(error_code)
+                    except Exception:
+                        code_int = None
+                    if code_int is not None and code_int != 0:
+                        err = error_msg or error_field or error_code
+                        raise RuntimeError(f"PaddleOCR-VL API error: {err}")
+                    if code_int is None and error_msg and not _is_success_message(error_msg):
+                        raise RuntimeError(f"PaddleOCR-VL API error: {error_msg}")
+                else:
+                    if isinstance(error_field, bool):
+                        if error_field and not _is_success_message(error_msg):
+                            err = error_msg or error_field
+                            raise RuntimeError(f"PaddleOCR-VL API error: {err}")
+                    elif error_msg and not _is_success_message(error_msg):
+                        raise RuntimeError(f"PaddleOCR-VL API error: {error_msg}")
+                result = data.get("result") if "result" in data else data
+            else:
+                result = data
+            if isinstance(result, dict):
+                for key in (
+                    "layoutParsingResults",
+                    "layout_parsing_results",
+                    "layoutParsingResult",
+                    "layout_parsing_result",
+                ):
+                    val = result.get(key)
+                    if isinstance(val, list):
+                        return val
+                    if isinstance(val, dict):
+                        return [val]
+            if isinstance(result, list):
+                return [r for r in result if isinstance(r, dict)]
+            return []
+
+        def _extract_markdown_text(entry: Dict[str, Any]) -> Optional[str]:
+            md_info = entry.get("markdown")
+            if isinstance(md_info, dict):
+                for key in ("text", "markdown", "content"):
+                    val = md_info.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+            if isinstance(md_info, str) and md_info.strip():
+                return md_info.strip()
+            for key in ("markdown", "markdown_text", "text", "content"):
+                val = entry.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return None
+
+        def _extract_markdown_images(entry: Dict[str, Any]) -> Dict[str, Any]:
+            images: Dict[str, Any] = {}
+            md_info = entry.get("markdown")
+            if isinstance(md_info, dict):
+                candidate = md_info.get("images") or md_info.get("markdown_images") or md_info.get("markdownImages")
+                if isinstance(candidate, dict):
+                    images.update(candidate)
+            for key in ("markdown_images", "markdownImages"):
+                candidate = entry.get(key)
+                if isinstance(candidate, dict):
+                    images.update(candidate)
+            return images
+
+        def _extract_page_text(entry: Dict[str, Any], md_text: Optional[str]) -> str:
+            for key in ("text", "ocrText", "ocr_text", "content"):
+                val = entry.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            if md_text:
+                return _strip_markup(md_text)
+            return ""
+
+        def _image_to_bytes(image: Any) -> bytes:
+            if isinstance(image, (bytes, bytearray)):
+                return bytes(image)
+            if isinstance(image, str) and os.path.isfile(image):
+                with open(image, "rb") as handle:
+                    return handle.read()
+            if hasattr(image, "save"):
+                img = image
+                if hasattr(img, "convert"):
+                    try:
+                        img = img.convert("RGB")
+                    except Exception:
+                        img = image
+                buffer = io.BytesIO()
+                try:
+                    img.save(buffer, format="PNG")
+                except Exception:
+                    buffer = io.BytesIO()
+                    img.save(buffer, format="JPEG")
+                return buffer.getvalue()
+            try:
+                import numpy as np
+                from PIL import Image as _PILImage
+            except Exception:
+                raise RuntimeError("Unsupported image type for PaddleOCR-VL API.")
+            if isinstance(image, np.ndarray):
+                buffer = io.BytesIO()
+                _PILImage.fromarray(image).save(buffer, format="PNG")
+                return buffer.getvalue()
+            raise RuntimeError("Unsupported image type for PaddleOCR-VL API.")
+
+        pages: List[Dict[str, Any]] = []
+        markdown_items: List[str] = []
+        markdown_images: Dict[str, Any] = {}
+        markdown_image_labels: Dict[str, str] = {}
+        page_counter = 0
+        if progress_cb and progress_span > 0:
+            progress_cb(progress_base, "ocr", "Paddle OCR-VL API initializing")
+
+        def _normalize_image_ref(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                return value.strip() or None
+            if isinstance(value, dict):
+                for key in ("image", "img", "src", "url", "path", "file", "file_path", "filePath"):
+                    cand = value.get(key)
+                    if isinstance(cand, str) and cand.strip():
+                        return cand.strip()
+            return None
+
+        def _merge_label(existing: Optional[str], incoming: str) -> str:
+            if not existing:
+                return incoming
+            if incoming.lower() in existing.lower():
+                return existing
+            if existing.lower() in incoming.lower():
+                return incoming
+            return f"{existing}; {incoming}"
+
+        def _store_image_label(ref: str, label: str) -> None:
+            if not ref or not label:
+                return
+            label = label.strip()
+            if not label:
+                return
+            markdown_image_labels[ref] = _merge_label(markdown_image_labels.get(ref), label)
+            filename = os.path.basename(ref)
+            if filename:
+                markdown_image_labels[filename] = _merge_label(markdown_image_labels.get(filename), label)
+
+        def _extract_block_bbox(block: Dict[str, Any]) -> Optional[List[float]]:
+            for key in ("block_bbox", "bbox", "box", "rect", "xyxy"):
+                val = block.get(key)
+                if isinstance(val, (list, tuple)) and len(val) >= 4:
+                    try:
+                        return [float(val[0]), float(val[1]), float(val[2]), float(val[3])]
+                    except Exception:
+                        continue
+                if isinstance(val, dict):
+                    if all(k in val for k in ("x0", "y0", "x1", "y1")):
+                        try:
+                            return [float(val["x0"]), float(val["y0"]), float(val["x1"]), float(val["y1"])]
+                        except Exception:
+                            continue
+                    if all(k in val for k in ("left", "top", "width", "height")):
+                        try:
+                            left = float(val["left"])
+                            top = float(val["top"])
+                            return [left, top, left + float(val["width"]), top + float(val["height"])]
+                        except Exception:
+                            continue
+            return None
+
+        def _extract_block_text(block: Dict[str, Any]) -> Optional[str]:
+            text_keys = {
+                "block_content",
+                "text",
+                "content",
+                "ocr_text",
+                "ocrText",
+                "caption",
+                "figure_caption",
+                "footnote",
+                "note",
+                "value",
+            }
+            fragments: List[str] = []
+
+            def walk(value: Any, depth: int = 0) -> None:
+                if depth > 4 or len(fragments) >= 8:
+                    return
+                if isinstance(value, str):
+                    chunk = value.strip()
+                    if chunk:
+                        fragments.append(chunk)
+                    return
+                if isinstance(value, dict):
+                    for key in text_keys:
+                        if key in value:
+                            walk(value[key], depth + 1)
+                    for item in value.values():
+                        walk(item, depth + 1)
+                elif isinstance(value, list):
+                    for item in value[:8]:
+                        walk(item, depth + 1)
+
+            walk(block)
+            if not fragments:
+                return None
+            deduped: List[str] = []
+            seen: Set[str] = set()
+            for frag in fragments:
+                if frag in seen:
+                    continue
+                seen.add(frag)
+                deduped.append(frag)
+            return " ".join(deduped).strip() or None
+
+        def _parse_bbox_from_image_key(key: str) -> Optional[List[float]]:
+            match = re.search(r"_(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)\.(?:png|jpg|jpeg|webp)$", key, re.IGNORECASE)
+            if not match:
+                return None
+            try:
+                return [float(match.group(1)), float(match.group(2)), float(match.group(3)), float(match.group(4))]
+            except Exception:
+                return None
+
+        def _bbox_overlap_x(a: List[float], b: List[float]) -> float:
+            overlap = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+            width = max(1.0, min(a[2] - a[0], b[2] - b[0]))
+            return overlap / width if width > 0 else 0.0
+
+        def _attach_vision_footnotes(entry: Dict[str, Any], md_images: Dict[str, Any]) -> None:
+            if not md_images:
+                return
+            pruned = entry.get("prunedResult")
+            parsing_list = None
+            if isinstance(pruned, dict):
+                parsing_list = pruned.get("parsing_res_list")
+            elif isinstance(pruned, list):
+                parsing_list = pruned
+            if not isinstance(parsing_list, list):
+                return
+            image_blocks: List[Dict[str, Any]] = []
+            footnote_blocks: List[Dict[str, Any]] = []
+            for block in parsing_list:
+                if not isinstance(block, dict):
+                    continue
+                label = (
+                    block.get("block_label")
+                    or block.get("blockLabel")
+                    or block.get("label")
+                    or block.get("type")
+                    or ""
+                )
+                label = str(label).strip().lower()
+                bbox = _extract_block_bbox(block)
+                if label == "image" and bbox:
+                    image_blocks.append({"bbox": bbox})
+                elif label == "vision_footnote" and bbox:
+                    text = _extract_block_text(block)
+                    if text:
+                        footnote_blocks.append({"bbox": bbox, "text": text})
+            if not image_blocks or not footnote_blocks:
+                return
+            image_keys = [key for key in md_images.keys() if isinstance(key, str)]
+            image_key_bboxes: List[Tuple[str, List[float]]] = []
+            for key in image_keys:
+                bbox = _parse_bbox_from_image_key(key)
+                if bbox:
+                    image_key_bboxes.append((key, bbox))
+            image_block_to_key: Dict[int, str] = {}
+            if image_key_bboxes:
+                for idx, block in enumerate(image_blocks):
+                    best_key = None
+                    best_score = None
+                    for key, bbox in image_key_bboxes:
+                        score = sum(abs(a - b) for a, b in zip(block["bbox"], bbox))
+                        if best_score is None or score < best_score:
+                            best_score = score
+                            best_key = key
+                    if best_key:
+                        image_block_to_key[idx] = best_key
+            if not image_block_to_key and len(image_blocks) == 1 and len(image_keys) == 1:
+                image_block_to_key[0] = image_keys[0]
+
+            for footnote in footnote_blocks:
+                best_idx = None
+                best_gap = None
+                for idx, image_block in enumerate(image_blocks):
+                    img_bbox = image_block["bbox"]
+                    foot_bbox = footnote["bbox"]
+                    overlap_ratio = _bbox_overlap_x(img_bbox, foot_bbox)
+                    if overlap_ratio < 0.2:
+                        continue
+                    vertical_gap = foot_bbox[1] - img_bbox[3]
+                    if vertical_gap < -10:
+                        continue
+                    gap_score = max(0.0, vertical_gap)
+                    if best_gap is None or gap_score < best_gap:
+                        best_gap = gap_score
+                        best_idx = idx
+                if best_idx is None:
+                    continue
+                key = image_block_to_key.get(best_idx)
+                if key:
+                    _store_image_label(key, footnote["text"])
+
+        def _collect_block_labels(value: Any) -> None:
+            if isinstance(value, dict):
+                label = (
+                    value.get("block_label")
+                    or value.get("blockLabel")
+                    or value.get("label")
+                    or value.get("blockLabelName")
+                )
+                image_ref = _normalize_image_ref(
+                    value.get("image")
+                    or value.get("img")
+                    or value.get("image_path")
+                    or value.get("imagePath")
+                    or value.get("img_path")
+                    or value.get("src")
+                )
+                if isinstance(label, str) and image_ref:
+                    _store_image_label(image_ref, label)
+                for item in value.values():
+                    _collect_block_labels(item)
+            elif isinstance(value, list):
+                for item in value:
+                    _collect_block_labels(item)
+
+        def _append_page(entry: Dict[str, Any]) -> None:
+            nonlocal page_counter
+            md_text = _extract_markdown_text(entry)
+            if md_text:
+                markdown_items.append(md_text)
+            md_images = _extract_markdown_images(entry)
+            if md_images:
+                markdown_images.update(md_images)
+                _attach_vision_footnotes(entry, md_images)
+            _collect_block_labels(entry)
+            page_counter += 1
+            text = _extract_page_text(entry, md_text)
+            page_entry = {"page_num": page_counter, "text": (text or "").strip()}
+            if isinstance(md_text, str) and md_text.strip():
+                page_entry["markdown"] = md_text.strip()
+            pages.append(page_entry)
+
+        def _run_api_for_images() -> None:
+            total = max(1, len(api_images))
+            for idx, image in enumerate(api_images, start=1):
+                if progress_cb and progress_span > 0:
+                    percent = progress_base + int((idx - 1) / total * progress_span)
+                    progress_cb(percent, "ocr", f"Paddle OCR-VL API page {idx}/{total}")
+                file_bytes = _image_to_bytes(image)
+                data = _request_api(file_bytes, 1, f"page {idx}/{total}")
+                layout_results = _extract_layout_results(data)
+                if not layout_results:
+                    _append_page({})
+                else:
+                    for entry in layout_results:
+                        _append_page(entry)
+                if progress_cb and progress_span > 0:
+                    percent = progress_base + int(idx / total * progress_span)
+                    progress_cb(percent, "ocr", f"Paddle OCR-VL API page {idx}/{total}")
+
+        if isinstance(source_path, str) and os.path.isfile(source_path):
+            file_type = 0 if source_path.lower().endswith(".pdf") else 1
+            with open(source_path, "rb") as handle:
+                file_bytes = handle.read()
+            data = _request_api(file_bytes, file_type, os.path.basename(source_path))
+            layout_results = _extract_layout_results(data)
+            if not layout_results and file_type == 0 and api_images:
+                LOGGER.warning("PaddleOCR-VL API returned no layout results for PDF; retrying per-page images.")
+                _run_api_for_images()
+            else:
+                total_pages = len(layout_results) or max(1, len(api_images))
+                for entry in layout_results:
+                    _append_page(entry)
+                    if progress_cb and progress_span > 0:
+                        percent = progress_base + int(page_counter / total_pages * progress_span)
+                        progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
+                if not layout_results:
+                    for _ in range(max(1, len(api_images))):
+                        _append_page({})
+        else:
+            _run_api_for_images()
+
+        layout_markdown = "\n\n".join(markdown_items) if markdown_items else None
+        text_chars = ocr_pages_text_chars(pages)
+        if text_chars == 0 and isinstance(layout_markdown, str) and layout_markdown.strip():
+            fallback_text = _strip_markup(layout_markdown)
+            if fallback_text:
+                if pages:
+                    pages[0]["text"] = fallback_text
+                else:
+                    pages = [{"page_num": 1, "text": fallback_text}]
+                text_chars = ocr_pages_text_chars(pages)
+        LOGGER.info(
+            "PaddleOCR-VL API OCR complete: pages=%d, text_chars=%d",
+            len(pages),
+            text_chars,
+        )
+        stats: Dict[str, Any] = {
+            "layout_used": True,
+            "layout_model": "PaddleOCR-VL API",
+        }
+        if isinstance(layout_markdown, str) and layout_markdown.strip():
+            stats["layout_markdown"] = layout_markdown
+        if markdown_images:
+            stats["layout_markdown_images"] = markdown_images
+        if markdown_image_labels:
+            stats["layout_markdown_image_labels"] = markdown_image_labels
+        return pages, stats
 
     try:
         import numpy as np

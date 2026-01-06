@@ -38,6 +38,7 @@ import {
   CACHE_ROOT,
   DEFAULT_SETTINGS,
   ITEM_CACHE_DIR,
+  OcrEngineAvailability,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
 } from "./settings";
@@ -4725,12 +4726,13 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!markdown) {
       return "";
     }
+    const normalizedMarkdown = this.replaceImageMarkersForIndexPreview(markdown);
     const container = document.createElement("div");
     try {
-      await MarkdownRenderer.renderMarkdown(markdown, container, "", this);
+      await MarkdownRenderer.renderMarkdown(normalizedMarkdown, container, "", this);
     } catch (error) {
       console.warn("Failed to render markdown for index preview", error);
-      return this.normalizeIndexPreviewText(markdown);
+      return this.normalizeIndexPreviewText(normalizedMarkdown);
     }
     const html = container.innerHTML || "";
     const withBreaks = html.replace(/<br\s*\/?>/gi, "\n");
@@ -4739,6 +4741,29 @@ export default class ZoteroRagPlugin extends Plugin {
     decoder.innerHTML = stripped;
     const decoded = decoder.value || stripped;
     return this.normalizeIndexPreviewText(decoded);
+  }
+
+  private replaceImageMarkersForIndexPreview(markdown: string): string {
+    if (!markdown) {
+      return "";
+    }
+    const marker = (label: string): string => {
+      const cleaned = label.trim();
+      return cleaned ? `Image caption: ${cleaned}` : "Image";
+    };
+    let updated = markdown.replace(
+      /!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
+      (_match, _target, label) => marker(label || "")
+    );
+    updated = updated.replace(
+      /!\[([^\]]*)]\([^)]+\)/g,
+      (_match, label) => marker(label || "")
+    );
+    updated = updated.replace(/<img[^>]*>/gi, (tag) => {
+      const altMatch = tag.match(/\balt=(['"])([^'"]*)\1/i);
+      return marker(altMatch ? altMatch[2] : "");
+    });
+    return updated;
   }
 
   private normalizeIndexPreviewText(text: string): string {
@@ -7548,7 +7573,70 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
 
+    this.appendOcrEngineArgs(args);
+
     return args;
+  }
+
+  private appendOcrEngineArgs(args: string[]): void {
+    const engine = this.settings.ocrEngine;
+    const apiKey = (this.settings.paddleApiKey || "").trim();
+    const vlApiUrl = (this.settings.paddleVlApiUrl || "").trim();
+    const structureApiUrl = (this.settings.paddleStructureApiUrl || "").trim();
+
+    const setPreferFallback = (value: "paddle" | "tesseract") => {
+      args.push("--prefer-ocr-engine", value, "--fallback-ocr-engine", value);
+    };
+
+    const disableApis = () => {
+      args.push("--no-paddle-vl-api", "--no-paddle-structure-api");
+    };
+
+    switch (engine) {
+      case "tesseract":
+        setPreferFallback("tesseract");
+        args.push("--no-paddle-vl", "--no-paddle-structure-v3");
+        disableApis();
+        break;
+      case "paddle_structure_local":
+        setPreferFallback("paddle");
+        args.push("--paddle-structure-v3", "--no-paddle-vl");
+        disableApis();
+        break;
+      case "paddle_vl_local":
+        setPreferFallback("paddle");
+        args.push("--paddle-vl", "--no-paddle-structure-v3");
+        disableApis();
+        break;
+      case "paddle_structure_api":
+        setPreferFallback("paddle");
+        args.push("--paddle-structure-v3", "--no-paddle-vl", "--no-paddle-vl-api");
+        if (apiKey) {
+          args.push("--paddle-structure-api", "--paddle-structure-api-token", apiKey);
+          if (structureApiUrl) {
+            args.push("--paddle-structure-api-url", structureApiUrl);
+          }
+        } else {
+          args.push("--no-paddle-structure-api");
+        }
+        break;
+      case "paddle_vl_api":
+        setPreferFallback("paddle");
+        args.push("--paddle-vl", "--no-paddle-structure-v3", "--no-paddle-structure-api");
+        if (apiKey) {
+          args.push("--paddle-vl-api", "--paddle-vl-api-token", apiKey);
+          if (vlApiUrl) {
+            args.push("--paddle-vl-api-url", vlApiUrl);
+          }
+        } else {
+          args.push("--no-paddle-vl-api");
+        }
+        break;
+      case "auto":
+      default:
+        disableApis();
+        break;
+    }
   }
 
   private appendEmbedSubchunkArgs(args: string[]): void {
@@ -8266,6 +8354,86 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Failed to set up Python environment. See console for details.");
       console.error("Python env setup failed", error);
     }
+  }
+
+  async detectOcrEngines(): Promise<OcrEngineAvailability> {
+    const tesseractAvailable = await this.canRunCommand("tesseract", []);
+    let pythonCommand = (this.settings.pythonPath || "").trim();
+    let pythonArgs: string[] = [];
+    if (!pythonCommand) {
+      try {
+        const resolved = await this.resolveBootstrapPython();
+        pythonCommand = resolved.command;
+        pythonArgs = resolved.args;
+      } catch {
+        return {
+          tesseract: tesseractAvailable,
+          paddleStructureLocal: false,
+          paddleVlLocal: false,
+        };
+      }
+    }
+
+    const script = [
+      "import importlib.util, json",
+      "def has_module(name):",
+      "    return importlib.util.find_spec(name) is not None",
+      "has_paddle = has_module('paddle')",
+      "has_paddleocr = has_module('paddleocr')",
+      "has_paddlex = has_module('paddlex')",
+      "has_vl = False",
+      "if has_paddleocr:",
+      "    try:",
+      "        from paddleocr import PaddleOCRVL",
+      "        has_vl = True",
+      "    except Exception:",
+      "        has_vl = False",
+      "print(json.dumps({'paddle': has_paddle, 'paddleocr': has_paddleocr, 'paddlex': has_paddlex, 'paddle_vl': has_vl}))",
+    ].join("\n");
+
+    const pythonStatus = await new Promise<{ ok: boolean; data?: any }>((resolve) => {
+      const child = spawn(pythonCommand, [...pythonArgs, "-c", script], {
+        env: this.buildPythonEnv(),
+      });
+      let stdout = "";
+      child.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
+      child.on("error", () => resolve({ ok: false }));
+      child.on("close", (code) => {
+        if (code !== 0) {
+          resolve({ ok: false });
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout.trim());
+          resolve({ ok: true, data: parsed });
+        } catch {
+          resolve({ ok: false });
+        }
+      });
+    });
+
+    if (!pythonStatus.ok || !pythonStatus.data) {
+      return {
+        tesseract: tesseractAvailable,
+        paddleStructureLocal: false,
+        paddleVlLocal: false,
+      };
+    }
+    const info = pythonStatus.data as {
+      paddle?: boolean;
+      paddleocr?: boolean;
+      paddlex?: boolean;
+      paddle_vl?: boolean;
+    };
+    const hasPaddle = Boolean(info.paddle);
+    const hasPaddleOcr = Boolean(info.paddleocr);
+    return {
+      tesseract: tesseractAvailable,
+      paddleStructureLocal: hasPaddle && hasPaddleOcr && Boolean(info.paddlex),
+      paddleVlLocal: hasPaddle && hasPaddleOcr && Boolean(info.paddle_vl),
+    };
   }
 
   private getSharedPythonEnvRoot(): string {
