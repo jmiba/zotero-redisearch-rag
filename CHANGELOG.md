@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Page-synchronous view of PDF in sidebar.
+- Improved footnote conversion.
+- Footer, header and page number removal from OCR/text-layer extraction.
+- PaddleOCR API timeout handling.
+
 ## 0.4.0
 
 - Import now resumes after a drop/rebuild when an embedding-dimension mismatch is detected, with clearer provider-error notices.

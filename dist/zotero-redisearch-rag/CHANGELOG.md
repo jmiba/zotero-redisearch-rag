@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- PDF sidebar now uses the custom PDF icon while main editor PDF tabs keep the default icon.
+- PDF icon asset simplified for Obsidian's SVG parser.
+
 ## 0.4.0
 
 - Import now resumes after a drop/rebuild when an embedding-dimension mismatch is detected, with clearer provider-error notices.

@@ -23,6 +23,7 @@ const tools = [
 const icons = [
   { name: "zrr-picker", path: "icon.svg" },
   { name: "zrr-chat", path: "icon-chat.svg" },
+  { name: "zrr-pdf", path: "icon-pdf.svg" },
 ];
 
 const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));

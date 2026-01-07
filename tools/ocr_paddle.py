@@ -81,7 +81,7 @@ def _normalize_footnote_definition_line(line: str) -> Optional[str]:
 
 
 def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool = False) -> str:
-    if "$" not in markdown:
+    if not markdown:
         return markdown
     footnotes: List[str] = []
 
@@ -100,6 +100,15 @@ def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool =
         return f"$$ {normalized} $$"
 
     updated = _INLINE_MATH_RE.sub(_replace, markdown)
+    lines = updated.splitlines()
+    normalized_any = False
+    for idx, line in enumerate(lines):
+        normalized = _normalize_footnote_definition_line(line)
+        if normalized is not None:
+            lines[idx] = normalized
+            normalized_any = True
+    if normalized_any:
+        updated = "\n".join(lines)
     if not add_footnote_defs or not footnotes:
         return updated
 

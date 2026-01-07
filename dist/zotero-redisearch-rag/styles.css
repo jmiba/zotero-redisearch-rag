@@ -301,11 +301,43 @@
   opacity: 0.75;
 }
 
-.zrr-sync-badge--chunk-end.zrr-sync-badge--page {
-  display: none;
-}
 
 .zrr-sync-badge.is-excluded {
   border-color: var(--background-modifier-error);
   color: var(--text-error);
+}
+
+.zrr-settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 0.75rem;
+}
+
+.zrr-settings-tab-button {
+  padding: 0.35rem 0.7rem;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+
+.zrr-settings-tab-button.is-active {
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  border-color: var(--background-modifier-border);
+  border-bottom-color: var(--background-secondary);
+}
+
+.zrr-settings-tab-panel {
+  display: none;
+  padding-top: 0.25rem;
+}
+
+.zrr-settings-tab-panel.is-active {
+  display: block;
 }

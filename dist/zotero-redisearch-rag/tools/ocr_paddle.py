@@ -14,6 +14,140 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 LOGGER = logging.getLogger("docling_extract")
 
+_INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)")
+_FRACTION_MAP: Dict[Tuple[int, int], str] = {
+    (1, 2): "½",
+    (1, 3): "⅓",
+    (2, 3): "⅔",
+    (1, 4): "¼",
+    (3, 4): "¾",
+    (1, 5): "⅕",
+    (2, 5): "⅖",
+    (3, 5): "⅗",
+    (4, 5): "⅘",
+    (1, 6): "⅙",
+    (5, 6): "⅚",
+    (1, 8): "⅛",
+    (3, 8): "⅜",
+    (5, 8): "⅝",
+    (7, 8): "⅞",
+}
+
+
+def _extract_footnote_marker(value: str) -> Optional[str]:
+    match = re.fullmatch(r"\^\s*\{?\s*([^\s{}]+)\s*\}?\s*", value)
+    if not match:
+        return None
+    marker = match.group(1).strip()
+    if marker.startswith("\\") and len(marker) == 2:
+        marker = marker[1:]
+    return marker or None
+
+
+def _replace_simple_fraction(value: str) -> Optional[str]:
+    match = re.fullmatch(r"(\d+)\s*/\s*(\d+)", value)
+    if match:
+        return _FRACTION_MAP.get((int(match.group(1)), int(match.group(2))))
+    match = re.fullmatch(r"\\frac\{\s*(\d+)\s*\}\{\s*(\d+)\s*\}", value)
+    if match:
+        return _FRACTION_MAP.get((int(match.group(1)), int(match.group(2))))
+    return None
+
+
+def _find_footnotes_section(lines: List[str]) -> Optional[Tuple[int, int]]:
+    for idx, line in enumerate(lines):
+        if re.match(r"^#{1,6}\s+footnotes\s*$", line.strip(), re.IGNORECASE):
+            end = len(lines)
+            for jdx in range(idx + 1, len(lines)):
+                if re.match(r"^#{1,6}\s+", lines[jdx]):
+                    end = jdx
+                    break
+            return idx, end
+    return None
+
+
+def _normalize_footnote_definition_line(line: str) -> Optional[str]:
+    stripped = line.strip()
+    if not stripped.startswith("[^"):
+        return None
+    match = re.match(r"^\[\^\s*([^\]\s]+)\s*\]\s*:?\s*(.*)$", stripped)
+    if not match:
+        return None
+    marker = match.group(1).strip()
+    rest = match.group(2).strip()
+    if rest:
+        return f"[^{marker}]: {rest}"
+    return f"[^{marker}]:"
+
+
+def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool = False) -> str:
+    if not markdown:
+        return markdown
+    footnotes: List[str] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        content = match.group(1)
+        normalized = content.strip()
+        if not normalized:
+            return match.group(0)
+        marker = _extract_footnote_marker(normalized)
+        if marker:
+            footnotes.append(marker)
+            return f"[^{marker}]"
+        fraction = _replace_simple_fraction(normalized)
+        if fraction:
+            return fraction
+        return f"$$ {normalized} $$"
+
+    updated = _INLINE_MATH_RE.sub(_replace, markdown)
+    lines = updated.splitlines()
+    normalized_any = False
+    for idx, line in enumerate(lines):
+        normalized = _normalize_footnote_definition_line(line)
+        if normalized is not None:
+            lines[idx] = normalized
+            normalized_any = True
+    if normalized_any:
+        updated = "\n".join(lines)
+    if not add_footnote_defs or not footnotes:
+        return updated
+
+    footnote_ids = list(dict.fromkeys(footnotes))
+    lines = updated.splitlines()
+    section = _find_footnotes_section(lines)
+    if section:
+        start, end = section
+        for idx in range(start + 1, end):
+            normalized = _normalize_footnote_definition_line(lines[idx])
+            if normalized is not None:
+                lines[idx] = normalized
+            else:
+                lines[idx] = lines[idx].rstrip()
+        updated = "\n".join(lines)
+
+    missing = [
+        marker
+        for marker in footnote_ids
+        if not re.search(rf"(?m)^\[\^{re.escape(marker)}\]:", updated)
+    ]
+    if not missing:
+        return updated
+
+    if section:
+        insert_at = section[1]
+        insertion: List[str] = []
+        if insert_at > 0 and lines[insert_at - 1].strip():
+            insertion.append("")
+        insertion.extend([f"[^{marker}]:" for marker in missing])
+        lines[insert_at:insert_at] = insertion
+        return "\n".join(lines)
+
+    suffix_lines = ["", "## Footnotes", ""]
+    suffix_lines.extend([f"[^{marker}]:" for marker in missing])
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    return updated + "\n".join(suffix_lines)
+
 
 def _paddlex_layout_ocr_pages(
     images: Sequence[Any],
@@ -1726,12 +1860,45 @@ def ocr_pages_with_paddle_vl(
             summary["result"] = _summarize_result(value)
             return summary
 
+        def _is_timeout_error(exc: Exception) -> bool:
+            try:
+                if isinstance(exc, requests.exceptions.Timeout):
+                    return True
+                if isinstance(exc, requests.exceptions.ConnectionError):
+                    message = str(exc).lower()
+                    if "timed out" in message or "timeout" in message:
+                        return True
+            except Exception:
+                pass
+            if isinstance(exc, TimeoutError):
+                return True
+            message = str(exc).lower()
+            return "timed out" in message or "timeout" in message
+
         def _request_api(file_bytes: bytes, file_type: int, label: str) -> Dict[str, Any]:
             payload = _build_payload(file_bytes, file_type)
-            try:
-                response = requests.post(api_url, json=payload, headers=headers, timeout=api_timeout)
-            except Exception as exc:
-                raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): {exc}") from exc
+            max_attempts = 3
+            delay_sec = 2
+            response = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = requests.post(api_url, json=payload, headers=headers, timeout=api_timeout)
+                    break
+                except Exception as exc:
+                    if _is_timeout_error(exc) and attempt < max_attempts:
+                        LOGGER.warning(
+                            "PaddleOCR-VL API timeout (%s). Retrying %d/%d in %ds.",
+                            label,
+                            attempt,
+                            max_attempts,
+                            delay_sec,
+                        )
+                        time.sleep(delay_sec)
+                        delay_sec *= 2
+                        continue
+                    raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): {exc}") from exc
+            if response is None:
+                raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): no response")
             if response.status_code != 200:
                 if response.status_code == 429:
                     retry_after = response.headers.get("Retry-After")
@@ -2158,6 +2325,15 @@ def ocr_pages_with_paddle_vl(
             _run_api_for_images()
 
         layout_markdown = "\n\n".join(markdown_items) if markdown_items else None
+        if isinstance(layout_markdown, str) and layout_markdown.strip():
+            layout_markdown = _normalize_inline_math_for_obsidian(
+                layout_markdown,
+                add_footnote_defs=True,
+            )
+        for page in pages:
+            md_value = page.get("markdown")
+            if isinstance(md_value, str) and md_value.strip():
+                page["markdown"] = _normalize_inline_math_for_obsidian(md_value)
         text_chars = ocr_pages_text_chars(pages)
         if text_chars == 0 and isinstance(layout_markdown, str) and layout_markdown.strip():
             fallback_text = _strip_markup(layout_markdown)

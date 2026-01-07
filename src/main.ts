@@ -104,11 +104,17 @@ const ISO_639_1_TO_3: Record<string, string> = {
 
 const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
 const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
+const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
 
 type ParsedChunkBlock = {
   chunkId: string;
   text: string;
   excludeFlag: boolean;
+};
+
+type ChunkMarkerInfo = {
+  chunkId?: string;
+  pageNumber?: number;
 };
 
 const ZRR_SYNC_START_RE = /<!--\s*zrr:sync-start[^>]*-->/i;
@@ -151,8 +157,11 @@ const parseZrrBadgeInfo = (data: string): ZrrBadgeInfo | null => {
   const attrs = chunkMatch[1] || "";
   const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
   const chunkId = idMatch ? idMatch[2] : "";
+  const pageAttrMatch = attrs.match(/\bpage(?:_start)?=(["']?)(\d+)\1/i);
+  const pageAttr = pageAttrMatch ? Number.parseInt(pageAttrMatch[2], 10) : undefined;
   const pageMatch = chunkId.match(/^p(\d+)$/i);
-  const pageNumber = pageMatch ? Number.parseInt(pageMatch[1], 10) : undefined;
+  const pageFromId = pageMatch ? Number.parseInt(pageMatch[1], 10) : undefined;
+  const pageNumber = Number.isFinite(pageAttr ?? NaN) ? pageAttr : pageFromId;
   const excluded = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
   return {
     type: "chunk-start",
@@ -160,6 +169,27 @@ const parseZrrBadgeInfo = (data: string): ZrrBadgeInfo | null => {
     excluded,
     pageNumber: Number.isFinite(pageNumber ?? NaN) ? pageNumber : undefined,
     chunkKind: pageNumber ? "page" : "section",
+  };
+};
+
+const parseChunkMarkerLine = (line: string): ChunkMarkerInfo | null => {
+  if (!line) {
+    return null;
+  }
+  const match = line.match(ZRR_CHUNK_START_RE);
+  if (!match) {
+    return null;
+  }
+  const attrs = match[1] || "";
+  const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
+  const chunkId = idMatch ? idMatch[2].trim() : undefined;
+  const pageAttrMatch = attrs.match(/\bpage(?:_start)?=(["']?)(\d+)\1/i);
+  const pageAttr = pageAttrMatch ? Number.parseInt(pageAttrMatch[2], 10) : undefined;
+  const pageFromId = chunkId ? extractPageNumberFromChunkId(chunkId) ?? undefined : undefined;
+  const pageNumber = Number.isFinite(pageAttr ?? NaN) ? pageAttr : pageFromId;
+  return {
+    chunkId,
+    pageNumber: Number.isFinite(pageNumber ?? NaN) ? Number(pageNumber) : undefined,
   };
 };
 
@@ -495,6 +525,44 @@ const hasExcludeMarkerInRange = (doc: CMText, startLine: number, endLine: number
   return false;
 };
 
+const extractPageNumberFromChunkId = (chunkId: string): number | null => {
+  if (!chunkId) {
+    return null;
+  }
+  const normalized = chunkId.includes(":") ? chunkId.split(":").pop() ?? chunkId : chunkId;
+  const pageMatch = normalized.match(/^p(\d+)$/i);
+  if (!pageMatch) {
+    return null;
+  }
+  const pageNumber = Number.parseInt(pageMatch[1], 10);
+  return Number.isFinite(pageNumber) ? pageNumber : null;
+};
+
+const extractPageNumberFromChunkLine = (line: string): number | null => {
+  const info = parseChunkMarkerLine(line);
+  return info?.pageNumber ?? null;
+};
+
+const extractFirstChunkMarkerFromContent = (content: string): ChunkMarkerInfo | null => {
+  if (!content) {
+    return null;
+  }
+  const match = content.match(/<!--\s*zrr:chunk\b[^>]*-->/i);
+  if (!match) {
+    return null;
+  }
+  return parseChunkMarkerLine(match[0]);
+};
+
+const getTopVisibleLineNumber = (view: EditorView): number | null => {
+  const rect = view.scrollDOM.getBoundingClientRect();
+  const pos = view.posAtCoords({ x: rect.left + 8, y: rect.top + 4 });
+  if (pos === null) {
+    return null;
+  }
+  return view.state.doc.lineAt(pos).number;
+};
+
 class ChunkToolsWidget extends WidgetType {
   private plugin: ZoteroRagPlugin;
   private docId: string;
@@ -770,6 +838,84 @@ const createChunkToolsExtension = (plugin: ZoteroRagPlugin): ViewPlugin<{
     },
     {
       decorations: (value) => value.decorations,
+    }
+  );
+
+const createPdfSidebarSyncExtension = (plugin: ZoteroRagPlugin): ViewPlugin<{}> =>
+  ViewPlugin.fromClass(
+    class {
+      private view: EditorView;
+      private docId: string | null = null;
+      private lastPage: number | null = null;
+      private lastChunkId: string | null = null;
+      private scrollFrame: number | null = null;
+      private onScroll: () => void;
+
+      constructor(view: EditorView) {
+        this.view = view;
+        this.docId = extractDocIdFromDoc(view.state.doc);
+        this.onScroll = () => this.scheduleSync(false);
+        view.scrollDOM.addEventListener("scroll", this.onScroll, { passive: true });
+        this.scheduleSync(true);
+      }
+
+      update(update: ViewUpdate): void {
+        if (update.docChanged) {
+          this.docId = extractDocIdFromDoc(update.view.state.doc);
+          this.lastPage = null;
+          this.lastChunkId = null;
+        }
+        if (update.docChanged || update.viewportChanged) {
+          this.scheduleSync(false);
+        }
+      }
+
+      destroy(): void {
+        this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
+        if (this.scrollFrame !== null) {
+          window.cancelAnimationFrame(this.scrollFrame);
+          this.scrollFrame = null;
+        }
+      }
+
+      private scheduleSync(force: boolean): void {
+        if (this.scrollFrame !== null) {
+          return;
+        }
+        this.scrollFrame = window.requestAnimationFrame(() => {
+          this.scrollFrame = null;
+          this.syncPdfSidebar(this.view, force);
+        });
+      }
+
+      private syncPdfSidebar(view: EditorView, force: boolean): void {
+        const docId = this.docId;
+        if (!docId) {
+          return;
+        }
+        const cursorLine = getTopVisibleLineNumber(view);
+        if (cursorLine === null) {
+          return;
+        }
+        const chunkStart = findChunkStartLineInDoc(view.state.doc, cursorLine);
+        if (!chunkStart) {
+          return;
+        }
+        const info = parseChunkMarkerLine(chunkStart.text);
+        const pageNumber = info?.pageNumber ?? null;
+        const chunkId = info?.chunkId ?? null;
+        if (!pageNumber && !chunkId) {
+          return;
+        }
+        const samePage = pageNumber !== null && this.lastPage === pageNumber;
+        const sameChunk = pageNumber === null && chunkId !== null && this.lastChunkId === chunkId;
+        if (!force && (samePage || sameChunk)) {
+          return;
+        }
+        this.lastPage = pageNumber;
+        this.lastChunkId = chunkId;
+        void plugin.syncPdfSidebarForDoc(docId, pageNumber ?? undefined, chunkId ?? undefined);
+      }
     }
   );
 
@@ -1344,6 +1490,15 @@ export default class ZoteroRagPlugin extends Plugin {
     | "unknown"
     | null = null;
   private lastRedisSearchTerm = "";
+  private pdfSidebarLeaf: WorkspaceLeaf | null = null;
+  private pdfSidebarDocId: string | null = null;
+  private pdfSidebarPdfPath: string | null = null;
+  private pdfSidebarPage: number | null = null;
+  private pendingPdfSync: { docId: string; pageNumber?: number; chunkId?: string } | null = null;
+  private chunkPageCache = new Map<string, Map<string, number>>();
+  private previewScrollEl: HTMLElement | null = null;
+  private previewScrollHandler: ((event: Event) => void) | null = null;
+  private previewScrollFrame: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -1355,9 +1510,12 @@ export default class ZoteroRagPlugin extends Plugin {
     this.setupStatusBar();
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
+    this.registerNoteOpenHandler();
+    this.registerPreviewScrollSyncHandlers();
     this.registerNoteDeleteMenu();
     this.registerEditorExtension(createChunkToolsExtension(this));
     this.registerEditorExtension(createSyncBadgeExtension());
+    this.registerEditorExtension(createPdfSidebarSyncExtension(this));
 
     try {
       await this.ensureBundledTools();
@@ -3808,6 +3966,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private registerRibbonIcons(): void {
     addIcon("zrr-picker", ZRR_PICKER_ICON);
     addIcon("zrr-chat", ZRR_CHAT_ICON);
+    addIcon("zrr-pdf", ZRR_PDF_ICON);
 
     const pickerButton = this.addRibbonIcon(
       "zrr-picker",
@@ -4244,6 +4403,135 @@ export default class ZoteroRagPlugin extends Plugin {
         this.scheduleNoteSync(file);
       })
     );
+  }
+
+  private registerNoteOpenHandler(): void {
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") {
+          return;
+        }
+        void this.syncPdfSidebarForFile(file);
+        this.updatePreviewScrollHandler();
+      })
+    );
+  }
+
+  private registerPreviewScrollSyncHandlers(): void {
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        this.updatePreviewScrollHandler();
+        this.maybeSyncPendingPdf();
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => {
+        this.updatePreviewScrollHandler();
+        this.maybeSyncPendingPdf();
+      })
+    );
+    this.updatePreviewScrollHandler();
+  }
+
+  private maybeSyncPendingPdf(): void {
+    if (!this.pendingPdfSync || !this.pdfSidebarLeaf) {
+      return;
+    }
+    if (!this.isLeafTabActive(this.pdfSidebarLeaf)) {
+      return;
+    }
+    const pending = this.pendingPdfSync;
+    this.pendingPdfSync = null;
+    void this.syncPdfSidebarForDoc(pending.docId, pending.pageNumber, pending.chunkId);
+  }
+
+  private updatePreviewScrollHandler(): void {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || view.getMode() !== "preview") {
+      this.detachPreviewScrollHandler();
+      return;
+    }
+    const container = view.previewMode?.containerEl;
+    if (!container) {
+      this.detachPreviewScrollHandler();
+      return;
+    }
+    if (this.previewScrollEl === container) {
+      return;
+    }
+    this.detachPreviewScrollHandler();
+    const handler = () => this.schedulePreviewSync(view);
+    container.addEventListener("scroll", handler, { passive: true });
+    this.previewScrollEl = container;
+    this.previewScrollHandler = handler;
+    this.schedulePreviewSync(view);
+  }
+
+  private detachPreviewScrollHandler(): void {
+    if (this.previewScrollEl && this.previewScrollHandler) {
+      this.previewScrollEl.removeEventListener("scroll", this.previewScrollHandler);
+    }
+    this.previewScrollEl = null;
+    this.previewScrollHandler = null;
+    if (this.previewScrollFrame !== null) {
+      window.cancelAnimationFrame(this.previewScrollFrame);
+      this.previewScrollFrame = null;
+    }
+  }
+
+  private schedulePreviewSync(view: MarkdownView): void {
+    if (this.previewScrollFrame !== null) {
+      return;
+    }
+    this.previewScrollFrame = window.requestAnimationFrame(() => {
+      this.previewScrollFrame = null;
+      this.syncPdfSidebarForPreview(view);
+    });
+  }
+
+  private syncPdfSidebarForPreview(view: MarkdownView): void {
+    const container = this.previewScrollEl;
+    if (!container) {
+      return;
+    }
+    const content = view.getViewData();
+    if (!content) {
+      return;
+    }
+    const doc = CMText.of(content.split(/\r?\n/));
+    const docId = extractDocIdFromDoc(doc);
+    if (!docId) {
+      return;
+    }
+    const topLine = this.getPreviewTopLineNumber(container);
+    if (topLine === null) {
+      return;
+    }
+    const chunkStart = findChunkStartLineInDoc(doc, topLine + 1);
+    if (!chunkStart) {
+      return;
+    }
+    const info = parseChunkMarkerLine(chunkStart.text);
+    if (!info?.pageNumber && !info?.chunkId) {
+      return;
+    }
+    void this.syncPdfSidebarForDoc(docId, info?.pageNumber, info?.chunkId);
+  }
+
+  private getPreviewTopLineNumber(container: HTMLElement): number | null {
+    const containerTop = container.getBoundingClientRect().top;
+    const blocks = container.querySelectorAll<HTMLElement>("[data-line]");
+    for (const block of Array.from(blocks)) {
+      const rect = block.getBoundingClientRect();
+      if (rect.bottom >= containerTop + 2) {
+        const lineAttr = block.getAttribute("data-line") ?? "";
+        const lineNumber = Number.parseInt(lineAttr, 10);
+        if (Number.isFinite(lineNumber)) {
+          return lineNumber;
+        }
+      }
+    }
+    return null;
   }
 
   private registerNoteDeleteMenu(): void {
@@ -5077,9 +5365,11 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!chunkId) {
         continue;
       }
+      const pageStart = Number.isFinite(chunk?.page_start ?? NaN) ? Number(chunk.page_start) : null;
       const excluded = Boolean(chunk?.excluded || chunk?.exclude);
       const text = typeof chunk?.text === "string" ? chunk.text.trim() : "";
-      const attrs = excluded ? ` id=${chunkId} exclude` : ` id=${chunkId}`;
+      const pageAttr = pageStart !== null ? ` page=${pageStart}` : "";
+      const attrs = ` id=${chunkId}${pageAttr}${excluded ? " exclude" : ""}`;
       parts.push(`<!-- zrr:chunk${attrs} -->`);
       if (text) {
         parts.push(text);
@@ -6009,6 +6299,239 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.app.workspace.getLeaf("tab");
   }
 
+  private async getPdfSidebarLeaf(): Promise<WorkspaceLeaf | null> {
+    if (this.pdfSidebarLeaf && this.pdfSidebarLeaf.view?.getViewType?.() === "pdf") {
+      return this.pdfSidebarLeaf;
+    }
+    const workspaceAny = this.app.workspace as unknown as {
+      ensureSideLeaf?: (
+        type: string,
+        side: "left" | "right",
+        options?: { active?: boolean; split?: boolean; reveal?: boolean; state?: any }
+      ) => Promise<WorkspaceLeaf>;
+    };
+    if (typeof workspaceAny.ensureSideLeaf === "function") {
+      try {
+        const leaf = await workspaceAny.ensureSideLeaf("pdf", "right", {
+          active: false,
+          split: false,
+          reveal: true,
+        });
+        if (!this.isRightSidebarLeaf(leaf)) {
+          return null;
+        }
+        this.pdfSidebarLeaf = leaf;
+        this.updatePdfSidebarIcon(leaf);
+        return leaf;
+      } catch (error) {
+        console.warn("Failed to ensure PDF side leaf", error);
+      }
+    }
+    const existing = this.app.workspace.getRightLeaf(false);
+    if (existing && this.isRightSidebarLeaf(existing)) {
+      this.pdfSidebarLeaf = existing;
+      this.updatePdfSidebarIcon(existing);
+      return existing;
+    }
+    return null;
+  }
+
+  private isRightSidebarLeaf(leaf: WorkspaceLeaf | null): boolean {
+    if (!leaf) {
+      return false;
+    }
+    const leafAny = leaf as unknown as { containerEl?: HTMLElement };
+    const containerEl = leafAny.containerEl;
+    return Boolean(containerEl?.closest(".workspace-split.mod-right-split, .mod-right-split"));
+  }
+
+  private updatePdfSidebarIcon(leaf: WorkspaceLeaf | null): void {
+    if (!leaf || !this.isRightSidebarLeaf(leaf)) {
+      return;
+    }
+    const leafAny = leaf as unknown as { containerEl?: HTMLElement };
+    const containerEl = leafAny.containerEl;
+    const targets: HTMLElement[] = [];
+    if (containerEl) {
+      targets.push(...Array.from(containerEl.querySelectorAll<HTMLElement>(".view-header-icon")));
+    }
+    const leafAnyTabs = leaf as unknown as {
+      tabHeaderEl?: HTMLElement;
+      tabHeaderInnerIconEl?: HTMLElement;
+    };
+    if (leafAnyTabs.tabHeaderEl) {
+      targets.push(
+        ...Array.from(
+          leafAnyTabs.tabHeaderEl.querySelectorAll<HTMLElement>(
+            ".workspace-tab-header-inner-icon, .view-header-icon"
+          )
+        )
+      );
+    }
+    if (leafAnyTabs.tabHeaderInnerIconEl) {
+      targets.push(leafAnyTabs.tabHeaderInnerIconEl);
+    }
+    if (targets.length === 0) {
+      return;
+    }
+    const seen = new Set<HTMLElement>();
+    for (const iconEl of targets) {
+      if (seen.has(iconEl)) {
+        continue;
+      }
+      seen.add(iconEl);
+      iconEl.innerHTML = "";
+      setIcon(iconEl, "zrr-pdf");
+      if (!iconEl.querySelector("svg") && ZRR_PDF_ICON) {
+        iconEl.innerHTML = ZRR_PDF_ICON;
+      }
+      if (iconEl.dataset) {
+        iconEl.dataset.zrrIcon = "zrr-pdf";
+      }
+    }
+    const viewAny = leaf.view as unknown as { icon?: string; getIcon?: () => string };
+    viewAny.icon = "zrr-pdf";
+    if (typeof viewAny.getIcon === "function") {
+      viewAny.getIcon = () => "zrr-pdf";
+    }
+  }
+
+  private isLeafTabActive(leaf: WorkspaceLeaf): boolean {
+    const leafAny = leaf as unknown as {
+      containerEl?: HTMLElement;
+      tabHeaderEl?: HTMLElement;
+      parent?: { activeLeaf?: WorkspaceLeaf };
+    };
+    if (leafAny.parent?.activeLeaf) {
+      return leafAny.parent.activeLeaf === leaf;
+    }
+    const containerEl = leafAny.containerEl;
+    if (containerEl?.classList.contains("is-active") || containerEl?.classList.contains("mod-active")) {
+      return true;
+    }
+    const tabHeaderEl = leafAny.tabHeaderEl;
+    if (tabHeaderEl?.classList.contains("is-active") || tabHeaderEl?.classList.contains("mod-active")) {
+      return true;
+    }
+    return false;
+  }
+
+  private async syncPdfSidebarForFile(file: TFile): Promise<void> {
+    try {
+      const content = await this.app.vault.read(file);
+      const docId = await this.resolveDocIdForNote(file, content);
+      if (!docId) {
+        return;
+      }
+      const firstMarker = extractFirstChunkMarkerFromContent(content);
+      await this.syncPdfSidebarForDoc(docId, firstMarker?.pageNumber, firstMarker?.chunkId);
+    } catch (error) {
+      console.warn("Failed to sync PDF sidebar for opened note", error);
+    }
+  }
+
+  private async resolvePageNumberForChunk(docId: string, chunkId: string): Promise<number | null> {
+    if (!docId || !chunkId) {
+      return null;
+    }
+    const normalizedId = this.normalizeChunkIdForNote(chunkId, docId) || chunkId;
+    const existing = this.chunkPageCache.get(docId);
+    if (existing && existing.has(normalizedId)) {
+      return existing.get(normalizedId) ?? null;
+    }
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(chunkPath))) {
+      return null;
+    }
+    const payload = await this.readChunkPayload(chunkPath);
+    const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
+    const map = new Map<string, number>();
+    for (const chunk of chunks) {
+      const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id.trim() : "";
+      if (!id) {
+        continue;
+      }
+      const pageStart = Number.isFinite(chunk?.page_start ?? NaN) ? Number(chunk.page_start) : null;
+      const pageEnd = Number.isFinite(chunk?.page_end ?? NaN) ? Number(chunk.page_end) : null;
+      const pageNumber = pageStart ?? pageEnd;
+      if (pageNumber !== null) {
+        map.set(id, pageNumber);
+        map.set(`${docId}:${id}`, pageNumber);
+      }
+    }
+    this.chunkPageCache.set(docId, map);
+    return map.get(normalizedId) ?? map.get(chunkId) ?? null;
+  }
+
+  public async syncPdfSidebarForDoc(docId: string | null, pageNumber?: number, chunkId?: string): Promise<void> {
+    if (!docId) {
+      return;
+    }
+    let entry = await this.getDocIndexEntry(docId);
+    if (!entry) {
+      entry = await this.hydrateDocIndexFromCache(docId);
+    }
+    const pdfPath = entry?.pdf_path ? String(entry.pdf_path) : "";
+    if (!pdfPath) {
+      return;
+    }
+    let relativePdf = this.toVaultRelativePath(pdfPath);
+    if (!relativePdf) {
+      const normalized = normalizePath(pdfPath);
+      const directFile = this.app.vault.getAbstractFileByPath(normalized);
+      if (directFile instanceof TFile) {
+        relativePdf = normalized;
+      }
+    }
+    if (!relativePdf) {
+      return;
+    }
+    const file = this.app.vault.getAbstractFileByPath(relativePdf);
+    if (!(file instanceof TFile) || file.extension.toLowerCase() !== "pdf") {
+      return;
+    }
+    const leaf = await this.getPdfSidebarLeaf();
+    if (!leaf) {
+      return;
+    }
+    this.updatePdfSidebarIcon(leaf);
+    if (!this.isLeafTabActive(leaf)) {
+      this.pendingPdfSync = { docId, pageNumber, chunkId };
+      return;
+    }
+    let nextPage = Number.isFinite(pageNumber ?? NaN) ? Number(pageNumber) : null;
+    if (nextPage === null && chunkId) {
+      nextPage = await this.resolvePageNumberForChunk(docId, chunkId);
+    }
+    if (nextPage === null) {
+      return;
+    }
+    if (
+      this.pdfSidebarDocId === docId
+      && this.pdfSidebarPdfPath === file.path
+      && this.pdfSidebarPage === nextPage
+    ) {
+      return;
+    }
+    this.pdfSidebarDocId = docId;
+    this.pdfSidebarPdfPath = file.path;
+    this.pdfSidebarPage = nextPage;
+    const relativeLink = relativePdf;
+    const linkText = nextPage !== null ? `${relativeLink}#page=${nextPage}` : relativeLink;
+    const workspace = this.app.workspace;
+    const activeLeaf = workspace.getMostRecentLeaf();
+    workspace.setActiveLeaf(leaf, { focus: false });
+    try {
+      await workspace.openLinkText(linkText, "", false);
+      this.updatePdfSidebarIcon(leaf);
+    } finally {
+      if (activeLeaf) {
+        workspace.setActiveLeaf(activeLeaf, { focus: false });
+      }
+    }
+  }
+
   public async openNoteInMain(notePath: string): Promise<void> {
     const normalized = normalizePath(notePath);
     const file = this.app.vault.getAbstractFileByPath(normalized);
@@ -6190,7 +6713,15 @@ export default class ZoteroRagPlugin extends Plugin {
   private buildNoteChunkLink(notePath: string, chunkId: string, label: string): string {
     const target = normalizePath(notePath).replace(/\.md$/i, "");
     const anchor = `zrr-chunk:${chunkId}`;
-    return `[[${target}#${anchor}|${label}]]`;
+    const safeLabel = this.escapeWikiLabel(label);
+    return `[[${target}#${anchor}|${safeLabel}]]`;
+  }
+
+  private escapeWikiLabel(label: string): string {
+    if (!label) {
+      return "";
+    }
+    return label.replace(/\|/g, "\\|");
   }
 
   private generateChatId(): string {
