@@ -2,8 +2,10 @@
 
 ## 0.4.1
 
-- PDF sidebar now uses the custom PDF icon while main editor PDF tabs keep the default icon.
-- PDF icon asset simplified for Obsidian's SVG parser.
+- Page-synchronous view of PDF in sidebar.
+- Improved footnote conversion.
+- Footer, header and page number removal from OCR/text-layer extraction.
+- PaddleOCR API timeout handling.
 
 ## 0.4.0
 
