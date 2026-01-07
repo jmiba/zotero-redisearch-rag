@@ -212,7 +212,7 @@ class DoclingProcessingConfig:
     paddle_vl_api_token: Optional[str] = None
     paddle_vl_api_timeout_sec: int = 120
     paddle_vl_markdown_ignore_labels: Optional[Sequence[str]] = field(
-        default_factory=lambda: ["header_image", "footer_image", "aside_text"]
+        default_factory=lambda: ["header","header_image","footer","footer_image","number","aside_text"]
     )
     paddle_vl_repetition_penalty: Optional[float] = 1.0
     paddle_vl_temperature: Optional[float] = 0.0
