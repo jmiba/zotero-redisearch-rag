@@ -161,7 +161,7 @@ class DoclingProcessingConfig:
     ocr_overlay_dpi: int = 300
     paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 6000
-    paddle_use_doc_orientation_classify: bool = False
+    paddle_use_doc_orientation_classify: bool = True
     paddle_use_doc_unwarping: bool = False
     paddle_use_textline_orientation: bool = True
     paddle_use_structure_v3: bool = False
@@ -4023,6 +4023,34 @@ def main() -> int:
         help="Target max side length (px) for Paddle OCR rendering.",
     )
     parser.add_argument(
+        "--paddle-use-doc-orientation-classify",
+        dest="paddle_use_doc_orientation_classify",
+        action="store_true",
+        default=None,
+        help="Enable Paddle doc orientation classify (affects PaddleOCR-VL payload).",
+    )
+    parser.add_argument(
+        "--no-paddle-use-doc-orientation-classify",
+        dest="paddle_use_doc_orientation_classify",
+        action="store_false",
+        default=None,
+        help="Disable Paddle doc orientation classify.",
+    )
+    parser.add_argument(
+        "--paddle-use-doc-unwarping",
+        dest="paddle_use_doc_unwarping",
+        action="store_true",
+        default=None,
+        help="Enable Paddle doc unwarping (affects PaddleOCR-VL payload).",
+    )
+    parser.add_argument(
+        "--no-paddle-use-doc-unwarping",
+        dest="paddle_use_doc_unwarping",
+        action="store_false",
+        default=None,
+        help="Disable Paddle doc unwarping.",
+    )
+    parser.add_argument(
         "--paddle-use-paddlex-layout",
         dest="paddle_use_paddlex_layout",
         action="store_true",
@@ -4521,6 +4549,10 @@ def main() -> int:
         config.paddle_max_dpi = args.paddle_max_dpi
     if args.paddle_target_max_side_px is not None:
         config.paddle_target_max_side_px = args.paddle_target_max_side_px
+    if args.paddle_use_doc_orientation_classify is not None:
+        config.paddle_use_doc_orientation_classify = args.paddle_use_doc_orientation_classify
+    if args.paddle_use_doc_unwarping is not None:
+        config.paddle_use_doc_unwarping = args.paddle_use_doc_unwarping
     if args.paddle_use_paddlex_layout is not None:
         config.paddle_use_paddlex_layout = args.paddle_use_paddlex_layout
     if args.paddle_use_vl is not None:

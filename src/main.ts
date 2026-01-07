@@ -684,6 +684,7 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
   const builder = new RangeSetBuilder<Decoration>();
   const entries: Array<{ line: number; from: number; to: number; info: ZrrBadgeInfo }> = [];
   const pageNumbers: number[] = [];
+  let hasPageChunks = false;
   for (let lineNo = 1; lineNo <= doc.lines; lineNo += 1) {
     const line = doc.line(lineNo);
     const match = line.text.match(/<!--\s*([^>]*)\s*-->/);
@@ -696,6 +697,9 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
     }
     if (info.type === "chunk-start") {
       info.chunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
+      if (info.pageNumber) {
+        hasPageChunks = true;
+      }
     } else if (info.type === "chunk-end") {
       info.chunkKind = info.chunkKind ?? "section";
     }
@@ -706,6 +710,13 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
   }
   if (!entries.length) {
     return Decoration.none;
+  }
+  if (hasPageChunks) {
+    for (const entry of entries) {
+      if (entry.info.type === "chunk-end") {
+        entry.info.chunkKind = "page";
+      }
+    }
   }
   const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
 
