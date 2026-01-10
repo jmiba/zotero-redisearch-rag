@@ -1806,7 +1806,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const doclingLogPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       await this.runPythonStreaming(
         doclingScript,
-        this.buildDoclingArgs(
+        await this.buildDoclingArgs(
           pdfSourcePath,
           docId,
           chunkPath,
@@ -7110,7 +7110,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const doclingLogPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       await this.runPythonStreaming(
         doclingScript,
-        this.buildDoclingArgs(
+        await this.buildDoclingArgs(
           sourcePdf,
           docId,
           chunkPath,
@@ -8047,14 +8047,49 @@ export default class ZoteroRagPlugin extends Plugin {
     return path.normalize(resolvedPath);
   }
 
-  private buildDoclingArgs(
+  private async resolveAttachmentOutputDir(
+    notePath: string
+  ): Promise<{ absolute: string; relative: string } | null> {
+    const sourcePath = notePath
+      ? (path.isAbsolute(notePath) ? this.toVaultRelativePath(notePath) : normalizePath(notePath))
+      : "";
+    if (!sourcePath) {
+      return null;
+    }
+    const fileManager = this.app.fileManager;
+    if (!fileManager?.getAvailablePathForAttachment) {
+      return null;
+    }
+    try {
+      const placeholder = `zrr-image-${Date.now()}.png`;
+      const candidate = await fileManager.getAvailablePathForAttachment(placeholder, sourcePath);
+      if (!candidate) {
+        return null;
+      }
+      const candidateAbs = path.isAbsolute(candidate)
+        ? candidate
+        : this.getAbsoluteVaultPath(candidate);
+      const absDir = path.normalize(path.dirname(candidateAbs));
+      const vaultBase = path.normalize(this.getVaultBasePath());
+      const relDir = this.toVaultRelativePath(absDir);
+      if (!relDir && absDir !== vaultBase) {
+        return null;
+      }
+      return { absolute: absDir, relative: relDir };
+    } catch (error) {
+      console.warn("Failed to resolve attachment output dir", error);
+      return null;
+    }
+  }
+
+  private async buildDoclingArgs(
     pdfSourcePath: string,
     docId: string,
     chunkPath: string,
     notePath: string,
     languageHint?: string | null,
     includeProgress = false
-  ): string[] {
+  ): Promise<string[]> {
     const ocrMode =
       this.settings.ocrMode === "force_low_quality" ? "auto" : this.settings.ocrMode;
     const args = [
@@ -8113,6 +8148,14 @@ export default class ZoteroRagPlugin extends Plugin {
       if (spellInfoAbs) {
         args.push("--spellchecker-info-out", spellInfoAbs);
       }
+    }
+
+    const attachmentDir = await this.resolveAttachmentOutputDir(notePath);
+    if (attachmentDir) {
+      if (attachmentDir.relative) {
+        await this.ensureFolder(attachmentDir.relative);
+      }
+      args.push("--image-output-dir", attachmentDir.absolute);
     }
 
     this.appendOcrEngineArgs(args);
