@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2
+
+- Images in PDFs are now extracted to the vault's attachment folder.
+
 ## 0.4.1
 
 - Page-synchronous view of PDF in sidebar.

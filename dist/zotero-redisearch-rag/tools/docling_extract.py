@@ -3950,6 +3950,10 @@ def main() -> int:
     parser.add_argument("--doc-id", help="Document identifier")
     parser.add_argument("--out-json", help="Output JSON path")
     parser.add_argument("--out-md", help="Output markdown path")
+    parser.add_argument(
+        "--image-output-dir",
+        help="Directory to write extracted images (defaults to markdown output dir)",
+    )
     parser.add_argument("--config-json", help="Optional path to a JSON config file (default: docling_config.json under the cache root)")
     parser.add_argument("--log-file", help="Optional path to write a detailed log file")
     parser.add_argument("--spellchecker-info-out", help="Optional path to write spellchecker backend info JSON")
@@ -4878,14 +4882,26 @@ def main() -> int:
                 path for path in layout_images.keys() if isinstance(path, str) and path
             )
             conversion.metadata.pop("layout_markdown_images", None)
-            if args.out_md:
-                out_md_dir = os.path.dirname(args.out_md)
-                for rel_path, image_obj in layout_images.items():
-                    if not isinstance(rel_path, str) or not rel_path:
-                        continue
-                    target_path = rel_path
-                    if not os.path.isabs(rel_path):
+            image_output_dir = args.image_output_dir
+            if image_output_dir:
+                image_output_dir = image_output_dir.strip()
+                if image_output_dir and not os.path.isabs(image_output_dir):
+                    if args.out_md:
+                        image_output_dir = os.path.join(os.path.dirname(args.out_md), image_output_dir)
+                    else:
+                        image_output_dir = os.path.abspath(image_output_dir)
+            out_md_dir = os.path.dirname(args.out_md) if args.out_md else ""
+            for rel_path, image_obj in layout_images.items():
+                if not isinstance(rel_path, str) or not rel_path:
+                    continue
+                target_path = rel_path
+                if not os.path.isabs(rel_path):
+                    if image_output_dir:
+                        target_path = os.path.join(image_output_dir, rel_path)
+                    elif out_md_dir:
                         target_path = os.path.join(out_md_dir, rel_path)
+                    else:
+                        continue
                     try:
                         target_dir = os.path.dirname(target_path)
                         if target_dir:
