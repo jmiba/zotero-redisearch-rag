@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- Implemented chunking of large pdfs to enable full pocessing via the PaddleOCR API.
+
 ## 0.4.2
 
 - Images in PDFs are now extracted to the vault's attachment folder.

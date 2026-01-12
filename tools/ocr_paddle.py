@@ -1522,21 +1522,22 @@ def ocr_pages_with_paddle_vl(
         api_max_pages = 100
         api_images = list(images) if images else []
         source_page_count = None
+        source_reader = None
         if isinstance(source_path, str) and source_path.lower().endswith(".pdf") and os.path.isfile(source_path):
             try:
                 from pypdf import PdfReader  # type: ignore
-                source_page_count = len(PdfReader(source_path).pages)
+                source_reader = PdfReader(source_path)
+                source_page_count = len(source_reader.pages)
             except Exception:
                 source_page_count = None
+                source_reader = None
         original_count = source_page_count if source_page_count else (len(api_images) if api_images else None)
         if original_count and original_count > api_max_pages:
-            LOGGER.warning(
-                "PaddleOCR-VL API processes only the first %d pages; limiting API processing from %d pages.",
+            LOGGER.info(
+                "PaddleOCR-VL API batch size %d; splitting %d pages into chunks.",
                 api_max_pages,
                 original_count,
             )
-            if api_images:
-                api_images = api_images[:api_max_pages]
         try:
             import base64
             import io
@@ -2284,12 +2285,22 @@ def ocr_pages_with_paddle_vl(
                 page_entry["markdown"] = md_text.strip()
             pages.append(page_entry)
 
-        def _run_api_for_images() -> None:
-            total = max(1, len(api_images))
-            for idx, image in enumerate(api_images, start=1):
+        def _run_api_for_images(
+            image_list: Optional[List[Any]] = None,
+            overall_total: Optional[int] = None,
+            page_offset: int = 0,
+        ) -> None:
+            images_to_process = image_list if image_list is not None else api_images
+            total = max(1, len(images_to_process))
+            for idx, image in enumerate(images_to_process, start=1):
                 if progress_cb and progress_span > 0:
-                    percent = progress_base + int((idx - 1) / total * progress_span)
-                    progress_cb(percent, "ocr", f"Paddle OCR-VL API page {idx}/{total}")
+                    if overall_total:
+                        current_idx = page_offset + idx
+                        percent = progress_base + int(max(0, current_idx - 1) / overall_total * progress_span)
+                        progress_cb(percent, "ocr", f"Paddle OCR-VL API page {current_idx}/{overall_total}")
+                    else:
+                        percent = progress_base + int((idx - 1) / total * progress_span)
+                        progress_cb(percent, "ocr", f"Paddle OCR-VL API page {idx}/{total}")
                 file_bytes = _image_to_bytes(image)
                 data = _request_api(file_bytes, 1, f"page {idx}/{total}")
                 layout_results = _extract_layout_results(data)
@@ -2299,28 +2310,82 @@ def ocr_pages_with_paddle_vl(
                     for entry in layout_results:
                         _append_page(entry)
                 if progress_cb and progress_span > 0:
-                    percent = progress_base + int(idx / total * progress_span)
-                    progress_cb(percent, "ocr", f"Paddle OCR-VL API page {idx}/{total}")
+                    if overall_total:
+                        current_idx = page_offset + idx
+                        percent = progress_base + int(current_idx / overall_total * progress_span)
+                        progress_cb(percent, "ocr", f"Paddle OCR-VL API page {current_idx}/{overall_total}")
+                    else:
+                        percent = progress_base + int(idx / total * progress_span)
+                        progress_cb(percent, "ocr", f"Paddle OCR-VL API page {idx}/{total}")
 
         if isinstance(source_path, str) and os.path.isfile(source_path):
             file_type = 0 if source_path.lower().endswith(".pdf") else 1
-            with open(source_path, "rb") as handle:
-                file_bytes = handle.read()
-            data = _request_api(file_bytes, file_type, os.path.basename(source_path))
-            layout_results = _extract_layout_results(data)
-            if not layout_results and file_type == 0 and api_images:
-                LOGGER.warning("PaddleOCR-VL API returned no layout results for PDF; retrying per-page images.")
-                _run_api_for_images()
-            else:
-                total_pages = len(layout_results) or max(1, len(api_images))
-                for entry in layout_results:
-                    _append_page(entry)
-                    if progress_cb and progress_span > 0:
-                        percent = progress_base + int(page_counter / total_pages * progress_span)
-                        progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
-                if not layout_results:
-                    for _ in range(max(1, len(api_images))):
-                        _append_page({})
+            chunked = False
+            if (
+                file_type == 0
+                and source_page_count
+                and source_page_count > api_max_pages
+                and source_reader is not None
+            ):
+                try:
+                    from pypdf import PdfWriter  # type: ignore
+                except Exception as exc:
+                    LOGGER.warning("Failed to load pypdf for PDF chunking: %s", exc)
+                    source_reader = None
+                if source_reader is not None:
+                    total_pages = source_page_count
+                    start = 0
+                    while start < total_pages:
+                        end = min(start + api_max_pages, total_pages)
+                        writer = PdfWriter()
+                        for page_idx in range(start, end):
+                            try:
+                                writer.add_page(source_reader.pages[page_idx])
+                            except Exception:
+                                continue
+                        buffer = io.BytesIO()
+                        writer.write(buffer)
+                        buffer.seek(0)
+                        label = f"{os.path.basename(source_path)} p{start + 1}-{end}"
+                        data = _request_api(buffer.getvalue(), file_type, label)
+                        layout_results = _extract_layout_results(data)
+                        if not layout_results and api_images:
+                            LOGGER.warning(
+                                "PaddleOCR-VL API returned no layout results for pages %d-%d; retrying per-page images.",
+                                start + 1,
+                                end,
+                            )
+                            image_slice = api_images[start:end]
+                            _run_api_for_images(image_slice, total_pages, start)
+                        else:
+                            for entry in layout_results:
+                                _append_page(entry)
+                                if progress_cb and progress_span > 0:
+                                    percent = progress_base + int(page_counter / total_pages * progress_span)
+                                    progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
+                            if not layout_results:
+                                for _ in range(max(1, end - start)):
+                                    _append_page({})
+                        start = end
+                    chunked = True
+            if not chunked:
+                with open(source_path, "rb") as handle:
+                    file_bytes = handle.read()
+                data = _request_api(file_bytes, file_type, os.path.basename(source_path))
+                layout_results = _extract_layout_results(data)
+                if not layout_results and file_type == 0 and api_images:
+                    LOGGER.warning("PaddleOCR-VL API returned no layout results for PDF; retrying per-page images.")
+                    _run_api_for_images(api_images, source_page_count)
+                else:
+                    total_pages = len(layout_results) or max(1, len(api_images))
+                    for entry in layout_results:
+                        _append_page(entry)
+                        if progress_cb and progress_span > 0:
+                            percent = progress_base + int(page_counter / total_pages * progress_span)
+                            progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
+                    if not layout_results:
+                        for _ in range(max(1, len(api_images))):
+                            _append_page({})
         else:
             _run_api_for_images()
 
