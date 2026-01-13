@@ -3888,7 +3888,8 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       const content = await this.app.vault.adapter.read(chunkPath);
       const payload = JSON.parse(content);
-      const quality = payload?.metadata?.confidence_proxy;
+      const quality =
+        payload?.metadata?.effective_confidence_proxy ?? payload?.metadata?.confidence_proxy;
       if (typeof quality === "number") {
         return quality.toFixed(2);
       }
@@ -3935,7 +3936,7 @@ export default class ZoteroRagPlugin extends Plugin {
       }
       const output = await this.runPythonWithOutput(doclingScript, args, logPath);
       const payload = JSON.parse(output);
-      const quality = payload?.confidence_proxy;
+      const quality = payload?.effective_confidence_proxy ?? payload?.confidence_proxy;
       if (typeof quality === "number") {
         return quality.toFixed(2);
       }

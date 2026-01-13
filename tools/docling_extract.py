@@ -2,10 +2,12 @@
 import argparse
 import base64
 import errno
+import hashlib
 import json
 import math
 import logging
 import os
+import random
 import re
 import shutil
 import sys
@@ -107,6 +109,13 @@ class DoclingProcessingConfig:
     quality_image_heavy_ratio_threshold: float = 0.6
     quality_image_heavy_penalty: float = 0.3
     quality_image_page_ratio_threshold: float = 0.7
+    quality_classifier_enable: bool = True
+    quality_classifier_max_pages: int = 12
+    quality_classifier_min_samples: int = 6
+    quality_classifier_decision_ratio: float = 0.6
+    quality_classifier_image_coverage_threshold: float = 0.6
+    quality_classifier_invisible_text_ratio_threshold: float = 0.7
+    quality_classifier_min_text_ops: int = 4
     column_detect_enable: bool = True
     column_detect_dpi: int = 150
     column_detect_max_pages: int = 3
@@ -250,6 +259,10 @@ class TextQuality:
     spellchecker_hit_ratio: Optional[float] = None
     image_heavy_ratio: Optional[float] = None
     image_page_ratio: Optional[float] = None
+    ocr_overlay_ratio: Optional[float] = None
+    digital_page_ratio: Optional[float] = None
+    layer_classification: Optional[str] = None
+    effective_confidence_proxy: Optional[float] = None
 
 @dataclass
 class ColumnLayoutDetection:
@@ -273,6 +286,20 @@ class BoilerplateCluster:
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_alnum_tokens(text: str) -> List[str]:
+    tokens: List[str] = []
+    current: List[str] = []
+    for char in text:
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def remove_image_placeholders(text: str) -> str:
@@ -1015,6 +1042,395 @@ def compute_image_page_ratio(pages: Sequence[Dict[str, Any]]) -> Optional[float]
     return with_images / total
 
 
+def _matrix_multiply(
+    left: Tuple[float, float, float, float, float, float],
+    right: Tuple[float, float, float, float, float, float],
+) -> Tuple[float, float, float, float, float, float]:
+    a1, b1, c1, d1, e1, f1 = left
+    a2, b2, c2, d2, e2, f2 = right
+    return (
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
+    )
+
+
+def _operator_to_str(operator: Any) -> str:
+    if isinstance(operator, bytes):
+        try:
+            return operator.decode("latin-1")
+        except Exception:
+            return str(operator)
+    return str(operator)
+
+
+def _extract_xobjects_from_resources(resources: Any) -> Dict[str, Any]:
+    xobject_map: Dict[str, Any] = {}
+    try:
+        x_objects = resources.get("/XObject") if resources else None
+        if x_objects:
+            x_objects = x_objects.get_object() if hasattr(x_objects, "get_object") else x_objects
+            for key, obj in x_objects.items():
+                key_name = str(key)
+                resolved = obj.get_object() if hasattr(obj, "get_object") else obj
+                xobject_map[key_name] = resolved
+    except Exception:
+        return {}
+    return xobject_map
+
+
+def _extract_page_xobjects(page: Any) -> Dict[str, Any]:
+    try:
+        resources = page.get("/Resources") or {}
+        return _extract_xobjects_from_resources(resources)
+    except Exception:
+        return {}
+
+
+def _normalize_matrix(value: Any) -> Tuple[float, float, float, float, float, float]:
+    try:
+        if isinstance(value, (list, tuple)) and len(value) == 6:
+            return tuple(float(item) for item in value)
+    except Exception:
+        return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def _scan_content_stream(
+    content: Any,
+    metrics: Dict[str, Any],
+    ctm: Tuple[float, float, float, float, float, float],
+    resources: Any,
+    reader: Any,
+    text_render_mode: int,
+    visited: Set[Any],
+) -> None:
+    try:
+        from pypdf import ContentStream
+    except Exception:
+        return
+    try:
+        stream = ContentStream(content, reader)
+    except Exception:
+        return
+    local_ctm = ctm
+    ctm_stack: List[Tuple[float, float, float, float, float, float]] = []
+    render_mode = text_render_mode
+    render_stack: List[int] = []
+    xobject_map = _extract_xobjects_from_resources(resources)
+    for operands, operator in stream.operations:
+        op = _operator_to_str(operator)
+        if op == "q":
+            ctm_stack.append(local_ctm)
+            render_stack.append(render_mode)
+            continue
+        if op == "Q":
+            if ctm_stack:
+                local_ctm = ctm_stack.pop()
+            if render_stack:
+                render_mode = render_stack.pop()
+            continue
+        if op == "cm" and len(operands) == 6:
+            try:
+                cm = tuple(float(value) for value in operands)
+                local_ctm = _matrix_multiply(local_ctm, cm)  # type: ignore[arg-type]
+            except Exception:
+                pass
+            continue
+        if op == "Tr" and operands:
+            try:
+                render_mode = int(operands[0])
+            except Exception:
+                render_mode = 0
+            continue
+        if op in ("Tj", "TJ", "'", "\""):
+            metrics["text_ops"] += 1
+            if render_mode == 3:
+                metrics["invisible_text_ops"] += 1
+            continue
+        if op == "Do" and operands:
+            name = str(operands[0])
+            xobj = xobject_map.get(name)
+            if not xobj:
+                continue
+            try:
+                subtype = xobj.get("/Subtype")
+            except Exception:
+                subtype = None
+            if subtype == "/Image":
+                metrics["image_count"] += 1
+                det = abs(local_ctm[0] * local_ctm[3] - local_ctm[1] * local_ctm[2])
+                metrics["image_area"] += det
+                continue
+            if subtype == "/Form":
+                form_key = getattr(xobj, "indirect_reference", None) or id(xobj)
+                if form_key in visited:
+                    continue
+                visited.add(form_key)
+                form_matrix = _normalize_matrix(xobj.get("/Matrix"))
+                form_ctm = _matrix_multiply(local_ctm, form_matrix)
+                form_resources = xobj.get("/Resources") or resources
+                if hasattr(form_resources, "get_object"):
+                    try:
+                        form_resources = form_resources.get_object()
+                    except Exception:
+                        pass
+                _scan_content_stream(
+                    xobj,
+                    metrics,
+                    form_ctm,
+                    form_resources,
+                    reader,
+                    render_mode,
+                    visited,
+                )
+                visited.remove(form_key)
+
+
+def _analyze_pdf_page_content(page: Any, reader: Any) -> Dict[str, Any]:
+    metrics = {
+        "text_ops": 0,
+        "invisible_text_ops": 0,
+        "image_area": 0.0,
+        "image_count": 0,
+        "image_coverage": 0.0,
+        "invisible_text_ratio": 0.0,
+    }
+    try:
+        page_width = float(page.mediabox.width)
+        page_height = float(page.mediabox.height)
+    except Exception:
+        page_width = 0.0
+        page_height = 0.0
+    page_area = page_width * page_height if page_width > 0 and page_height > 0 else 0.0
+    try:
+        contents = page.get_contents()
+        if not contents:
+            return metrics
+    except Exception:
+        return metrics
+    resources = page.get("/Resources") or {}
+    visited: Set[Any] = set()
+    _scan_content_stream(
+        contents,
+        metrics,
+        (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+        resources,
+        reader,
+        0,
+        visited,
+    )
+
+    if metrics["text_ops"] > 0:
+        metrics["invisible_text_ratio"] = metrics["invisible_text_ops"] / metrics["text_ops"]
+    if page_area > 0:
+        metrics["image_coverage"] = min(1.0, metrics["image_area"] / page_area)
+    return metrics
+
+
+def classify_pdf_text_layer(
+    pdf_path: str,
+    config: DoclingProcessingConfig,
+) -> Optional[Dict[str, Any]]:
+    if not config.quality_classifier_enable:
+        return None
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return None
+    try:
+        reader = PdfReader(pdf_path)
+    except Exception as exc:
+        LOGGER.warning("Text-layer classifier failed to read PDF: %s", exc)
+        return None
+    total_pages = len(reader.pages)
+    if total_pages <= 0:
+        return None
+
+    sample_max = max(1, int(config.quality_classifier_max_pages))
+    sample_count = min(total_pages, sample_max)
+    seed_payload = f"{pdf_path}:{os.path.getsize(pdf_path)}".encode("utf-8")
+    seed_bytes = hashlib.sha1(seed_payload).digest()
+    rng = random.Random(int.from_bytes(seed_bytes[:8], "big"))
+    sample_indices = select_classifier_sample_indices(total_pages, sample_count, rng)
+
+    min_samples = max(1, min(int(config.quality_classifier_min_samples), sample_count))
+    decision_ratio = max(0.5, min(1.0, float(config.quality_classifier_decision_ratio)))
+    image_threshold = float(config.quality_classifier_image_coverage_threshold)
+    invisible_threshold = float(config.quality_classifier_invisible_text_ratio_threshold)
+    min_text_ops = max(1, int(config.quality_classifier_min_text_ops))
+    min_text_len = max(1, int(config.min_text_chars_per_page))
+
+    digital_count = 0
+    ocr_count = 0
+    mixed_count = 0
+    ocr_score_sum = 0.0
+    digital_score_sum = 0.0
+    seen = 0
+    decision = None
+    short_circuit = False
+
+    for idx in sample_indices:
+        page = reader.pages[idx]
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        text_len = len(normalize_text(text))
+        metrics = _analyze_pdf_page_content(page, reader)
+        image_coverage = float(metrics.get("image_coverage") or 0.0)
+        text_ops = int(metrics.get("text_ops") or 0)
+        invisible_ratio = float(metrics.get("invisible_text_ratio") or 0.0)
+
+        text_ops_factor = min(1.0, text_ops / max(1.0, float(min_text_ops)))
+        image_score = 0.0
+        if image_threshold < 1.0:
+            image_score = (image_coverage - image_threshold) / max(1e-6, 1.0 - image_threshold)
+            image_score = max(0.0, min(1.0, image_score))
+        invisible_score = 0.0
+        if invisible_threshold < 1.0:
+            invisible_score = (invisible_ratio - invisible_threshold) / max(1e-6, 1.0 - invisible_threshold)
+            invisible_score = max(0.0, min(1.0, invisible_score))
+        text_score = 1.0 - min(1.0, text_len / max(1.0, min_text_len * 2.0))
+        text_score = max(text_score, 1.0 - text_ops_factor)
+
+        ocr_score = max(image_score, invisible_score)
+        ocr_score = min(1.0, (ocr_score * 0.85) + (text_score * 0.15))
+        text_factor = min(1.0, text_len / max(1.0, min_text_len * 2.0))
+        text_factor *= text_ops_factor
+        digital_score = text_factor * (1.0 - image_score) * (1.0 - invisible_score)
+
+        ocr_score_sum += ocr_score
+        digital_score_sum += digital_score
+
+        if ocr_score >= decision_ratio and ocr_score >= digital_score:
+            label = "ocr"
+        elif digital_score >= decision_ratio and digital_score >= ocr_score:
+            label = "digital"
+        else:
+            label = "mixed"
+
+        seen += 1
+        if label == "ocr":
+            ocr_count += 1
+        elif label == "digital":
+            digital_count += 1
+        else:
+            mixed_count += 1
+
+        if seen >= min_samples:
+            avg_ocr = ocr_score_sum / seen
+            avg_digital = digital_score_sum / seen
+            if avg_ocr >= decision_ratio and avg_ocr >= avg_digital:
+                decision = "ocr"
+                short_circuit = True
+                break
+            if avg_digital >= decision_ratio and avg_digital >= avg_ocr:
+                decision = "digital"
+                short_circuit = True
+                break
+
+    if seen == 0:
+        return None
+    ocr_ratio = ocr_score_sum / seen
+    digital_ratio = digital_score_sum / seen
+    mixed_ratio = mixed_count / seen
+    if decision is None:
+        if ocr_ratio >= decision_ratio and ocr_ratio >= digital_ratio:
+            decision = "ocr"
+        elif digital_ratio >= decision_ratio and digital_ratio >= ocr_ratio:
+            decision = "digital"
+        else:
+            decision = "mixed"
+
+    return {
+        "decision": decision,
+        "ocr_ratio": ocr_ratio,
+        "digital_ratio": digital_ratio,
+        "mixed_ratio": mixed_ratio,
+        "sampled_pages": seen,
+        "short_circuit": short_circuit,
+    }
+
+
+def compute_effective_confidence(
+    quality: TextQuality,
+    config: DoclingProcessingConfig,
+) -> float:
+    score = float(quality.confidence_proxy)
+    if quality.ocr_overlay_ratio is not None:
+        ocr_ratio = max(0.0, min(1.0, float(quality.ocr_overlay_ratio)))
+        score = (score * 0.6) + ((1.0 - ocr_ratio) * 0.4)
+    if quality.digital_page_ratio is not None:
+        digital_ratio = float(quality.digital_page_ratio)
+        digital_weight = 0.7
+        if quality.image_page_ratio is not None:
+            threshold = max(0.0, min(1.0, float(config.quality_image_page_ratio_threshold)))
+            if threshold < 1.0 and quality.image_page_ratio >= threshold:
+                guard = 1.0 - (float(quality.image_page_ratio) - threshold) / max(1e-6, 1.0 - threshold)
+                digital_weight *= max(0.0, min(1.0, guard))
+        boosted = (score * (1.0 - digital_weight)) + (digital_ratio * digital_weight)
+        score = max(score, boosted)
+    return max(0.0, min(1.0, score))
+
+
+def apply_text_layer_classifier(
+    quality: TextQuality,
+    pdf_path: str,
+    config: DoclingProcessingConfig,
+) -> Tuple[TextQuality, Optional[Dict[str, Any]]]:
+    classifier = classify_pdf_text_layer(pdf_path, config)
+    if not classifier:
+        quality.effective_confidence_proxy = compute_effective_confidence(quality, config)
+        return quality, None
+    ocr_ratio = classifier.get("ocr_ratio")
+    digital_ratio = classifier.get("digital_ratio")
+    decision = classifier.get("decision")
+    guardrail_applied = False
+    ocr_ratio_value = float(ocr_ratio) if ocr_ratio is not None else 0.0
+    digital_ratio_value = float(digital_ratio) if digital_ratio is not None else 0.0
+    if quality.image_page_ratio is not None:
+        threshold = max(0.0, min(1.0, float(config.quality_image_page_ratio_threshold)))
+        if threshold < 1.0 and quality.image_page_ratio >= threshold:
+            guard = 1.0 - (float(quality.image_page_ratio) - threshold) / max(1e-6, 1.0 - threshold)
+            digital_ratio_value *= max(0.0, min(1.0, guard))
+            ocr_ratio_value = max(ocr_ratio_value, float(quality.image_page_ratio))
+            guardrail_applied = True
+    if decision == "digital" and digital_ratio_value < config.quality_classifier_decision_ratio:
+        decision = "mixed"
+    if decision in (None, "mixed") and ocr_ratio_value >= config.quality_classifier_decision_ratio:
+        if digital_ratio_value < config.quality_classifier_decision_ratio:
+            decision = "ocr"
+    quality.ocr_overlay_ratio = ocr_ratio_value
+    quality.digital_page_ratio = digital_ratio_value
+    quality.layer_classification = decision
+    if guardrail_applied:
+        classifier["ocr_ratio"] = ocr_ratio_value
+        classifier["digital_ratio"] = digital_ratio_value
+        classifier["decision"] = decision
+        classifier["guardrail_applied"] = True
+        classifier["short_circuit"] = False
+    quality.effective_confidence_proxy = compute_effective_confidence(quality, config)
+    return quality, classifier
+
+
+def normalize_ocr_confidence(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        conf = float(value)
+    except Exception:
+        return None
+    if conf < 0:
+        return None
+    if conf > 1.0:
+        conf = conf / 100.0
+    return max(0.0, min(1.0, conf))
+
+
 def estimate_text_quality(
     pages: Sequence[Dict[str, Any]],
     config: Optional[DoclingProcessingConfig] = None,
@@ -1028,7 +1444,7 @@ def estimate_text_quality(
     alpha_chars = sum(sum(char.isalpha() for char in text) for text in texts)
     alpha_ratio = alpha_chars / max(1, total_chars)
 
-    tokens = re.findall(r"[A-Za-z0-9]+", " ".join(texts))
+    tokens = extract_alnum_tokens(" ".join(texts))
     suspicious_tokens = [
         token for token in tokens
         if (sum(char.isdigit() for char in token) / max(1, len(token))) > 0.5
@@ -1095,7 +1511,17 @@ def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: Doclin
 
 
 def is_low_quality(quality: TextQuality, config: DoclingProcessingConfig) -> bool:
-    if quality.confidence_proxy < config.quality_confidence_threshold:
+    if (
+        quality.ocr_overlay_ratio is not None
+        and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
+    ):
+        return True
+    effective_confidence = (
+        quality.effective_confidence_proxy
+        if quality.effective_confidence_proxy is not None
+        else quality.confidence_proxy
+    )
+    if effective_confidence < config.quality_confidence_threshold:
         return True
     return (
         quality.avg_chars_per_page < config.quality_min_avg_chars_per_page
@@ -2284,6 +2710,31 @@ def select_analysis_page_indices(
     return list(range(1, max_pages + 1))
 
 
+def select_classifier_sample_indices(
+    total_pages: int,
+    sample_count: int,
+    rng: random.Random,
+) -> List[int]:
+    if total_pages <= 0 or sample_count <= 0:
+        return []
+    anchors: List[int] = [0]
+    if total_pages > 1:
+        anchors.append(total_pages - 1)
+    if total_pages > 2 and sample_count >= 3:
+        mid = (total_pages - 1) // 2
+        if mid not in anchors:
+            anchors.insert(1, mid)
+    if sample_count <= len(anchors):
+        return anchors[:sample_count]
+    selected = list(anchors)
+    remaining = [idx for idx in range(total_pages) if idx not in anchors]
+    needed = min(sample_count - len(selected), len(remaining))
+    if needed > 0:
+        selected.extend(rng.sample(remaining, needed))
+    rng.shuffle(selected)
+    return selected
+
+
 def extract_pages_from_pdf(
     pdf_path: str,
     max_pages: Optional[int] = None,
@@ -3468,11 +3919,20 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
     languages = select_language_set(config.language_hint, pdf_path, config)
     quality = estimate_text_quality(analysis_pages, config, languages)
+    quality, classifier_info = apply_text_layer_classifier(quality, pdf_path, config)
     low_quality = is_low_quality(quality, config)
     text_layer_overlay = bool(
         has_text_layer
-        and quality.image_page_ratio is not None
-        and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
+        and (
+            (
+                quality.ocr_overlay_ratio is not None
+                and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
+            )
+            or (
+                quality.image_page_ratio is not None
+                and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
+            )
+        )
     )
     if quality.image_page_ratio is not None:
         LOGGER.info(
@@ -3480,6 +3940,16 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
             text_layer_overlay,
             quality.image_page_ratio,
             config.quality_image_page_ratio_threshold,
+        )
+    if classifier_info:
+        LOGGER.info(
+            "Text-layer classifier: %s (ocr_ratio=%.2f, digital_ratio=%.2f, sampled=%d, short_circuit=%s, guardrail=%s)",
+            quality.layer_classification or classifier_info.get("decision"),
+            quality.ocr_overlay_ratio or 0.0,
+            quality.digital_page_ratio or 0.0,
+            classifier_info.get("sampled_pages", 0),
+            classifier_info.get("short_circuit", False),
+            classifier_info.get("guardrail_applied", False),
         )
     return {
         "text_layer_detected": has_text_layer,
@@ -3489,10 +3959,16 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
+        "effective_confidence_proxy": quality.effective_confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
         "image_heavy_ratio": quality.image_heavy_ratio,
         "image_page_ratio": quality.image_page_ratio,
+        "ocr_overlay_ratio": quality.ocr_overlay_ratio,
+        "digital_page_ratio": quality.digital_page_ratio,
+        "classifier_decision": quality.layer_classification,
+        "classifier_sampled_pages": classifier_info.get("sampled_pages") if classifier_info else None,
+        "classifier_short_circuit": classifier_info.get("short_circuit") if classifier_info else None,
     }
 
 
@@ -3511,11 +3987,20 @@ def convert_pdf_with_docling(
     has_text_layer = detect_text_layer_from_pages(analysis_pages, config)
     languages = select_language_set(config.language_hint, pdf_path, config)
     quality = estimate_text_quality(analysis_pages, config, languages)
+    quality, classifier_info = apply_text_layer_classifier(quality, pdf_path, config)
     low_quality = is_low_quality(quality, config)
     text_layer_overlay = bool(
         has_text_layer
-        and quality.image_page_ratio is not None
-        and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
+        and (
+            (
+                quality.ocr_overlay_ratio is not None
+                and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
+            )
+            or (
+                quality.image_page_ratio is not None
+                and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
+            )
+        )
     )
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
@@ -3572,8 +4057,10 @@ def convert_pdf_with_docling(
     spell_ratio = "n/a" if quality.spellchecker_hit_ratio is None else f"{quality.spellchecker_hit_ratio:.2f}"
     img_ratio = "n/a" if quality.image_heavy_ratio is None else f"{quality.image_heavy_ratio:.2f}"
     img_pages_ratio = "n/a" if quality.image_page_ratio is None else f"{quality.image_page_ratio:.2f}"
+    ocr_ratio = "n/a" if quality.ocr_overlay_ratio is None else f"{quality.ocr_overlay_ratio:.2f}"
+    digital_ratio = "n/a" if quality.digital_page_ratio is None else f"{quality.digital_page_ratio:.2f}"
     LOGGER.info(
-        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s, img=%s, img_pages=%s)",
+        "Text-layer check: %s (avg_chars=%.1f, alpha_ratio=%.2f, suspicious=%.2f, dict=%s, spell=%s, img=%s, img_pages=%s, ocr_ratio=%s, digital_ratio=%s)",
         has_text_layer,
         quality.avg_chars_per_page,
         quality.alpha_ratio,
@@ -3582,7 +4069,19 @@ def convert_pdf_with_docling(
         spell_ratio,
         img_ratio,
         img_pages_ratio,
+        ocr_ratio,
+        digital_ratio,
     )
+    if classifier_info:
+        LOGGER.info(
+            "Text-layer classifier: %s (ocr_ratio=%.2f, digital_ratio=%.2f, sampled=%d, short_circuit=%s, guardrail=%s)",
+            quality.layer_classification or classifier_info.get("decision"),
+            quality.ocr_overlay_ratio or 0.0,
+            quality.digital_page_ratio or 0.0,
+            classifier_info.get("sampled_pages", 0),
+            classifier_info.get("short_circuit", False),
+            classifier_info.get("guardrail_applied", False),
+        )
     if available_engines:
         LOGGER.info("Available OCR engines: %s", ", ".join(available_engines))
     else:
@@ -3748,6 +4247,26 @@ def convert_pdf_with_docling(
                 fallback_engine = "text_layer"
                 LOGGER.warning("Text-layer fallback succeeded after empty output.")
 
+    if external_ocr_used:
+        ocr_confidence = normalize_ocr_confidence(ocr_stats.get("ocr_confidence_avg"))
+        if ocr_confidence is not None:
+            base_confidence = (
+                quality.effective_confidence_proxy
+                if quality.effective_confidence_proxy is not None
+                else quality.confidence_proxy
+            )
+            if not has_text_layer:
+                ocr_weight = 0.7
+            elif low_quality:
+                ocr_weight = 0.6
+            else:
+                ocr_weight = 0.4
+            blended = (base_confidence * (1.0 - ocr_weight)) + (ocr_confidence * ocr_weight)
+            quality.effective_confidence_proxy = max(0.0, min(1.0, blended))
+            ocr_stats = dict(ocr_stats)
+            ocr_stats["ocr_confidence_normalized"] = ocr_confidence
+            ocr_stats["ocr_confidence_weight"] = ocr_weight
+
     emit(90, "chunking", "Building chunks")
     metadata = {
         "ocr_used": decision.ocr_used,
@@ -3769,10 +4288,16 @@ def convert_pdf_with_docling(
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
         "confidence_proxy": quality.confidence_proxy,
+        "effective_confidence_proxy": quality.effective_confidence_proxy,
         "dictionary_hit_ratio": quality.dictionary_hit_ratio,
         "spellchecker_hit_ratio": quality.spellchecker_hit_ratio,
         "image_heavy_ratio": quality.image_heavy_ratio,
         "image_page_ratio": quality.image_page_ratio,
+        "ocr_overlay_ratio": quality.ocr_overlay_ratio,
+        "digital_page_ratio": quality.digital_page_ratio,
+        "classifier_decision": quality.layer_classification,
+        "classifier_sampled_pages": classifier_info.get("sampled_pages") if classifier_info else None,
+        "classifier_short_circuit": classifier_info.get("short_circuit") if classifier_info else None,
         "per_page_ocr": decision.per_page_ocr,
     }
     if fallback_engine:

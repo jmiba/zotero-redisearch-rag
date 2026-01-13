@@ -3,6 +3,8 @@
 ## 0.4.3
 
 - Implemented chunking of large pdfs to enable full pocessing via the PaddleOCR API.
+- Updated text layer classification and quality assessment for PDFs.
+
 
 ## 0.4.2
 
