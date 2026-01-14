@@ -3,7 +3,8 @@
 ## 0.4.3
 
 - Implemented chunking of large pdfs to enable full pocessing via the PaddleOCR API.
-- Updated text layer classification and quality assessment for PDFs.
+- Updated text layer classification and quality assessment for PDFs.9
+- Compatibility with [pdf++ plugin](https://github.com/RyotaUshio/obsidian-pdf-plus) for improved PDF handling.
 
 
 ## 0.4.2

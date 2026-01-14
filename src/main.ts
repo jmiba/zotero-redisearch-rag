@@ -6397,6 +6397,23 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async openPdfLinkInLeaf(leaf: WorkspaceLeaf, linkText: string): Promise<void> {
+    const pdfPlus = (this.app.plugins?.plugins as Record<string, any> | undefined)?.["pdf-plus"];
+    const pdfPlusOpen = pdfPlus?.lib?.workspace?.openPDFLinkTextInLeaf;
+    if (typeof pdfPlusOpen === "function") {
+      await pdfPlusOpen.call(pdfPlus.lib.workspace, leaf, linkText, "", { active: false });
+      return;
+    }
+    const leafAny = leaf as unknown as {
+      openLinkText?: (link: string, sourcePath: string, state?: { active?: boolean }) => Promise<void>;
+    };
+    if (typeof leafAny.openLinkText === "function") {
+      await leafAny.openLinkText(linkText, "", { active: false });
+      return;
+    }
+    await this.app.workspace.openLinkText(linkText, "", false);
+  }
+
   private isLeafTabActive(leaf: WorkspaceLeaf): boolean {
     const leafAny = leaf as unknown as {
       containerEl?: HTMLElement;
@@ -6524,7 +6541,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const activeLeaf = workspace.getMostRecentLeaf();
     workspace.setActiveLeaf(leaf, { focus: false });
     try {
-      await workspace.openLinkText(linkText, "", false);
+      await this.openPdfLinkInLeaf(leaf, linkText);
       this.updatePdfSidebarIcon(leaf);
     } finally {
       if (activeLeaf) {
