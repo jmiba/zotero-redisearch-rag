@@ -1568,23 +1568,12 @@ def detect_text_layer_from_pages(pages: Sequence[Dict[str, Any]], config: Doclin
 
 
 def is_low_quality(quality: TextQuality, config: DoclingProcessingConfig) -> bool:
-    if (
-        quality.ocr_overlay_ratio is not None
-        and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
-    ):
-        return True
     effective_confidence = (
         quality.effective_confidence_proxy
         if quality.effective_confidence_proxy is not None
         else quality.confidence_proxy
     )
-    if effective_confidence < config.quality_confidence_threshold:
-        return True
-    return (
-        quality.avg_chars_per_page < config.quality_min_avg_chars_per_page
-        or quality.alpha_ratio < config.quality_alpha_ratio_threshold
-        or quality.suspicious_token_ratio > config.quality_suspicious_token_threshold
-    )
+    return effective_confidence < config.quality_confidence_threshold
 
 
 def should_rasterize_text_layer(has_text_layer: bool, low_quality: bool, config: DoclingProcessingConfig) -> bool:
@@ -1758,6 +1747,7 @@ def decide_ocr_route(
             or getattr(config, "paddle_use_vl", False)
         )
         and config.ocr_mode != "off"
+        and (config.ocr_mode == "force" or not has_text_layer or low_quality)
     )
     if config.ocr_mode == "off":
         return OcrRouteDecision(
