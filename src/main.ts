@@ -65,6 +65,7 @@ type DocIndexEntry = {
   note_path: string;
   note_title: string;
   zotero_title?: string;
+  short_title?: string;
   pdf_path?: string;
   attachment_key?: string;
   updated_at: string;
@@ -105,6 +106,7 @@ const ISO_639_1_TO_3: Record<string, string> = {
 const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
 const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
+const MAX_CITATION_TITLE_LENGTH = 80;
 
 type ParsedChunkBlock = {
   chunkId: string;
@@ -1960,11 +1962,13 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
+      const shortTitle = this.extractShortTitleFromValues(values);
       await this.updateDocIndex({
         doc_id: docId,
         note_path: notePath,
         note_title: finalBaseName,
         zotero_title: title,
+        short_title: shortTitle || undefined,
         pdf_path: pdfSourcePath,
         attachment_key: attachment.key,
       });
@@ -2576,14 +2580,18 @@ export default class ZoteroRagPlugin extends Plugin {
     pageStart?: string;
   }> {
     let entry = await this.getDocIndexEntry(citation.doc_id);
-    if (!entry || !entry.note_title || !entry.zotero_title || !entry.note_path || !entry.pdf_path) {
+    if (
+      !entry ||
+      !entry.note_title ||
+      !entry.zotero_title ||
+      !entry.note_path ||
+      !entry.pdf_path ||
+      entry.short_title === undefined
+    ) {
       entry = await this.hydrateDocIndexFromCache(citation.doc_id);
     }
     const notePath = citation.doc_id ? await this.resolveNotePathForDocId(citation.doc_id) : entry?.note_path;
-    const noteTitle =
-      entry?.zotero_title ||
-      entry?.note_title ||
-      (notePath ? path.basename(notePath, ".md") : citation.doc_id || "?");
+    const noteTitle = this.resolveCitationTitle(entry, notePath, citation.doc_id);
     const pageLabel = this.formatCitationPageLabel(citation);
     const pageStart = citation.page_start ? String(citation.page_start) : "";
     const pdfPath = entry?.pdf_path || citation.source_pdf || "";
@@ -2600,6 +2608,42 @@ export default class ZoteroRagPlugin extends Plugin {
       zoteroUrl,
       pageStart: pageStart || undefined,
     };
+  }
+
+  private resolveCitationTitle(
+    entry: DocIndexEntry | null,
+    notePath?: string | null,
+    docId?: string | null
+  ): string {
+    const fallback = docId || "?";
+    const candidate =
+      entry?.short_title ||
+      entry?.zotero_title ||
+      entry?.note_title ||
+      (notePath ? path.basename(notePath, ".md") : "") ||
+      fallback;
+    return this.shortenCitationTitle(candidate);
+  }
+
+  private shortenCitationTitle(title: string): string {
+    const normalized = String(title || "").trim();
+    if (!normalized) {
+      return "?";
+    }
+    if (normalized.length <= MAX_CITATION_TITLE_LENGTH) {
+      return normalized;
+    }
+    const sliceLength = Math.max(0, MAX_CITATION_TITLE_LENGTH - 3);
+    return `${normalized.slice(0, sliceLength).trim()}...`;
+  }
+
+  private formatCitationLabel(title: string, pageLabel: string): string {
+    const base = title.trim() || "?";
+    const page = (pageLabel || "").trim();
+    if (!page) {
+      return base;
+    }
+    return `${base}, p. ${page}`;
   }
 
   public async formatInlineCitations(
@@ -2699,7 +2743,7 @@ export default class ZoteroRagPlugin extends Plugin {
       }
 
       const display = await this.resolveCitationDisplay(citation);
-      const label = `${display.noteTitle} p. ${display.pageLabel}`;
+      const label = this.formatCitationLabel(display.noteTitle, display.pageLabel);
       const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, docId);
       if (this.settings.preferObsidianNoteForCitations && display.notePath && chunkId) {
         replacements.set(token, this.buildNoteChunkLink(display.notePath, chunkId, label));
@@ -2707,9 +2751,7 @@ export default class ZoteroRagPlugin extends Plugin {
         if (display.zoteroUrl) {
           replacements.set(token, `[${label}](${display.zoteroUrl})`);
         } else {
-          const fallbackLabel = display.pageLabel
-            ? `${docId} p. ${display.pageLabel}`
-            : `${docId}`;
+          const fallbackLabel = this.formatCitationLabel(docId, display.pageLabel);
           replacements.set(token, `(${fallbackLabel})`);
         }
       }
@@ -2727,7 +2769,7 @@ export default class ZoteroRagPlugin extends Plugin {
   // Repairs common cases of truncated Obsidian wiki links produced after inline citation expansion.
   // Examples fixed:
   //   "[[zotero/notes/Foo#zrr-chunk:p1"           -> "[[zotero/notes/Foo#zrr-chunk:p1]]"
-  //   "[[zotero/notes/Foo#zrr-chunk:p1]]"        -> "[[zotero/notes/Foo#zrr-chunk:p1|p1]]" (adds default label)
+  //   "[[zotero/notes/Foo#zrr-chunk:p1]]"        -> "[[zotero/notes/Foo#zrr-chunk:p1\\|p1]]" (adds default label)
   private repairTruncatedWikilinks(text: string): string {
     if (!text || typeof text !== "string") {
       return text;
@@ -2738,10 +2780,10 @@ export default class ZoteroRagPlugin extends Plugin {
     next = next.replace(/\[\[([^\]\n#]+#zrr-chunk:[^\]\n|]+)(?=\n|$)/g, "[[$1]]");
 
     // 2) Ensure label is present for zrr-chunk links that have no explicit label
-    //    i.e., convert [[path#zrr-chunk:ID]] -> [[path#zrr-chunk:ID|LABEL]] where LABEL defaults to ID or page-like form
+    //    i.e., convert [[path#zrr-chunk:ID]] -> [[path#zrr-chunk:ID\|LABEL]] where LABEL defaults to ID or page-like form
     next = next.replace(/\[\[([^\]\n#]+#zrr-chunk:([^\]\n|]+))\]\]/g, (_m, full, chunkId) => {
-      const label = this.buildDefaultChunkLabel(String(chunkId || "").trim());
-      return `[[${full}|${label}]]`;
+      const label = this.escapeWikiLabel(this.buildDefaultChunkLabel(String(chunkId || "").trim()));
+      return `[[${full}\\|${label}]]`;
     });
     return next;
   }
@@ -2940,6 +2982,10 @@ export default class ZoteroRagPlugin extends Plugin {
           const title = typeof values.title === "string" ? values.title : "";
           if (title) {
             updates.zotero_title = title;
+          }
+          const shortTitle = this.extractShortTitleFromValues(values);
+          if (shortTitle) {
+            updates.short_title = shortTitle;
           }
           const baseName = this.sanitizeFileName(title) || docId;
           const primaryNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
@@ -6398,7 +6444,7 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async openPdfLinkInLeaf(leaf: WorkspaceLeaf, linkText: string): Promise<void> {
-    const pdfPlus = (this.app.plugins?.plugins as Record<string, any> | undefined)?.["pdf-plus"];
+    const pdfPlus = this.getPluginsRegistry()?.["pdf-plus"];
     const pdfPlusOpen = pdfPlus?.lib?.workspace?.openPDFLinkTextInLeaf;
     if (typeof pdfPlusOpen === "function") {
       await pdfPlusOpen.call(pdfPlus.lib.workspace, leaf, linkText, "", { active: false });
@@ -6412,6 +6458,10 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
     await this.app.workspace.openLinkText(linkText, "", false);
+  }
+
+  private getPluginsRegistry(): Record<string, any> | undefined {
+    return (this.app as any).plugins?.plugins as Record<string, any> | undefined;
   }
 
   private isLeafTabActive(leaf: WorkspaceLeaf): boolean {
@@ -6709,14 +6759,13 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private formatCitationMarkdown(citation: ChatCitation): string {
     const docId = citation.doc_id || "?";
-    const label = `${docId}`;
     const pageLabel = this.formatCitationPageLabel(citation);
     const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
     const attachmentKey = citation.attachment_key || this.docIndex?.[citation.doc_id || ""]?.attachment_key;
     const pageStart = citation.page_start ? String(citation.page_start) : "";
     const entry = this.docIndex?.[citation.doc_id || ""] ?? null;
-    const noteTitle = entry?.zotero_title || entry?.note_title || label;
-    const fullLabel = `${noteTitle} p. ${pageLabel}`;
+    const noteTitle = this.resolveCitationTitle(entry, entry?.note_path ?? null, citation.doc_id);
+    const fullLabel = this.formatCitationLabel(noteTitle, pageLabel);
     const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, citation.doc_id);
     if (this.settings.preferObsidianNoteForCitations && chunkId && entry?.note_path) {
       return `- ${this.buildNoteChunkLink(entry.note_path, chunkId, fullLabel)}`;
@@ -6732,7 +6781,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const target = normalizePath(notePath).replace(/\.md$/i, "");
     const anchor = `zrr-chunk:${chunkId}`;
     const safeLabel = this.escapeWikiLabel(label);
-    return `[[${target}#${anchor}|${safeLabel}]]`;
+    return `[[${target}#${anchor}\\|${safeLabel}]]`;
   }
 
   private escapeWikiLabel(label: string): string {
@@ -6869,6 +6918,9 @@ export default class ZoteroRagPlugin extends Plugin {
     if (entry.zotero_title === undefined && existing.zotero_title) {
       next.zotero_title = existing.zotero_title;
     }
+    if (entry.short_title === undefined && existing.short_title) {
+      next.short_title = existing.short_title;
+    }
     if (entry.pdf_path === undefined && existing.pdf_path) {
       next.pdf_path = existing.pdf_path;
     }
@@ -6906,6 +6958,10 @@ export default class ZoteroRagPlugin extends Plugin {
         const title = typeof values.title === "string" ? values.title : "";
         if (title) {
           updates.zotero_title = title;
+        }
+        const shortTitle = this.extractShortTitleFromValues(values);
+        if (shortTitle) {
+          updates.short_title = shortTitle;
         }
         if (!updates.note_title || !updates.note_path) {
           const baseName = this.sanitizeFileName(title) || docId;
@@ -7272,11 +7328,13 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
+      const shortTitle = this.extractShortTitleFromValues(values);
       await this.updateDocIndex({
         doc_id: docId,
         note_path: notePath,
         note_title: path.basename(notePath, ".md"),
         zotero_title: title,
+        short_title: shortTitle || undefined,
         pdf_path: sourcePdf,
       });
     } catch (error) {
@@ -7843,6 +7901,22 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const shortTitle = csl["title-short"] ?? csl.shortTitle ?? csl.short_title;
     return typeof shortTitle === "string" ? shortTitle.trim() : "";
+  }
+
+  private extractShortTitleFromValues(values: ZoteroItemValues): string {
+    const direct = this.coerceString((values as any).shortTitle);
+    if (direct) {
+      return direct;
+    }
+    const underscored = this.coerceString((values as any).short_title);
+    if (underscored) {
+      return underscored;
+    }
+    const hyphenated = this.coerceString((values as any)["title-short"]);
+    if (hyphenated) {
+      return hyphenated;
+    }
+    return "";
   }
 
   private extractDoiFromExtra(values: ZoteroItemValues): string {
