@@ -12,6 +12,7 @@ pytesseract
 pyzotero
 redis
 requests
+sentence-transformers
 stopwordsiso
 tqdm
 wordfreq

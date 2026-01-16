@@ -1863,6 +1863,7 @@ export default class ZoteroRagPlugin extends Plugin {
         "--progress",
       ];
       this.appendEmbedSubchunkArgs(indexArgs);
+      this.appendEmbedContextArgs(indexArgs);
       if (this.settings.embedIncludeMetadata) {
         indexArgs.push("--embed-include-metadata");
       }
@@ -2450,6 +2451,26 @@ export default class ZoteroRagPlugin extends Plugin {
       String(this.settings.chatTemperature),
       "--stream",
     ];
+    if (this.settings.enableQueryExpansion) {
+      args.push("--expand-query");
+      args.push(
+        "--expand-count",
+        String(Math.max(1, Math.trunc(this.settings.queryExpansionCount)))
+      );
+    }
+    if (this.settings.enableCrossEncoderRerank) {
+      args.push("--rerank");
+      const model = (this.settings.rerankModel || "").trim();
+      if (model) {
+        args.push("--rerank-model", model);
+      }
+    }
+    if (Number.isFinite(this.settings.rerankCandidateMultiplier)) {
+      args.push(
+        "--rerank-candidates",
+        String(Math.max(1, Math.trunc(this.settings.rerankCandidateMultiplier)))
+      );
+    }
 
     const historyPayload = this.buildChatHistoryPayload(historyMessages);
     const historyFile = await this.writeChatHistoryTemp(historyPayload);
@@ -3520,6 +3541,7 @@ export default class ZoteroRagPlugin extends Plugin {
           "--progress",
         ];
         this.appendEmbedSubchunkArgs(indexArgs);
+        this.appendEmbedContextArgs(indexArgs);
         if (this.settings.embedIncludeMetadata) {
           indexArgs.push("--embed-include-metadata");
         }
@@ -3656,6 +3678,7 @@ export default class ZoteroRagPlugin extends Plugin {
       "--upsert",
     ];
     this.appendEmbedSubchunkArgs(args);
+    this.appendEmbedContextArgs(args);
     if (this.settings.embedIncludeMetadata) {
       args.push("--embed-include-metadata");
     }
@@ -7261,6 +7284,7 @@ export default class ZoteroRagPlugin extends Plugin {
           "--progress",
         ];
         this.appendEmbedSubchunkArgs(indexArgs);
+        this.appendEmbedContextArgs(indexArgs);
         if (this.settings.embedIncludeMetadata) {
           indexArgs.push("--embed-include-metadata");
         }
@@ -8326,6 +8350,17 @@ export default class ZoteroRagPlugin extends Plugin {
     const subchunkOverlap = this.settings.embedSubchunkOverlap;
     if (Number.isFinite(subchunkOverlap)) {
       args.push("--embed-subchunk-overlap", String(Math.max(0, Math.trunc(subchunkOverlap))));
+    }
+  }
+
+  private appendEmbedContextArgs(args: string[]): void {
+    const contextWindow = this.settings.embedContextWindow;
+    if (Number.isFinite(contextWindow)) {
+      args.push("--embed-context-window", String(Math.max(0, Math.trunc(contextWindow))));
+    }
+    const contextChars = this.settings.embedContextChars;
+    if (Number.isFinite(contextChars)) {
+      args.push("--embed-context-chars", String(Math.max(0, Math.trunc(contextChars))));
     }
   }
 

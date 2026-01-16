@@ -53,12 +53,19 @@ export interface ZoteroRagSettings {
   embedIncludeMetadata: boolean;
   embedSubchunkChars: number;
   embedSubchunkOverlap: number;
+  embedContextWindow: number;
+  embedContextChars: number;
   enableChunkTagging: boolean;
   chatBaseUrl: string;
   chatApiKey: string;
   chatModel: string;
   chatTemperature: number;
   chatHistoryMessages: number;
+  enableQueryExpansion: boolean;
+  queryExpansionCount: number;
+  enableCrossEncoderRerank: boolean;
+  rerankModel: string;
+  rerankCandidateMultiplier: number;
   ocrMode: OcrMode;
   ocrEngine: OcrEngine;
   chunkingMode: ChunkingMode;
@@ -208,6 +215,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   embedIncludeMetadata: true,
   embedSubchunkChars: 3500,
   embedSubchunkOverlap: 200,
+  embedContextWindow: 1,
+  embedContextChars: 220,
   enableChunkTagging: false,
 
   // Chat LLM
@@ -218,6 +227,11 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
   chatPaneLocation: "right",
+  enableQueryExpansion: false,
+  queryExpansionCount: 3,
+  enableCrossEncoderRerank: false,
+  rerankModel: "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  rerankCandidateMultiplier: 4,
 
   // Logging
   enableFileLogging: false,
@@ -1288,6 +1302,34 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
+        .setName("Embedding context window (chunks)")
+        .setDesc("Include neighboring chunk text around each chunk when embedding (0 disables).")
+        .addText((text) =>
+          text
+            .setPlaceholder("1")
+            .setValue(String(this.plugin.settings.embedContextWindow))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.embedContextWindow = Number.isFinite(parsed) ? Math.max(0, parsed) : 1;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Embedding context snippet size (chars)")
+        .setDesc("Max chars per neighboring chunk included in embeddings.")
+        .addText((text) =>
+          text
+            .setPlaceholder("220")
+            .setValue(String(this.plugin.settings.embedContextChars))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.embedContextChars = Number.isFinite(parsed) ? Math.max(0, parsed) : 220;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
         .setName("Embedding subchunk size (chars)")
         .setDesc("Split long chunks into smaller subchunks for embedding only (0 disables).")
         .addText((text) =>
@@ -1505,6 +1547,75 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             .setValue(this.plugin.settings.chatPaneLocation)
             .onChange(async (value: string) => {
               this.plugin.settings.chatPaneLocation = value as "right" | "main";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      tabEl.createEl("h2", { text: "Retrieval" });
+
+      new Setting(tabEl)
+        .setName("Enable query expansion")
+        .setDesc("Use the chat model to expand queries before retrieval.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableQueryExpansion).onChange(async (value) => {
+            this.plugin.settings.enableQueryExpansion = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(tabEl)
+        .setName("Query expansion count")
+        .setDesc("Number of expansion variants to request.")
+        .addText((text) =>
+          text
+            .setPlaceholder("3")
+            .setValue(String(this.plugin.settings.queryExpansionCount))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.queryExpansionCount = Number.isFinite(parsed)
+                ? Math.max(1, parsed)
+                : 3;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Enable cross-encoder reranking")
+        .setDesc(
+          "Rerank candidates locally with sentence-transformers (downloads model on first use)."
+        )
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableCrossEncoderRerank).onChange(async (value) => {
+            this.plugin.settings.enableCrossEncoderRerank = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(tabEl)
+        .setName("Cross-encoder model")
+        .setDesc("Local reranker model name or path.")
+        .addText((text) =>
+          text
+            .setPlaceholder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            .setValue(this.plugin.settings.rerankModel)
+            .onChange(async (value) => {
+              this.plugin.settings.rerankModel = value.trim() || "cross-encoder/ms-marco-MiniLM-L-6-v2";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Rerank candidate multiplier")
+        .setDesc("Retrieve k × N candidates before reranking.")
+        .addText((text) =>
+          text
+            .setPlaceholder("4")
+            .setValue(String(this.plugin.settings.rerankCandidateMultiplier))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.rerankCandidateMultiplier = Number.isFinite(parsed)
+                ? Math.max(1, parsed)
+                : 4;
               await this.plugin.saveSettings();
             })
         );
