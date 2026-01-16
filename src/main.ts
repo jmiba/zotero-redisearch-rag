@@ -4445,6 +4445,7 @@ export default class ZoteroRagPlugin extends Plugin {
           return;
         }
         if (this.noteSyncSuppressed.has(file.path)) {
+          this.scheduleNoteSync(file, 2500);
           return;
         }
         this.scheduleNoteSync(file);
@@ -5122,7 +5123,7 @@ export default class ZoteroRagPlugin extends Plugin {
       .trim();
   }
 
-  private scheduleNoteSync(file: TFile): void {
+  private scheduleNoteSync(file: TFile, delayMs = 1200): void {
     const existing = this.noteSyncTimers.get(file.path);
     if (existing !== undefined) {
       window.clearTimeout(existing);
@@ -5130,7 +5131,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const handle = window.setTimeout(() => {
       this.noteSyncTimers.delete(file.path);
       void this.syncNoteToRedis(file);
-    }, 1200);
+    }, delayMs);
     this.noteSyncTimers.set(file.path, handle);
   }
 
@@ -5180,6 +5181,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
     if (this.noteSyncSuppressed.has(file.path)) {
+      this.scheduleNoteSync(file, 2000);
       return;
     }
     this.noteSyncInFlight.add(file.path);

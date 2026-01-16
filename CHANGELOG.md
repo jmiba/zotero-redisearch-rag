@@ -5,7 +5,8 @@
 - Implemented chunking of large pdfs to enable full pocessing via the PaddleOCR API.
 - Updated text layer classification and quality assessment for PDFs.9
 - Compatibility with [pdf++ plugin](https://github.com/RyotaUshio/obsidian-pdf-plus) for improved PDF handling.
-- Imporved citation link generation in the chat assisstant responses.
+- Compatibility with [Local IMages Plus plugin](https://github.com/Sergei-Korneev/obsidian-local-images-plus).
+- Improved citation link generation in the chat assisstant responses.
 
 
 ## 0.4.2
