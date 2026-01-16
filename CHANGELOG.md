@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.4
+
+- Added support for context snippets in `index_redisearch.py`, allowing neighboring chunks to be included in embeddings.
+- Introduced new command-line arguments for configuring context window size and character limits.
+- Implemented functions to truncate context text and build context strings for better embedding context.
+- Enhanced the main embedding logic to utilize the new context features.
+- In `rag_query_redisearch.py`, added query expansion functionality to generate alternative queries.
+- Implemented reranking of candidates based on a specified model, with options for maximum character limits.
+- Improved retrieval logic to support broadening of search results based on metrics.
+- Updated output structure to include expanded queries and reranking information.
+
+
 ## 0.4.3
 
 - Implemented chunking of large pdfs to enable full pocessing via the PaddleOCR API.
