@@ -55,7 +55,7 @@ item_json: {{item_json_yaml}}`,tagSanitizeMode:"kebab",noteBodyTemplate:"{{pdf_b
   <path d="M6.2694512 16.288346H17.916711"/>
 </svg>
 `};var We={"docling_extract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 import argparse
 import base64
 import errno
@@ -5567,7 +5567,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"ocr_paddle.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 from __future__ import annotations
 
 import json
@@ -8619,7 +8619,7 @@ def ocr_pages_with_paddle(
     )
     return pages, {"ocr_confidence_avg": avg_conf}
 `,"ocr_tesseract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 from __future__ import annotations
 
 import logging
@@ -8924,7 +8924,7 @@ def ocr_pages_with_tesseract(
     )
     return pages, {"ocr_confidence_avg": avg_conf}
 `,"index_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 import argparse
 import html
 import json
@@ -9986,7 +9986,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"drop_redis_index.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 import argparse
 import sys
 
@@ -10026,7 +10026,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"ocr_layered_pdf.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 import argparse
 import io
 import json
@@ -10185,7 +10185,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"rag_query_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 
 import argparse
 import json
@@ -11069,7 +11069,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"search_redis.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 
 import argparse
 import json
@@ -11362,7 +11362,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"redis_diagnostics.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 
 import argparse
 import json
@@ -11453,7 +11453,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"purge_redis_orphans.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 
 import argparse
 import json
@@ -11562,7 +11562,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"batch_index_pyzotero.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 import argparse
 import json
 import os
@@ -11767,7 +11767,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"utils_embedding.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.2
+# zotero-redisearch-rag tool version: 0.4.3
 import math
 import struct
 import requests
@@ -11798,7 +11798,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
     if not embedding:
         raise RuntimeError("Embedding response missing embedding")
     return [float(x) for x in embedding]
-`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.4.2
+`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.4.3
 aai
 aam
 abb
@@ -14093,7 +14093,7 @@ zwi
 \xF6ffent
 \xF6pnv
 \xFCberarb
-`,"requirements.txt":`# zotero-redisearch-rag tool version: 0.4.2
+`,"requirements.txt":`# zotero-redisearch-rag tool version: 0.4.3
 docling
 langcodes[data]
 markdown
@@ -14115,7 +14115,7 @@ wordfreq
 # Optional for language normalization and spellchecking
 # hunspell  # Disabled: fails to build on macOS/Python 3.13, use spylls fallback
 spylls
-`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.4.2
+`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.4.3
 services:
   redis-stack:
     image: redis/redis-stack-server:latest
@@ -14127,7 +14127,7 @@ services:
     volumes:
       - "\${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
       - "./redis-stack.conf:/redis-stack.conf:ro"
-`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.4.2
+`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.4.3
 # Redis Stack persistence config for local RAG index
 appendonly yes
 appendfsync everysec
