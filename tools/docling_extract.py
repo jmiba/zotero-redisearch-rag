@@ -220,7 +220,7 @@ class DoclingProcessingConfig:
     paddle_vl_api_disable: bool = False
     paddle_vl_api_url: Optional[str] = None
     paddle_vl_api_token: Optional[str] = None
-    paddle_vl_api_timeout_sec: int = 120
+    paddle_vl_api_timeout_sec: int = 600
     paddle_vl_api_max_pages: int = 100
     paddle_vl_api_max_chunk_bytes: int = 2000000
     paddle_vl_markdown_ignore_labels: Optional[Sequence[str]] = field(

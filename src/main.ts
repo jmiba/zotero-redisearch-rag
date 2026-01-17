@@ -1475,6 +1475,8 @@ export default class ZoteroRagPlugin extends Plugin {
   private lastRedisNotice: string | null = null;
   private noteSyncTimers = new Map<string, number>();
   private noteSyncInFlight = new Set<string>();
+  private noteSyncPending = new Set<string>();
+  private noteSyncPendingDeletes = new Map<string, string>();
   private noteSyncSuppressed = new Set<string>();
   private missingDocIdWarned = new Set<string>();
   private collectionTitleCache = new Map<string, string>();
@@ -2991,15 +2993,28 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("No active note to reindex.");
       return;
     }
-    const content = await this.app.vault.read(file);
-    const docId = await this.resolveDocIdForNote(file, content);
-    if (!docId) {
-      new Notice("No doc_id found for the active note.");
-      return;
-    }
-    const ok = await this.reindexDocIdFromCache(docId, true);
-    if (ok) {
-      new Notice(`Reindexed ${docId}.`);
+    await this.reindexNoteFromCacheForFile(file, true);
+  }
+
+  private async reindexNoteFromCacheForFile(file: TFile, showNotices: boolean): Promise<void> {
+    try {
+      const content = await this.app.vault.read(file);
+      const docId = await this.resolveDocIdForNote(file, content);
+      if (!docId) {
+        if (showNotices) {
+          new Notice("No doc_id found for this note.");
+        }
+        return;
+      }
+      const ok = await this.reindexDocIdFromCache(docId, showNotices);
+      if (ok && showNotices) {
+        new Notice(`Reindexed ${docId}.`);
+      }
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to reindex note.");
+      }
+      console.error("Failed to reindex note", error);
     }
   }
 
@@ -4789,6 +4804,11 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         menu.addItem((item) => {
           item
+            .setTitle("Reindex note from cache")
+            .onClick(() => this.reindexNoteFromCacheForFile(file, true));
+        });
+        menu.addItem((item) => {
+          item
             .setTitle("Delete Zotero note and cached data")
             .onClick(() => this.deleteZoteroNoteAndCacheForFile(file));
         });
@@ -5370,6 +5390,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async syncNoteToRedis(file: TFile): Promise<void> {
     if (this.noteSyncInFlight.has(file.path)) {
+      this.noteSyncPending.add(file.path);
       return;
     }
     if (this.noteSyncSuppressed.has(file.path)) {
@@ -5474,6 +5495,19 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       }
 
+      const deletionCandidates = new Set<string>([...deletions, ...removals]);
+      if (deletionCandidates.size) {
+        const signature = Array.from(deletionCandidates).sort().join("|");
+        const pending = this.noteSyncPendingDeletes.get(file.path);
+        if (pending !== signature) {
+          this.noteSyncPendingDeletes.set(file.path, signature);
+          this.scheduleNoteSync(file, 1500);
+          return;
+        }
+      } else if (this.noteSyncPendingDeletes.has(file.path)) {
+        this.noteSyncPendingDeletes.delete(file.path);
+      }
+
       if (!updates.size && !deletions.size && !removals.size && !payloadUpdated) {
         return;
       }
@@ -5496,10 +5530,16 @@ export default class ZoteroRagPlugin extends Plugin {
         Array.from(updates),
         Array.from(deletions)
       );
+      if (deletions.size || removals.size) {
+        this.noteSyncPendingDeletes.delete(file.path);
+      }
     } catch (error) {
       console.warn("Failed to sync note edits to Redis", error);
     } finally {
       this.noteSyncInFlight.delete(file.path);
+      if (this.noteSyncPending.delete(file.path)) {
+        this.scheduleNoteSync(file, 400);
+      }
     }
   }
 

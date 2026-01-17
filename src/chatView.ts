@@ -1,4 +1,4 @@
-import { App, ItemView, MarkdownRenderer, Modal, Notice, Setting, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, MarkdownRenderer, Modal, Notice, Setting, WorkspaceLeaf, setIcon } from "obsidian";
 import type ZoteroRagPlugin from "./main";
 
 export const VIEW_TYPE_ZOTERO_CHAT = "zotero-redisearch-rag-chat";
@@ -247,12 +247,81 @@ export class ZoteroChatView extends ItemView {
     const wrapper = this.messagesEl.createEl("div", {
       cls: `zrr-chat-message zrr-chat-${message.role}`,
     });
-    const meta = wrapper.createEl("div", { cls: "zrr-chat-meta" });
+    const metaRow = wrapper.createEl("div", { cls: "zrr-chat-meta-row" });
+    const meta = metaRow.createEl("div", { cls: "zrr-chat-meta" });
     meta.setText(message.role === "user" ? "You" : "Zotero Assistant");
+    const actions = metaRow.createEl("div", { cls: "zrr-chat-message-actions" });
+    const copyButton = actions.createEl("button", {
+      cls: "zrr-chat-message-copy zrr-chat-icon-button",
+      attr: { title: "Copy this message", "aria-label": "Copy this message" },
+    });
+    setIcon(copyButton, "copy");
+    copyButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await this.copyMessage(message);
+    });
+    const deleteButton = actions.createEl("button", {
+      cls: "zrr-chat-message-delete zrr-chat-icon-button",
+      attr: { title: "Delete this message", "aria-label": "Delete this message" },
+    });
+    setIcon(deleteButton, "trash-2");
+    deleteButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await this.deleteMessage(message.id);
+    });
     const contentEl = wrapper.createEl("div", { cls: "zrr-chat-content" });
     const citationsEl = wrapper.createEl("div", { cls: "zrr-chat-citations" });
     this.messageEls.set(message.id, { wrapper, content: contentEl, citations: citationsEl });
     await this.renderMessageContent(message);
+  }
+
+  private async copyMessage(message: ChatMessage): Promise<void> {
+    const formatted = await this.plugin.formatInlineCitations(
+      message.content || "",
+      message.citations ?? [],
+      message.retrieved ?? []
+    );
+    const content = (formatted || "").trim();
+    if (!content) {
+      new Notice("Nothing to copy.");
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      new Notice("Clipboard API unavailable. Select text to copy.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(content);
+      new Notice("Message copied to clipboard.");
+    } catch (error) {
+      console.error("Failed to copy message", error);
+      new Notice("Failed to copy message.");
+    }
+  }
+
+  private async deleteMessage(messageId: string): Promise<void> {
+    const index = this.messages.findIndex((message) => message.id === messageId);
+    if (index === -1) {
+      return;
+    }
+    const confirmDelete = window.confirm("Delete this message? This cannot be undone.");
+    if (!confirmDelete) {
+      return;
+    }
+    this.messages.splice(index, 1);
+    const els = this.messageEls.get(messageId);
+    if (els) {
+      els.wrapper.remove();
+    }
+    this.messageEls.delete(messageId);
+    const pending = this.pendingRender.get(messageId);
+    if (pending !== undefined) {
+      window.clearTimeout(pending);
+      this.pendingRender.delete(messageId);
+    }
+    await this.saveHistory();
   }
 
   private scheduleRender(message: ChatMessage): void {
