@@ -9,6 +9,8 @@
 - In `rag_query_redisearch.py`, added query expansion functionality to generate alternative queries.
 - Implemented reranking of candidates based on a specified model, with options for maximum character limits.
 - Improved retrieval logic to support broadening of search results based on metrics.
+- Retrieval now supports configurable RRF blending and optional logging of top ranked chunks for tuning.
+- Retrieval can now cap the number of chunks returned per document to improve diversity.
 - Updated output structure to include expanded queries and reranking information.
 
 

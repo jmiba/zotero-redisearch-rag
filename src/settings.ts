@@ -45,6 +45,8 @@ export interface ZoteroRagSettings {
   chatPaneLocation: "right" | "main";
   redisUrl: string;
   autoAssignRedisPort: boolean;
+  redisDataDirOverride: string;
+  redisProjectName: string;
   redisIndex: string;
   redisPrefix: string;
   embedBaseUrl: string;
@@ -66,6 +68,9 @@ export interface ZoteroRagSettings {
   enableCrossEncoderRerank: boolean;
   rerankModel: string;
   rerankCandidateMultiplier: number;
+  rrfK: number;
+  rrfLogTop: number;
+  maxChunksPerDoc: number;
   ocrMode: OcrMode;
   ocrEngine: OcrEngine;
   chunkingMode: ChunkingMode;
@@ -102,6 +107,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   dockerPath: "docker",
   redisUrl: "redis://127.0.0.1:6379",
   autoAssignRedisPort: false,
+  redisDataDirOverride: "",
+  redisProjectName: "",
   autoStartRedis: true,
 
   // Zotero Local API
@@ -232,6 +239,9 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   enableCrossEncoderRerank: false,
   rerankModel: "cross-encoder/ms-marco-MiniLM-L-6-v2",
   rerankCandidateMultiplier: 4,
+  rrfK: 60,
+  rrfLogTop: 0,
+  maxChunksPerDoc: 0,
 
   // Logging
   enableFileLogging: false,
@@ -386,6 +396,38 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
+        .setName("Redis data directory override")
+        .setDesc(
+          "Optional absolute path to store Redis persistence when auto-assign is off. " +
+            "Env var ZRR_DATA_DIR overrides this setting."
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("/Users/you/Redis/zrr-data")
+            .setValue(this.plugin.settings.redisDataDirOverride)
+            .onChange(async (value) => {
+              this.plugin.settings.redisDataDirOverride = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Redis project name override")
+        .setDesc(
+          "Optional Docker/Podman Compose project name when auto-assign is off. " +
+            "Env var ZRR_PROJECT_NAME overrides this setting."
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("zrr-shared")
+            .setValue(this.plugin.settings.redisProjectName)
+            .onChange(async (value) => {
+              this.plugin.settings.redisProjectName = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
         .setName("Auto-assign Redis port")
         .setDesc("When starting Redis stack, pick a free local port and update the Redis URL.")
         .addToggle((toggle) =>
@@ -399,7 +441,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Auto-start Redis stack (Docker/Podman Compose)")
         .setDesc(
           "Requires Docker Desktop running and your vault path shared with Docker. " +
-            "Uses a vault-specific data dir at .obsidian/zotero-redisearch-rag/redis-data."
+            "Uses a vault-specific data dir at .obsidian/zotero-redisearch-rag/redis-data unless overridden."
         )
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
@@ -1616,6 +1658,50 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               this.plugin.settings.rerankCandidateMultiplier = Number.isFinite(parsed)
                 ? Math.max(1, parsed)
                 : 4;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("RRF k")
+        .setDesc("Rank fusion constant for blending lexical and vector results.")
+        .addText((text) =>
+          text
+            .setPlaceholder("60")
+            .setValue(String(this.plugin.settings.rrfK))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.rrfK = Number.isFinite(parsed) ? Math.max(1, parsed) : 60;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("RRF log top N")
+        .setDesc("Log the top N RRF-ranked chunks to stderr (0 disables).")
+        .addText((text) =>
+          text
+            .setPlaceholder("0")
+            .setValue(String(this.plugin.settings.rrfLogTop))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.rrfLogTop = Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Max chunks per document")
+        .setDesc("Limit how many chunks from a single document can appear in retrieval (0 disables).")
+        .addText((text) =>
+          text
+            .setPlaceholder("0")
+            .setValue(String(this.plugin.settings.maxChunksPerDoc))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.maxChunksPerDoc = Number.isFinite(parsed)
+                ? Math.max(0, parsed)
+                : 0;
               await this.plugin.saveSettings();
             })
         );

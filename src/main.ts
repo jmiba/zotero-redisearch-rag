@@ -1570,6 +1570,12 @@ export default class ZoteroRagPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "reindex-current-note",
+      name: "Reindex current note from cache",
+      callback: () => this.reindexCurrentNoteFromCache(),
+    });
+
+    this.addCommand({
       id: "drop-rebuild-redis-index",
       name: "Drop & rebuild Redis index",
       callback: () => this.dropAndRebuildRedisIndex(),
@@ -2471,6 +2477,18 @@ export default class ZoteroRagPlugin extends Plugin {
         String(Math.max(1, Math.trunc(this.settings.rerankCandidateMultiplier)))
       );
     }
+    if (Number.isFinite(this.settings.rrfK)) {
+      args.push("--rrf-k", String(Math.max(1, Math.trunc(this.settings.rrfK))));
+    }
+    if (Number.isFinite(this.settings.rrfLogTop) && this.settings.rrfLogTop > 0) {
+      args.push("--rrf-log-top", String(Math.max(1, Math.trunc(this.settings.rrfLogTop))));
+    }
+    if (Number.isFinite(this.settings.maxChunksPerDoc) && this.settings.maxChunksPerDoc > 0) {
+      args.push(
+        "--max-per-doc",
+        String(Math.max(1, Math.trunc(this.settings.maxChunksPerDoc)))
+      );
+    }
 
     const historyPayload = this.buildChatHistoryPayload(historyMessages);
     const historyFile = await this.writeChatHistoryTemp(historyPayload);
@@ -2964,6 +2982,24 @@ export default class ZoteroRagPlugin extends Plugin {
     const rebuilt = await this.rebuildNoteFromCacheForDocId(docId, true);
     if (rebuilt) {
       new Notice(`Rebuilt Zotero note for ${docId}.`);
+    }
+  }
+
+  private async reindexCurrentNoteFromCache(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice("No active note to reindex.");
+      return;
+    }
+    const content = await this.app.vault.read(file);
+    const docId = await this.resolveDocIdForNote(file, content);
+    if (!docId) {
+      new Notice("No doc_id found for the active note.");
+      return;
+    }
+    const ok = await this.reindexDocIdFromCache(docId, true);
+    if (ok) {
+      new Notice(`Reindexed ${docId}.`);
     }
   }
 
@@ -3643,6 +3679,139 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     this.reindexCacheActive = false;
     this.lastReindexFailure = null;
+    return true;
+  }
+
+  private async reindexDocIdFromCache(docId: string, showNotices: boolean): Promise<boolean> {
+    this.lastReindexFailure = null;
+    if (this.reindexCacheActive) {
+      if (showNotices) {
+        new Notice("Reindex already running.");
+      }
+      this.lastReindexFailure = "busy";
+      return false;
+    }
+    this.reindexCacheActive = true;
+    try {
+      await this.ensureBundledTools();
+    } catch (error) {
+      if (showNotices) {
+        new Notice("Failed to sync bundled tools. See console for details.");
+      }
+      console.error(error);
+      this.reindexCacheActive = false;
+      this.lastReindexFailure = "tools_error";
+      return false;
+    }
+    if (!(await this.ensureRedisAvailable("reindex"))) {
+      this.reindexCacheActive = false;
+      this.lastReindexFailure = "redis_unavailable";
+      return false;
+    }
+
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(chunkPath))) {
+      if (showNotices) {
+        new Notice(`Chunks cache missing for ${docId}.`);
+      }
+      this.reindexCacheActive = false;
+      this.lastReindexFailure = "no_cache";
+      return false;
+    }
+
+    const pluginDir = this.getPluginDir();
+    const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
+    const logPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
+
+    this.showStatusProgress(`Reindexing ${docId}...`, 0);
+    if (logPath) {
+      void this.appendToLogFile(logPath, `Reindexing doc_id ${docId}`, "index_redisearch", "INFO");
+    }
+
+    try {
+      const indexArgs = [
+        "--chunks-json",
+        this.getAbsoluteVaultPath(chunkPath),
+        "--redis-url",
+        this.settings.redisUrl,
+        "--index",
+        this.getRedisIndexName(),
+        "--prefix",
+        this.getRedisKeyPrefix(),
+        "--embed-base-url",
+        this.settings.embedBaseUrl,
+        "--embed-api-key",
+        this.settings.embedApiKey,
+        "--embed-model",
+        this.settings.embedModel,
+        "--upsert",
+        "--progress",
+      ];
+      this.appendEmbedSubchunkArgs(indexArgs);
+      this.appendEmbedContextArgs(indexArgs);
+      if (this.settings.embedIncludeMetadata) {
+        indexArgs.push("--embed-include-metadata");
+      }
+      this.appendChunkTaggingArgs(indexArgs, { allowRegenerate: false });
+      await this.runPythonStreaming(
+        indexScript,
+        indexArgs,
+        (payload) => {
+          if (payload?.type === "progress" && payload.total) {
+            const percent = Math.round((payload.current / payload.total) * 100);
+            const message =
+              typeof payload.message === "string" && payload.message.trim()
+                ? payload.message
+                : `Indexing chunks ${payload.current}/${payload.total}`;
+            this.showStatusProgress(this.formatStatusLabel(message), percent);
+          }
+        },
+        () => undefined,
+        logPath,
+        "index_redisearch"
+      );
+    } catch (error) {
+      const message = this.getPythonErrorMessage(error);
+      const classification = this.classifyIndexingError(message);
+      console.error(`Failed to reindex ${docId}`, error);
+      if (classification === "embed_dim_mismatch") {
+        this.lastReindexFailure = "embed_dim_mismatch";
+        if (showNotices) {
+          const confirmed = await this.confirmRebuildIndex(
+            "Embedding model output dimension does not match the Redis index schema."
+          );
+          if (confirmed) {
+            try {
+              await this.dropRedisIndex(true);
+              this.reindexCacheActive = false;
+              return await this.reindexRedisFromCache();
+            } catch (dropError) {
+              new Notice("Failed to drop/rebuild the Redis index. See console for details.");
+              console.error(dropError);
+              this.lastReindexFailure = "unknown";
+            }
+          }
+        }
+      } else if (classification === "embed_failure") {
+        this.lastReindexFailure = "embed_failure";
+        if (showNotices) {
+          new Notice(
+            "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
+          );
+        }
+      } else if (showNotices) {
+        new Notice(`Failed to reindex ${docId}. See console for details.`);
+      }
+      this.showStatusProgress("Failed", 100);
+      window.setTimeout(() => this.clearStatusProgress(), 1200);
+      this.reindexCacheActive = false;
+      return false;
+    }
+
+    this.showStatusProgress("Done", 100);
+    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    this.reindexCacheActive = false;
     return true;
   }
 
@@ -8385,6 +8554,16 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private getRedisDataDir(): string {
+    const envOverride = (process.env.ZRR_DATA_DIR || "").trim();
+    if (envOverride) {
+      return envOverride;
+    }
+    const override = (this.settings.redisDataDirOverride || "").trim();
+    if (!this.settings.autoAssignRedisPort && override) {
+      return path.isAbsolute(override)
+        ? override
+        : path.join(this.getVaultBasePath(), override);
+    }
     return path.join(this.getVaultBasePath(), CACHE_ROOT, "redis-data");
   }
 
@@ -8606,12 +8785,35 @@ export default class ZoteroRagPlugin extends Plugin {
       this.settings.dockerPath = resolved;
       await this.saveSettings();
     }
-    if (!(await this.isContainerDaemonRunning(resolved))) {
-      this.notifyContainerOnce(this.getContainerDaemonHint(resolved));
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    if (await this.isContainerDaemonRunning(resolved)) {
+      return;
     }
+    for (const waitMs of [5000, 10000]) {
+      await delay(waitMs);
+      if (await this.isContainerDaemonRunning(resolved)) {
+        return;
+      }
+    }
+    this.notifyContainerOnce(this.getContainerDaemonHint(resolved));
   }
 
   private getDockerProjectName(): string {
+    const sanitizeProjectName = (name: string): string => {
+      return name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 32);
+    };
+    const envOverride = (process.env.ZRR_PROJECT_NAME || "").trim();
+    if (envOverride && !this.settings.autoAssignRedisPort) {
+      return sanitizeProjectName(envOverride) || "zrr";
+    }
+    const override = (this.settings.redisProjectName || "").trim();
+    if (override && !this.settings.autoAssignRedisPort) {
+      return sanitizeProjectName(override) || "zrr";
+    }
     const vaultPath = this.getVaultBasePath();
     const vaultName = path
       .basename(vaultPath)
@@ -9645,7 +9847,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!lines.length) {
       return "";
     }
-    const timestamp = new Date().toISOString().replace("T", " ").replace("Z", "").replace(".", ",");
+    const timestamp = new Date().toISOString().replace("T", " ").replace(".", ",");
     return lines.map((line) => `${timestamp} ${stream} ${label}: ${line}`).join("\n") + "\n";
   }
 
