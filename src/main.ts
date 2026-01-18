@@ -2799,10 +2799,25 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
 
-    let result = content;
-    for (const [token, replacement] of replacements) {
-      result = result.split(token).join(replacement);
+    const parts: string[] = [];
+    let lastIndex = 0;
+    for (const match of matches) {
+      const token = match[0];
+      const index = match.index ?? 0;
+      if (index < lastIndex) {
+        continue;
+      }
+      parts.push(content.slice(lastIndex, index));
+      const replacement = replacements.get(token) ?? token;
+      const prevChar = index > 0 ? content[index - 1] : "";
+      if (prevChar && !/\s/.test(prevChar) && !/[\(\[\{!]/.test(prevChar)) {
+        parts.push(" ");
+      }
+      parts.push(replacement);
+      lastIndex = index + token.length;
     }
+    parts.push(content.slice(lastIndex));
+    const result = parts.join("");
     // As a safety net, repair any truncated or unlabeled wiki links to zrr-chunk anchors
     // that could occur when some local providers truncate responses.
     return this.repairTruncatedWikilinks(result);

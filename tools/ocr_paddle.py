@@ -15,6 +15,28 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 LOGGER = logging.getLogger("docling_extract")
 
 _INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)")
+_CURRENCY_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?%?$")
+_CURRENCY_DECIMAL_RE = re.compile(r"^[+-]?\d+[.,]\d+%?$")
+_CURRENCY_CODES = {
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "CNY",
+    "RMB",
+    "AUD",
+    "CAD",
+    "CHF",
+    "HKD",
+    "NZD",
+    "SEK",
+    "NOK",
+    "DKK",
+    "INR",
+    "KRW",
+    "BRL",
+    "MXN",
+}
 _FRACTION_MAP: Dict[Tuple[int, int], str] = {
     (1, 2): "½",
     (1, 3): "⅓",
@@ -80,6 +102,25 @@ def _normalize_footnote_definition_line(line: str) -> Optional[str]:
     return f"[^{marker}]:"
 
 
+def _looks_like_currency(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if re.search(r"[\\^_{}=<>\[\]]", stripped):
+        return False
+    if re.search(r"[*/]", stripped):
+        return False
+    if re.search(r"[+\-]", stripped) and not re.fullmatch(r"[+-]?\d+(?:[.,]\d+)?%?", stripped):
+        return False
+    letters = re.findall(r"[A-Za-z]+", stripped)
+    if letters:
+        if re.search(r"\d", stripped):
+            codes = {letter.upper() for letter in letters}
+            return all(code in _CURRENCY_CODES for code in codes)
+        return False
+    return bool(_CURRENCY_THOUSANDS_RE.fullmatch(stripped) or _CURRENCY_DECIMAL_RE.fullmatch(stripped))
+
+
 def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool = False) -> str:
     if not markdown:
         return markdown
@@ -97,7 +138,9 @@ def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool =
         fraction = _replace_simple_fraction(normalized)
         if fraction:
             return fraction
-        return f"$$ {normalized} $$"
+        if _looks_like_currency(normalized):
+            return f"\\${normalized}\\$"
+        return f"${normalized}$"
 
     updated = _INLINE_MATH_RE.sub(_replace, markdown)
     lines = updated.splitlines()
