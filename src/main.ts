@@ -1755,6 +1755,7 @@ export default class ZoteroRagPlugin extends Plugin {
         if (logDir) {
           await this.ensureFolder(logDir);
         }
+        await this.deleteLogFileIfExists();
         // Also ensure spellchecker info dir (same as logs)
         const spellInfoRel = this.getSpellcheckerInfoRelativePath();
         const spellDir = normalizePath(path.dirname(spellInfoRel));
@@ -9876,6 +9877,18 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       new Notice("Failed to clear log file.");
       console.error(error);
+    }
+  }
+
+  private async deleteLogFileIfExists(): Promise<void> {
+    const rel = this.getLogFileRelativePath();
+    const adapter = this.app.vault.adapter;
+    try {
+      if (await adapter.exists(rel)) {
+        await adapter.remove(rel);
+      }
+    } catch (error) {
+      console.warn("Failed to delete log file before import", error);
     }
   }
 

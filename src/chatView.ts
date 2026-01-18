@@ -510,6 +510,7 @@ class RenameChatModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
+    contentEl.addClass("zrr-chat-rename-modal");
     contentEl.createEl("h3", { text: "Rename chat" });
 
     let value = this.initialValue;
