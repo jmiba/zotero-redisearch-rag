@@ -60,6 +60,18 @@ type PdfAttachment = {
   filePath?: string;
 };
 
+type NoteMetadataFields = {
+  title: string;
+  short_title: string;
+  date: string;
+  abstract: string;
+  tags: string[];
+  authors: string[];
+  editors: string[];
+};
+
+type MetadataDecision = "note" | "zotero" | "skip";
+
 type DocIndexEntry = {
   doc_id: string;
   note_path: string;
@@ -1405,6 +1417,86 @@ class ConfirmPurgeRedisOrphansModal extends Modal {
   }
 }
 
+class MetadataConflictModal extends Modal {
+  private fieldLabel: string;
+  private noteLabel: string;
+  private zoteroLabel: string;
+  private noteValue: string;
+  private zoteroValue: string;
+  private onResolve: (decision: MetadataDecision) => void;
+  private resolved = false;
+
+  constructor(
+    app: App,
+    fieldLabel: string,
+    noteLabel: string,
+    zoteroLabel: string,
+    noteValue: string,
+    zoteroValue: string,
+    onResolve: (decision: MetadataDecision) => void
+  ) {
+    super(app);
+    this.fieldLabel = fieldLabel;
+    this.noteLabel = noteLabel;
+    this.zoteroLabel = zoteroLabel;
+    this.noteValue = noteValue;
+    this.zoteroValue = zoteroValue;
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: `Resolve metadata conflict: ${this.fieldLabel}` });
+    const grid = contentEl.createEl("div");
+    grid.style.display = "grid";
+    grid.style.gap = "0.5rem";
+
+    grid.createEl("div", { text: "Note value" });
+    const noteBox = grid.createEl("textarea", {
+      attr: { readonly: "true", rows: "4" },
+    });
+    noteBox.style.width = "100%";
+    noteBox.value = this.noteValue || "(empty)";
+
+    grid.createEl("div", { text: "Zotero value" });
+    const zoteroBox = grid.createEl("textarea", {
+      attr: { readonly: "true", rows: "4" },
+    });
+    zoteroBox.style.width = "100%";
+    zoteroBox.value = this.zoteroValue || "(empty)";
+
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+    const keepNote = actions.createEl("button", { text: this.noteLabel });
+    const keepZotero = actions.createEl("button", { text: this.zoteroLabel });
+    const skip = actions.createEl("button", { text: "Skip" });
+    keepNote.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve("note");
+    });
+    keepZotero.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve("zotero");
+    });
+    skip.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve("skip");
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.onResolve("skip");
+    }
+  }
+}
+
 class LanguageSuggestModal extends SuggestModal<LanguageOption> {
   private resolveSelection: (value: string | null) => void;
   private resolved = false;
@@ -1478,6 +1570,10 @@ export default class ZoteroRagPlugin extends Plugin {
   private noteSyncPending = new Set<string>();
   private noteSyncPendingDeletes = new Map<string, string>();
   private noteSyncSuppressed = new Set<string>();
+  private noteMetadataSyncTimers = new Map<string, number>();
+  private noteMetadataSyncInFlight = new Set<string>();
+  private noteMetadataSyncPending = new Set<string>();
+  private noteMetadataSyncSuppressed = new Set<string>();
   private missingDocIdWarned = new Set<string>();
   private collectionTitleCache = new Map<string, string>();
   private recreateMissingNotesActive = false;
@@ -4617,6 +4713,102 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async updateZoteroItemFields(
+    itemKey: string,
+    values: ZoteroItemValues,
+    updates: Partial<ZoteroItemValues>
+  ): Promise<void> {
+    try {
+      await this.updateZoteroItemFieldsLocal(itemKey, values, updates);
+      return;
+    } catch (error) {
+      if (!this.canUseWebApi()) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      console.info("Local Zotero write failed; trying Web API", { itemKey, reason: message });
+      await this.updateZoteroItemFieldsWeb(itemKey, values, updates);
+    }
+  }
+
+  private async updateZoteroItemFieldsLocal(
+    itemKey: string,
+    values: ZoteroItemValues,
+    updates: Partial<ZoteroItemValues>
+  ): Promise<void> {
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}`);
+    const payload = { ...values, ...updates };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Zotero-API-Version": "3",
+    };
+    const version = typeof payload.version === "number" ? payload.version : Number(payload.version);
+    if (!Number.isNaN(version)) {
+      headers["If-Unmodified-Since-Version"] = String(version);
+    }
+
+    console.info("Zotero metadata PUT", { url, itemKey });
+    try {
+      const response = await this.requestLocalApiWithBody(
+        url,
+        "PUT",
+        payload,
+        headers,
+        `Zotero update failed for ${url}`
+      );
+      console.info("Zotero metadata PUT response", { status: response.statusCode });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("status 501")) {
+        throw error;
+      }
+      const postUrl = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items`);
+      console.info("Zotero metadata PUT unsupported; trying POST", { postUrl });
+      const response = await this.requestLocalApiWithBody(
+        postUrl,
+        "POST",
+        [payload],
+        headers,
+        `Zotero update failed for ${postUrl}`
+      );
+      console.info("Zotero metadata POST response", { status: response.statusCode });
+    }
+  }
+
+  private async updateZoteroItemFieldsWeb(
+    itemKey: string,
+    values: ZoteroItemValues,
+    updates: Partial<ZoteroItemValues>
+  ): Promise<void> {
+    const libraryPath = this.getWebApiLibraryPath();
+    if (!libraryPath) {
+      throw new Error("Web API library path is not configured.");
+    }
+    const url = this.buildWebApiUrl(`/${libraryPath}/items/${itemKey}`);
+    const current = await this.fetchZoteroItemWeb(itemKey);
+    const payload = { ...(current?.data ?? values), ...updates };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Zotero-API-Version": "3",
+      "Zotero-API-Key": this.settings.webApiKey,
+    };
+    const version = current?.data?.version ?? current?.version ?? values?.version;
+    const numericVersion = typeof version === "number" ? version : Number(version);
+    if (!Number.isNaN(numericVersion)) {
+      headers["If-Unmodified-Since-Version"] = String(numericVersion);
+    }
+
+    console.info("Zotero Web API metadata PUT", { url, itemKey });
+    const response = await this.requestWebApiWithBody(
+      url,
+      "PUT",
+      payload,
+      headers,
+      `Zotero Web API update failed for ${url}`
+    );
+    console.info("Zotero Web API metadata PUT response", { status: response.statusCode });
+  }
+
   private getDocId(values: ZoteroItemValues): string | null {
     const candidates = [values.key, values.itemKey, values.id, values.citationKey];
     for (const candidate of candidates) {
@@ -4667,11 +4859,19 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!(file instanceof TFile) || file.extension !== "md") {
           return;
         }
+        if (this.noteMetadataSyncSuppressed.has(file.path)) {
+          if (this.noteSyncSuppressed.has(file.path)) {
+            this.scheduleNoteSync(file, 2500);
+          }
+          return;
+        }
         if (this.noteSyncSuppressed.has(file.path)) {
           this.scheduleNoteSync(file, 2500);
+          this.scheduleNoteMetadataSync(file, 2500, "save");
           return;
         }
         this.scheduleNoteSync(file);
+        this.scheduleNoteMetadataSync(file, 1200, "save");
       })
     );
   }
@@ -4684,6 +4884,7 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         void this.syncPdfSidebarForFile(file);
         this.updatePreviewScrollHandler();
+        this.scheduleNoteMetadataSync(file, 600, "open");
       })
     );
   }
@@ -5363,6 +5564,22 @@ export default class ZoteroRagPlugin extends Plugin {
     this.noteSyncTimers.set(file.path, handle);
   }
 
+  private scheduleNoteMetadataSync(
+    file: TFile,
+    delayMs = 1200,
+    reason: "open" | "save" = "save"
+  ): void {
+    const existing = this.noteMetadataSyncTimers.get(file.path);
+    if (existing !== undefined) {
+      window.clearTimeout(existing);
+    }
+    const handle = window.setTimeout(() => {
+      this.noteMetadataSyncTimers.delete(file.path);
+      void this.syncNoteMetadataWithZotero(file, reason);
+    }, delayMs);
+    this.noteMetadataSyncTimers.set(file.path, handle);
+  }
+
   private escapeRegExp(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
@@ -5557,6 +5774,454 @@ export default class ZoteroRagPlugin extends Plugin {
         this.scheduleNoteSync(file, 400);
       }
     }
+  }
+
+  private async syncNoteMetadataWithZotero(
+    file: TFile,
+    reason: "open" | "save"
+  ): Promise<void> {
+    if (this.noteMetadataSyncInFlight.has(file.path)) {
+      this.noteMetadataSyncPending.add(file.path);
+      return;
+    }
+    if (this.noteMetadataSyncSuppressed.has(file.path)) {
+      this.scheduleNoteMetadataSync(file, 2000, reason);
+      return;
+    }
+    this.noteMetadataSyncInFlight.add(file.path);
+    try {
+      const content = await this.app.vault.read(file);
+      const docId = await this.resolveDocIdForNote(file, content);
+      if (!docId) {
+        return;
+      }
+      const frontmatter =
+        this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+      const itemKey = this.resolveZoteroItemKey(frontmatter, docId);
+      if (!itemKey) {
+        return;
+      }
+
+      const zoteroItem = await this.fetchZoteroItem(itemKey);
+      const zoteroValues = zoteroItem?.data ?? zoteroItem;
+      if (!zoteroValues || typeof zoteroValues !== "object") {
+        return;
+      }
+
+      const noteFields = this.extractNoteMetadata(frontmatter);
+      const zoteroFields = this.extractZoteroMetadata(zoteroValues);
+      const noteUpdates: Partial<NoteMetadataFields> = {};
+      const zoteroUpdates: Partial<NoteMetadataFields> = {};
+
+      const fieldOrder: Array<keyof NoteMetadataFields> = [
+        "title",
+        "short_title",
+        "date",
+        "abstract",
+        "tags",
+        "authors",
+        "editors",
+      ];
+
+      for (const field of fieldOrder) {
+        const noteValue = noteFields[field];
+        const zoteroValue = zoteroFields[field];
+        if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
+          continue;
+        }
+        const decision = await this.promptMetadataDecision(field, noteValue, zoteroValue);
+        if (decision === "note") {
+          this.assignMetadataUpdate(zoteroUpdates, field, noteValue);
+        } else if (decision === "zotero") {
+          this.assignMetadataUpdate(noteUpdates, field, zoteroValue);
+        }
+      }
+
+      if (Object.keys(noteUpdates).length > 0) {
+        await this.applyNoteMetadataUpdates(file, noteUpdates);
+      }
+      if (Object.keys(zoteroUpdates).length > 0) {
+        await this.applyZoteroMetadataUpdates(
+          itemKey,
+          zoteroValues,
+          noteFields,
+          zoteroFields,
+          zoteroUpdates
+        );
+      }
+    } catch (error) {
+      console.warn("Failed to sync note metadata with Zotero", error);
+    } finally {
+      this.noteMetadataSyncInFlight.delete(file.path);
+      if (this.noteMetadataSyncPending.delete(file.path)) {
+        this.scheduleNoteMetadataSync(file, 500, reason);
+      }
+    }
+  }
+
+  private resolveZoteroItemKey(frontmatter: Record<string, any>, docId: string): string {
+    const candidates = [
+      frontmatter?.zotero_key,
+      frontmatter?.zoteroKey,
+      frontmatter?.item_key,
+      frontmatter?.itemKey,
+      docId,
+    ];
+    for (const candidate of candidates) {
+      const resolved = this.coerceString(candidate);
+      if (resolved) {
+        return resolved;
+      }
+    }
+    return "";
+  }
+
+  private extractNoteMetadata(frontmatter: Record<string, any>): NoteMetadataFields {
+    const title = this.normalizeMetadataString(frontmatter?.title);
+    const shortTitle = this.normalizeMetadataString(
+      frontmatter?.short_title ?? frontmatter?.shortTitle ?? frontmatter?.["title-short"]
+    );
+    const date = this.normalizeMetadataString(frontmatter?.date);
+    const abstractNote = this.normalizeMetadataString(
+      frontmatter?.abstract ?? frontmatter?.abstractNote
+    );
+    const tagsRaw = this.normalizeMetadataList(frontmatter?.tags);
+    const authors = this.normalizeMetadataList(frontmatter?.authors);
+    const editors = this.normalizeMetadataList(frontmatter?.editors);
+
+    return {
+      title,
+      short_title: shortTitle,
+      date,
+      abstract: abstractNote,
+      tags: this.sanitizeObsidianTags(tagsRaw),
+      authors,
+      editors,
+    };
+  }
+
+  private extractZoteroMetadata(values: ZoteroItemValues): NoteMetadataFields {
+    const title = this.normalizeMetadataString(values?.title);
+    const shortTitle = this.normalizeMetadataString(this.extractShortTitleFromValues(values));
+    const date = this.normalizeMetadataString(values?.date);
+    const abstractNote = this.normalizeMetadataString(values?.abstractNote);
+    const creators = Array.isArray(values?.creators) ? values.creators : [];
+    const authors = creators
+      .filter((creator) => creator?.creatorType === "author")
+      .map((creator) => this.formatCreatorName(creator))
+      .filter(Boolean);
+    const editors = creators
+      .filter(
+        (creator) =>
+          creator?.creatorType === "editor" || creator?.creatorType === "seriesEditor"
+      )
+      .map((creator) => this.formatCreatorName(creator))
+      .filter(Boolean);
+    const tagsRaw = Array.isArray(values?.tags)
+      ? values.tags
+          .map((tag: any) => (typeof tag === "string" ? tag : tag?.tag))
+          .filter((tag: any) => typeof tag === "string")
+      : [];
+
+    return {
+      title,
+      short_title: shortTitle,
+      date,
+      abstract: abstractNote,
+      tags: this.sanitizeObsidianTags(tagsRaw),
+      authors: this.normalizeMetadataList(authors),
+      editors: this.normalizeMetadataList(editors),
+    };
+  }
+
+  private normalizeMetadataString(value: unknown): string {
+    if (typeof value === "string") {
+      return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+    return "";
+  }
+
+  private normalizeMetadataList(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value
+        .map((entry) => this.normalizeMetadataString(entry))
+        .filter((entry) => entry.length > 0);
+    }
+    if (typeof value === "string") {
+      return value
+        .split(/[,;\n]+/)
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+    }
+    return [];
+  }
+
+  private coerceMetadataStringValue(value: string | string[]): string {
+    if (Array.isArray(value)) {
+      return value.join("; ").trim();
+    }
+    return this.normalizeMetadataString(value);
+  }
+
+  private assignMetadataUpdate(
+    target: Partial<NoteMetadataFields>,
+    field: keyof NoteMetadataFields,
+    value: string | string[]
+  ): void {
+    if (field === "tags" || field === "authors" || field === "editors") {
+      target[field] = Array.isArray(value) ? value : this.normalizeMetadataList(value);
+      return;
+    }
+    target[field] = this.coerceMetadataStringValue(value);
+  }
+
+  private metadataValuesEqual(
+    field: keyof NoteMetadataFields,
+    noteValue: string | string[],
+    zoteroValue: string | string[]
+  ): boolean {
+    if (Array.isArray(noteValue) || Array.isArray(zoteroValue)) {
+      const left = Array.isArray(noteValue) ? noteValue : this.normalizeMetadataList(noteValue);
+      const right = Array.isArray(zoteroValue) ? zoteroValue : this.normalizeMetadataList(zoteroValue);
+      const unordered = field === "tags";
+      return this.compareMetadataLists(left, right, unordered);
+    }
+    return this.normalizeMetadataString(noteValue) === this.normalizeMetadataString(zoteroValue);
+  }
+
+  private compareMetadataLists(left: string[], right: string[], unordered: boolean): boolean {
+    const normalize = (value: string): string =>
+      value.replace(/\s+/g, " ").trim();
+    const leftNorm = left.map(normalize).filter(Boolean);
+    const rightNorm = right.map(normalize).filter(Boolean);
+    if (unordered) {
+      leftNorm.sort();
+      rightNorm.sort();
+    }
+    if (leftNorm.length !== rightNorm.length) {
+      return false;
+    }
+    for (let i = 0; i < leftNorm.length; i += 1) {
+      if (leftNorm[i] !== rightNorm[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private isMetadataValueEmpty(value: string | string[]): boolean {
+    if (Array.isArray(value)) {
+      return value.length === 0;
+    }
+    return this.normalizeMetadataString(value).length === 0;
+  }
+
+  private formatMetadataValue(value: string | string[]): string {
+    if (Array.isArray(value)) {
+      return value.join("\n");
+    }
+    return this.normalizeMetadataString(value);
+  }
+
+  private async promptMetadataDecision(
+    field: keyof NoteMetadataFields,
+    noteValue: string | string[],
+    zoteroValue: string | string[]
+  ): Promise<MetadataDecision> {
+    const fieldLabels: Record<keyof NoteMetadataFields, string> = {
+      title: "Title",
+      short_title: "Short title",
+      date: "Date",
+      abstract: "Abstract",
+      tags: "Tags",
+      authors: "Authors",
+      editors: "Editors",
+    };
+    const noteEmpty = this.isMetadataValueEmpty(noteValue);
+    const zoteroEmpty = this.isMetadataValueEmpty(zoteroValue);
+    let noteLabel = "Keep note";
+    let zoteroLabel = "Keep Zotero";
+    if (noteEmpty && !zoteroEmpty) {
+      noteLabel = "Delete in Zotero";
+      zoteroLabel = "Use Zotero value";
+    } else if (!noteEmpty && zoteroEmpty) {
+      noteLabel = "Update Zotero from note";
+      zoteroLabel = "Clear note";
+    }
+    return new Promise((resolve) => {
+      new MetadataConflictModal(
+        this.app,
+        fieldLabels[field],
+        noteLabel,
+        zoteroLabel,
+        this.formatMetadataValue(noteValue),
+        this.formatMetadataValue(zoteroValue),
+        resolve
+      ).open();
+    });
+  }
+
+  private async applyNoteMetadataUpdates(
+    file: TFile,
+    updates: Partial<NoteMetadataFields>
+  ): Promise<void> {
+    if (!Object.keys(updates).length) {
+      return;
+    }
+    const notePath = file.path;
+    this.noteSyncSuppressed.add(notePath);
+    this.noteMetadataSyncSuppressed.add(notePath);
+    try {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        if ("title" in updates) {
+          frontmatter.title = updates.title ?? "";
+        }
+        if ("short_title" in updates) {
+          frontmatter.short_title = updates.short_title ?? "";
+        }
+        if ("date" in updates) {
+          frontmatter.date = updates.date ?? "";
+        }
+        if ("abstract" in updates) {
+          frontmatter.abstract = updates.abstract ?? "";
+        }
+        if ("tags" in updates) {
+          frontmatter.tags = Array.isArray(updates.tags) ? updates.tags : [];
+        }
+        if ("authors" in updates) {
+          frontmatter.authors = Array.isArray(updates.authors) ? updates.authors : [];
+        }
+        if ("editors" in updates) {
+          frontmatter.editors = Array.isArray(updates.editors) ? updates.editors : [];
+        }
+      });
+    } catch (error) {
+      console.warn("Failed to update note frontmatter from Zotero", error);
+    } finally {
+      window.setTimeout(() => {
+        this.noteSyncSuppressed.delete(notePath);
+        this.noteMetadataSyncSuppressed.delete(notePath);
+      }, 1500);
+    }
+  }
+
+  private async applyZoteroMetadataUpdates(
+    itemKey: string,
+    values: ZoteroItemValues,
+    noteFields: NoteMetadataFields,
+    zoteroFields: NoteMetadataFields,
+    updates: Partial<NoteMetadataFields>
+  ): Promise<void> {
+    if (!Object.keys(updates).length) {
+      return;
+    }
+    const payload: Partial<ZoteroItemValues> = {};
+    if ("title" in updates) {
+      payload.title = updates.title ?? "";
+    }
+    if ("short_title" in updates) {
+      payload.shortTitle = updates.short_title ?? "";
+    }
+    if ("date" in updates) {
+      payload.date = updates.date ?? "";
+    }
+    if ("abstract" in updates) {
+      payload.abstractNote = updates.abstract ?? "";
+    }
+    if ("tags" in updates) {
+      payload.tags = this.buildZoteroTags(noteFields.tags, values?.tags);
+    }
+    if ("authors" in updates || "editors" in updates) {
+      const targetAuthors = "authors" in updates ? noteFields.authors : zoteroFields.authors;
+      const targetEditors = "editors" in updates ? noteFields.editors : zoteroFields.editors;
+      payload.creators = this.buildZoteroCreators(
+        targetAuthors,
+        targetEditors,
+        Array.isArray(values?.creators) ? values.creators : []
+      );
+    }
+    await this.updateZoteroItemFields(itemKey, values, payload);
+  }
+
+  private buildZoteroTags(noteTags: string[], existingTags: unknown): Array<Record<string, any>> {
+    const sanitized = this.sanitizeObsidianTags(noteTags);
+    const unique = Array.from(new Set(sanitized));
+    const manual = unique.map((tag) => ({ tag, type: 0 }));
+    const manualSet = new Set(unique);
+    const preserved = Array.isArray(existingTags)
+      ? existingTags
+          .filter((tag) => tag && typeof tag === "object" && Number(tag.type) === 1)
+          .filter((tag) => typeof tag.tag === "string")
+      : [];
+    const preservedUnique = preserved.filter((tag: any) => !manualSet.has(String(tag.tag)));
+    return [...manual, ...preservedUnique];
+  }
+
+  private buildZoteroCreators(
+    authors: string[],
+    editors: string[],
+    existingCreators: any[]
+  ): Array<Record<string, any>> {
+    const normalizedEditors = new Map<string, string>();
+    for (const creator of existingCreators) {
+      if (
+        creator?.creatorType !== "editor" &&
+        creator?.creatorType !== "seriesEditor"
+      ) {
+        continue;
+      }
+      const name = this.formatCreatorName(creator);
+      if (name) {
+        normalizedEditors.set(name.trim().toLowerCase(), creator.creatorType);
+      }
+    }
+    const otherCreators = existingCreators.filter(
+      (creator) =>
+        creator?.creatorType !== "author" &&
+        creator?.creatorType !== "editor" &&
+        creator?.creatorType !== "seriesEditor"
+    );
+    const authorCreators = authors
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .map((name) => ({
+        creatorType: "author",
+        ...this.parseCreatorName(name),
+      }));
+    const editorCreators = editors
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .map((name) => ({
+        creatorType: normalizedEditors.get(name.trim().toLowerCase()) ?? "editor",
+        ...this.parseCreatorName(name),
+      }));
+    return [...authorCreators, ...editorCreators, ...otherCreators];
+  }
+
+  private parseCreatorName(name: string): Record<string, string> {
+    const trimmed = String(name || "").trim();
+    if (!trimmed) {
+      return { name: "" };
+    }
+    if (trimmed.includes(",")) {
+      const [last, first] = trimmed.split(",", 2).map((part) => part.trim());
+      if (last && first) {
+        return { firstName: first, lastName: last };
+      }
+      if (last) {
+        return { lastName: last };
+      }
+    }
+    const parts = trimmed.split(/\s+/).filter(Boolean);
+    if (parts.length === 1) {
+      return { name: trimmed };
+    }
+    const lastName = parts.pop() ?? "";
+    const firstName = parts.join(" ").trim();
+    return { firstName, lastName };
   }
 
   private extractSyncSection(content: string): string | null {

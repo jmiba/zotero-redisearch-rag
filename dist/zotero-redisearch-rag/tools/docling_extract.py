@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import atexit
 import base64
 import errno
 import hashlib
@@ -219,7 +220,9 @@ class DoclingProcessingConfig:
     paddle_vl_api_disable: bool = False
     paddle_vl_api_url: Optional[str] = None
     paddle_vl_api_token: Optional[str] = None
-    paddle_vl_api_timeout_sec: int = 120
+    paddle_vl_api_timeout_sec: int = 600
+    paddle_vl_api_max_pages: int = 100
+    paddle_vl_api_max_chunk_bytes: int = 2000000
     paddle_vl_markdown_ignore_labels: Optional[Sequence[str]] = field(
         default_factory=lambda: ["header","header_image","footer","footer_image","number","aside_text"]
     )
@@ -231,7 +234,7 @@ class DoclingProcessingConfig:
     paddle_structure_api_disable: bool = False
     paddle_structure_api_url: Optional[str] = None
     paddle_structure_api_token: Optional[str] = None
-    paddle_structure_api_timeout_sec: int = 120
+    paddle_structure_api_timeout_sec: int = 600
     # Optional Hunspell integration
     enable_hunspell: bool = True
     hunspell_aff_path: Optional[str] = None
@@ -3759,11 +3762,20 @@ def run_external_ocr_pages(
     effective_dpi = dpi or config.ocr_dpi
     helpers = _external_ocr_helpers()
     helpers["ocr_source_path"] = pdf_path
+    helpers["boilerplate_prepass_enabled"] = bool(config.enable_boilerplate_removal)
     if progress_cb and progress_span > 0:
         label = "Paddle OCR" if engine == "paddle" else "Tesseract OCR"
         # Use a neutral initializing message; inner routines will promptly override with page counters
         progress_cb(progress_base, "ocr", f"{label} initializing")
+    def _paddle_vl_api_enabled() -> bool:
+        if bool(getattr(config, "paddle_vl_api_disable", False)):
+            return False
+        api_url = getattr(config, "paddle_vl_api_url", None) or os.getenv("PADDLE_VL_API_URL")
+        api_token = getattr(config, "paddle_vl_api_token", None) or os.getenv("PADDLE_VL_API_TOKEN")
+        return bool(api_url and api_token)
     if engine == "paddle" and config.paddle_use_vl:
+        if _paddle_vl_api_enabled():
+            helpers["boilerplate_prepass_enabled"] = False
         LOGGER.info(
             "External OCR starting: engine=%s (PaddleOCR-VL), dpi=%d",
             engine,
@@ -3839,6 +3851,7 @@ def run_external_ocr_pages(
                     LOGGER.warning(
                         "PaddleOCR-VL returned empty text; falling back to PaddleOCR."
                     )
+                    helpers["boilerplate_prepass_enabled"] = bool(config.enable_boilerplate_removal)
                     return ocr_pages_with_paddle(
                         images,
                         normalize_languages_for_engine(languages, engine),
@@ -3851,6 +3864,7 @@ def run_external_ocr_pages(
                 return pages, stats
             except Exception as exc:
                 LOGGER.warning("PaddleOCR-VL failed; falling back to PaddleOCR: %s", exc)
+                helpers["boilerplate_prepass_enabled"] = bool(config.enable_boilerplate_removal)
         if config.paddle_use_structure_v3:
             try:
                 pages, stats = ocr_pages_with_paddle_structure(
@@ -4923,7 +4937,16 @@ def main() -> int:
         parser.print_help()
         return 2
 
-    logging.basicConfig(level=logging.INFO)
+    doc_label = os.path.basename(args.pdf) if args.pdf else "-"
+    record_factory = logging.getLogRecordFactory()
+    def _record_factory(*factory_args, **factory_kwargs):
+        record = record_factory(*factory_args, **factory_kwargs)
+        if not hasattr(record, "doc_name"):
+            record.doc_name = doc_label
+        return record
+    logging.setLogRecordFactory(_record_factory)
+    log_format = "%(asctime)sZ %(levelname)s [pid=%(process)d doc=%(doc_name)s] %(name)s: %(message)s"
+    logging.basicConfig(level=logging.INFO, format=log_format)
     # Ensure Docling's internal modules emit INFO logs so the CLI log file captures
     # each pipeline stage (external OCR, layout, etc.).
     for logger_name in [
@@ -4936,17 +4959,49 @@ def main() -> int:
         "ocr_paddle",
     ]:
         logging.getLogger(logger_name).setLevel(logging.INFO)
+    class _PypdfCmapWarningFilter(logging.Filter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.suppressed = 0
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.name == "pypdf._cmap":
+                message = record.getMessage()
+                if "Skipping broken line" in message and "Odd-length string" in message:
+                    self.suppressed += 1
+                    return False
+            return True
+
+    cmap_filter = _PypdfCmapWarningFilter()
+    logging.getLogger("pypdf._cmap").addFilter(cmap_filter)
+
+    def _log_cmap_summary() -> None:
+        if cmap_filter.suppressed:
+            LOGGER.warning(
+                "Suppressed %d pypdf CMap warnings (Odd-length string).",
+                cmap_filter.suppressed,
+            )
+
+    atexit.register(_log_cmap_summary)
     # If a log file was requested, add a file handler
     if args.log_file:
         try:
             fh = logging.FileHandler(args.log_file, encoding="utf-8")
             fh.setLevel(logging.INFO)
-            formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            formatter = logging.Formatter(log_format)
+            formatter.converter = time.gmtime
             fh.setFormatter(formatter)
             logging.getLogger().addHandler(fh)
             LOGGER.info("Logging to file: %s", args.log_file)
         except Exception as exc:
             eprint(f"Failed to set up log file {args.log_file}: {exc}")
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        formatter = handler.formatter
+        if formatter is None:
+            formatter = logging.Formatter(log_format)
+            handler.setFormatter(formatter)
+        formatter.converter = time.gmtime
 
     def _resolve_config_path() -> Optional[str]:
         if args.config_json:

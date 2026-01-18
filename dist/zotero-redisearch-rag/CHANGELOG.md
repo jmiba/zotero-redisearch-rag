@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.4
+
+- Added bidirectional YAML ↔ Zotero metadata sync (title, short title, date, abstract, tags, authors, editors) with per-field conflict prompts.
+- Chat messages can now be copied or deleted individually (icon buttons).
+- Docling logs now use UTC timestamps and include PID/doc context; noisy pypdf CMap warnings are summarized at end-of-run.
+- Docling log file is cleared before each import.
+- PaddleOCR-VL API retries now auto-split on 500 errors while honoring payload limits.
+- Added support for context snippets in `index_redisearch.py`, allowing neighboring chunks to be included in embeddings.
+- Introduced new command-line arguments for configuring context window size and character limits.
+- Implemented functions to truncate context text and build context strings for better embedding context.
+- Enhanced the main embedding logic to utilize the new context features.
+- In `rag_query_redisearch.py`, added query expansion functionality to generate alternative queries.
+- Implemented reranking of candidates based on a specified model, with options for maximum character limits.
+- Improved retrieval logic to support broadening of search results based on metrics.
+- Retrieval now supports configurable RRF blending and optional logging of top ranked chunks for tuning.
+- Retrieval can now cap the number of chunks returned per document to improve diversity.
+- Updated output structure to include expanded queries and reranking information.
+
+
 ## 0.4.3
 
 - Implemented chunking of large pdfs to enable full pocessing via the PaddleOCR API.

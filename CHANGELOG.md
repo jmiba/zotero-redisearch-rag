@@ -2,6 +2,11 @@
 
 ## 0.4.4
 
+- Added bidirectional YAML ↔ Zotero metadata sync (title, short title, date, abstract, tags, authors, editors) with per-field conflict prompts.
+- Chat messages can now be copied or deleted individually (icon buttons).
+- Docling logs now use UTC timestamps and include PID/doc context; noisy pypdf CMap warnings are summarized at end-of-run.
+- Docling log file is cleared before each import.
+- PaddleOCR-VL API retries now auto-split on 500 errors while honoring payload limits.
 - Added support for context snippets in `index_redisearch.py`, allowing neighboring chunks to be included in embeddings.
 - Introduced new command-line arguments for configuring context window size and character limits.
 - Implemented functions to truncate context text and build context strings for better embedding context.

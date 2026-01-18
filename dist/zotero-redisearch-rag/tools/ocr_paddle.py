@@ -15,6 +15,28 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 LOGGER = logging.getLogger("docling_extract")
 
 _INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)")
+_CURRENCY_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?%?$")
+_CURRENCY_DECIMAL_RE = re.compile(r"^[+-]?\d+[.,]\d+%?$")
+_CURRENCY_CODES = {
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "CNY",
+    "RMB",
+    "AUD",
+    "CAD",
+    "CHF",
+    "HKD",
+    "NZD",
+    "SEK",
+    "NOK",
+    "DKK",
+    "INR",
+    "KRW",
+    "BRL",
+    "MXN",
+}
 _FRACTION_MAP: Dict[Tuple[int, int], str] = {
     (1, 2): "½",
     (1, 3): "⅓",
@@ -80,6 +102,25 @@ def _normalize_footnote_definition_line(line: str) -> Optional[str]:
     return f"[^{marker}]:"
 
 
+def _looks_like_currency(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if re.search(r"[\\^_{}=<>\[\]]", stripped):
+        return False
+    if re.search(r"[*/]", stripped):
+        return False
+    if re.search(r"[+\-]", stripped) and not re.fullmatch(r"[+-]?\d+(?:[.,]\d+)?%?", stripped):
+        return False
+    letters = re.findall(r"[A-Za-z]+", stripped)
+    if letters:
+        if re.search(r"\d", stripped):
+            codes = {letter.upper() for letter in letters}
+            return all(code in _CURRENCY_CODES for code in codes)
+        return False
+    return bool(_CURRENCY_THOUSANDS_RE.fullmatch(stripped) or _CURRENCY_DECIMAL_RE.fullmatch(stripped))
+
+
 def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool = False) -> str:
     if not markdown:
         return markdown
@@ -97,7 +138,9 @@ def _normalize_inline_math_for_obsidian(markdown: str, add_footnote_defs: bool =
         fraction = _replace_simple_fraction(normalized)
         if fraction:
             return fraction
-        return f"$$ {normalized} $$"
+        if _looks_like_currency(normalized):
+            return f"\\${normalized}\\$"
+        return f"${normalized}$"
 
     updated = _INLINE_MATH_RE.sub(_replace, markdown)
     lines = updated.splitlines()
@@ -1519,20 +1562,38 @@ def ocr_pages_with_paddle_vl(
 
     api_disabled = bool(getattr(config, "paddle_vl_api_disable", False))
     if api_url and api_token and not api_disabled:
-        api_max_pages = 100
+        api_max_pages = int(getattr(config, "paddle_vl_api_max_pages", 100) or 100)
+        if api_max_pages <= 0:
+            api_max_pages = 100
+        api_max_chunk_bytes = int(getattr(config, "paddle_vl_api_max_chunk_bytes", 0) or 0)
+        if api_max_chunk_bytes <= 0:
+            try:
+                env_value = os.getenv("PADDLE_VL_API_MAX_CHUNK_BYTES", "")
+                if env_value:
+                    api_max_chunk_bytes = int(env_value)
+            except Exception:
+                api_max_chunk_bytes = 0
         api_images = list(images) if images else []
         source_page_count = None
         source_reader = None
+        PdfWriter = None
         if isinstance(source_path, str) and source_path.lower().endswith(".pdf") and os.path.isfile(source_path):
             try:
-                from pypdf import PdfReader  # type: ignore
+                from pypdf import PdfReader, PdfWriter  # type: ignore
                 source_reader = PdfReader(source_path)
                 source_page_count = len(source_reader.pages)
             except Exception:
                 source_page_count = None
                 source_reader = None
+                PdfWriter = None
         original_count = source_page_count if source_page_count else (len(api_images) if api_images else None)
-        if original_count and original_count > api_max_pages:
+        if api_max_chunk_bytes > 0:
+            LOGGER.info(
+                "PaddleOCR-VL API payload cap: %d bytes (max pages per chunk: %d).",
+                api_max_chunk_bytes,
+                api_max_pages,
+            )
+        elif original_count and original_count > api_max_pages:
             LOGGER.info(
                 "PaddleOCR-VL API batch size %d; splitting %d pages into chunks.",
                 api_max_pages,
@@ -1597,6 +1658,23 @@ def ocr_pages_with_paddle_vl(
             text = re.sub(r"!\[[^\]]*]\([^)]+\)", " ", text)
             text = re.sub(r"\s+", " ", text)
             return text.strip()
+
+        def _estimate_payload_bytes(file_bytes: bytes) -> int:
+            if not file_bytes:
+                return 0
+            b64_len = 4 * ((len(file_bytes) + 2) // 3)
+            return b64_len + 200
+
+        def _build_pdf_bytes(page_list: Sequence[Any]) -> bytes:
+            if PdfWriter is None:
+                raise RuntimeError("PDF chunking requires pypdf.")
+            writer = PdfWriter()
+            for page in page_list:
+                writer.add_page(page)
+            buffer = io.BytesIO()
+            writer.write(buffer)
+            buffer.seek(0)
+            return buffer.read()
 
         def _build_payload(file_bytes: bytes, file_type: int) -> Dict[str, Any]:
             payload: Dict[str, Any] = {
@@ -1875,6 +1953,16 @@ def ocr_pages_with_paddle_vl(
                 return True
             message = str(exc).lower()
             return "timed out" in message or "timeout" in message
+
+        def _is_http_500_error(exc: Exception) -> bool:
+            message = str(exc).lower()
+            if "status=500" in message:
+                return True
+            if "errorcode\":500" in message or "errorcode':500" in message:
+                return True
+            if "internal server error" in message:
+                return True
+            return False
 
         def _request_api(file_bytes: bytes, file_type: int, label: str) -> Dict[str, Any]:
             payload = _build_payload(file_bytes, file_type)
@@ -2321,71 +2409,143 @@ def ocr_pages_with_paddle_vl(
         if isinstance(source_path, str) and os.path.isfile(source_path):
             file_type = 0 if source_path.lower().endswith(".pdf") else 1
             chunked = False
-            if (
-                file_type == 0
-                and source_page_count
-                and source_page_count > api_max_pages
-                and source_reader is not None
-            ):
-                try:
-                    from pypdf import PdfWriter  # type: ignore
-                except Exception as exc:
-                    LOGGER.warning("Failed to load pypdf for PDF chunking: %s", exc)
-                    source_reader = None
-                if source_reader is not None:
-                    total_pages = source_page_count
-                    start = 0
-                    while start < total_pages:
-                        end = min(start + api_max_pages, total_pages)
-                        writer = PdfWriter()
-                        for page_idx in range(start, end):
-                            try:
-                                writer.add_page(source_reader.pages[page_idx])
-                            except Exception:
-                                continue
-                        buffer = io.BytesIO()
-                        writer.write(buffer)
-                        buffer.seek(0)
-                        label = f"{os.path.basename(source_path)} p{start + 1}-{end}"
-                        data = _request_api(buffer.getvalue(), file_type, label)
-                        layout_results = _extract_layout_results(data)
-                        if not layout_results and api_images:
+            needs_chunking = file_type == 0 and (
+                api_max_chunk_bytes > 0
+                or (source_page_count and source_page_count > api_max_pages)
+            )
+            if needs_chunking and source_reader is not None:
+                total_pages = source_page_count or len(source_reader.pages)
+                start = 0
+                processed_any = False
+
+                def _process_pdf_chunk(page_start: int, page_list: Sequence[Any]) -> None:
+                    if not page_list:
+                        return
+                    chunk_len = len(page_list)
+                    label = f"{os.path.basename(source_path)} p{page_start + 1}-{page_start + chunk_len}"
+                    try:
+                        file_bytes = _build_pdf_bytes(page_list)
+                    except Exception as exc:
+                        LOGGER.warning("Failed to build PDF chunk: %s", exc)
+                        if api_images:
+                            image_slice = api_images[page_start : page_start + chunk_len]
+                            _run_api_for_images(image_slice, total_pages, page_start)
+                        return
+                    try:
+                        data = _request_api(file_bytes, file_type, label)
+                    except Exception as exc:
+                        if _is_http_500_error(exc) and chunk_len > 1:
+                            mid = chunk_len // 2
                             LOGGER.warning(
-                                "PaddleOCR-VL API returned no layout results for pages %d-%d; retrying per-page images.",
-                                start + 1,
-                                end,
+                                "PaddleOCR-VL API 500 for pages %d-%d; splitting and retrying.",
+                                page_start + 1,
+                                page_start + chunk_len,
                             )
-                            image_slice = api_images[start:end]
-                            _run_api_for_images(image_slice, total_pages, start)
-                        else:
-                            for entry in layout_results:
-                                _append_page(entry)
-                                if progress_cb and progress_span > 0:
-                                    percent = progress_base + int(page_counter / total_pages * progress_span)
-                                    progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
-                            if not layout_results:
-                                for _ in range(max(1, end - start)):
-                                    _append_page({})
-                        start = end
-                    chunked = True
+                            _process_pdf_chunk(page_start, page_list[:mid])
+                            _process_pdf_chunk(page_start + mid, page_list[mid:])
+                            return
+                        if _is_http_500_error(exc) and api_images:
+                            LOGGER.warning(
+                                "PaddleOCR-VL API 500 for pages %d-%d; retrying per-page images.",
+                                page_start + 1,
+                                page_start + chunk_len,
+                            )
+                            image_slice = api_images[page_start : page_start + chunk_len]
+                            _run_api_for_images(image_slice, total_pages, page_start)
+                            return
+                        raise
+                    layout_results = _extract_layout_results(data)
+                    if not layout_results and api_images:
+                        LOGGER.warning(
+                            "PaddleOCR-VL API returned no layout results for pages %d-%d; retrying per-page images.",
+                            page_start + 1,
+                            page_start + chunk_len,
+                        )
+                        image_slice = api_images[page_start : page_start + chunk_len]
+                        _run_api_for_images(image_slice, total_pages, page_start)
+                    else:
+                        for entry in layout_results:
+                            _append_page(entry)
+                            if progress_cb and progress_span > 0:
+                                percent = progress_base + int(page_counter / total_pages * progress_span)
+                                progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
+                        if not layout_results:
+                            for _ in range(max(1, chunk_len)):
+                                _append_page({})
+
+                while start < total_pages:
+                    chunk_pages: List[Any] = []
+                    chunk_bytes = b""
+                    page_idx = start
+                    while page_idx < total_pages and len(chunk_pages) < api_max_pages:
+                        chunk_pages.append(source_reader.pages[page_idx])
+                        page_idx += 1
+                        if api_max_chunk_bytes > 0:
+                            try:
+                                chunk_bytes = _build_pdf_bytes(chunk_pages)
+                            except Exception as exc:
+                                LOGGER.warning("Failed to build PDF chunk: %s", exc)
+                                chunk_pages.pop()
+                                break
+                            if _estimate_payload_bytes(chunk_bytes) > api_max_chunk_bytes:
+                                if len(chunk_pages) == 1:
+                                    LOGGER.warning(
+                                        "Single-page PDF chunk exceeds payload cap (%d bytes).",
+                                        api_max_chunk_bytes,
+                                    )
+                                else:
+                                    chunk_pages.pop()
+                                    try:
+                                        chunk_bytes = _build_pdf_bytes(chunk_pages)
+                                    except Exception as exc:
+                                        LOGGER.warning("Failed to build PDF chunk: %s", exc)
+                                        chunk_pages = []
+                                break
+                    if not chunk_pages:
+                        break
+                    if api_max_chunk_bytes <= 0:
+                        try:
+                            chunk_bytes = _build_pdf_bytes(chunk_pages)
+                        except Exception as exc:
+                            LOGGER.warning("Failed to build PDF chunk: %s", exc)
+                            break
+                    chunk_len = len(chunk_pages)
+                    _process_pdf_chunk(start, chunk_pages)
+                    processed_any = True
+                    start += chunk_len
+                if start < total_pages and api_images:
+                    LOGGER.warning(
+                        "PaddleOCR-VL API chunking incomplete; retrying remaining pages per-image.",
+                    )
+                    image_slice = api_images[start:total_pages]
+                    _run_api_for_images(image_slice, total_pages, start)
+                    processed_any = True
+                    start = total_pages
+                chunked = processed_any and start >= total_pages
             if not chunked:
-                with open(source_path, "rb") as handle:
-                    file_bytes = handle.read()
-                data = _request_api(file_bytes, file_type, os.path.basename(source_path))
-                layout_results = _extract_layout_results(data)
-                if not layout_results and file_type == 0 and api_images:
-                    LOGGER.warning("PaddleOCR-VL API returned no layout results for PDF; retrying per-page images.")
-                    _run_api_for_images(api_images, source_page_count)
+                if needs_chunking and file_type == 0 and api_images:
+                    LOGGER.warning(
+                        "PaddleOCR-VL API chunking unavailable; using per-page images instead.",
+                    )
+                    _run_api_for_images(api_images, source_page_count or len(api_images))
                 else:
-                    total_pages = len(layout_results) or max(1, len(api_images))
-                    for entry in layout_results:
-                        _append_page(entry)
-                        if progress_cb and progress_span > 0:
-                            percent = progress_base + int(page_counter / total_pages * progress_span)
-                            progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
-                    if not layout_results:
-                        for _ in range(max(1, len(api_images))):
-                            _append_page({})
+                    with open(source_path, "rb") as handle:
+                        file_bytes = handle.read()
+                    data = _request_api(file_bytes, file_type, os.path.basename(source_path))
+                    layout_results = _extract_layout_results(data)
+                    if not layout_results and file_type == 0 and api_images:
+                        LOGGER.warning("PaddleOCR-VL API returned no layout results for PDF; retrying per-page images.")
+                        _run_api_for_images(api_images, source_page_count)
+                    else:
+                        total_pages = len(layout_results) or max(1, len(api_images))
+                        for entry in layout_results:
+                            _append_page(entry)
+                            if progress_cb and progress_span > 0:
+                                percent = progress_base + int(page_counter / total_pages * progress_span)
+                                progress_cb(percent, "ocr", f"Paddle OCR-VL API page {page_counter}/{total_pages}")
+                        if not layout_results:
+                            for _ in range(max(1, len(api_images))):
+                                _append_page({})
         else:
             _run_api_for_images()
 
@@ -2878,13 +3038,19 @@ def ocr_pages_with_paddle(
     if progress_cb and progress_span > 0:
         progress_cb(progress_base, "ocr", f"Paddle OCR page 1/{total} (running)")
     total_pages = len(images)
+    boilerplate_enabled = bool(
+        config.enable_boilerplate_removal and helpers.get("boilerplate_prepass_enabled", True)
+    )
     repeat_threshold = 0
     repeated_clusters: List[Any] = []
     page_edge_candidates: List[List[str]] = []
+    source_path = helpers.get("ocr_source_path")
+    doc_label = os.path.basename(source_path) if isinstance(source_path, str) and source_path else ""
+    doc_suffix = f" ({doc_label})" if doc_label else ""
 
     for idx, image in enumerate(images, start=1):
-        if config.enable_boilerplate_removal:
-            LOGGER.info("Paddle OCR prepass %d/%d: start", idx, total_pages)
+        if boilerplate_enabled:
+            LOGGER.info("Paddle OCR prepass %d/%d%s: start", idx, total_pages, doc_suffix)
         t_start = time.perf_counter()
         edge_lines: List[Tuple[str, float]] = []
         result = None
@@ -2933,21 +3099,22 @@ def ocr_pages_with_paddle(
                 except Exception:
                     y0_val = 0.0
                 edge_lines.append((text_val, y0_val))
-        if config.enable_boilerplate_removal and edge_lines:
+        if boilerplate_enabled and edge_lines:
             page_edge_candidates.append(
                 select_edge_texts_by_y(edge_lines, config.boilerplate_edge_lines)
             )
-        if config.enable_boilerplate_removal:
+        if boilerplate_enabled:
             elapsed = time.perf_counter() - t_start
             LOGGER.info(
-                "Paddle OCR prepass %d/%d: done in %.2fs (edge_lines=%d)",
+                "Paddle OCR prepass %d/%d%s: done in %.2fs (edge_lines=%d)",
                 idx,
                 total_pages,
+                doc_suffix,
                 elapsed,
                 len(edge_lines),
             )
 
-    if config.enable_boilerplate_removal and total_pages >= config.boilerplate_min_pages:
+    if boilerplate_enabled and total_pages >= config.boilerplate_min_pages:
         repeated_clusters, repeat_threshold = detect_repeated_line_clusters(
             page_edge_candidates,
             total_pages,
@@ -2994,7 +3161,7 @@ def ocr_pages_with_paddle(
                     "line_id": len(blocks),
                 })
         edge_ids: Set[int] = set()
-        if config.enable_boilerplate_removal and blocks:
+        if boilerplate_enabled and blocks:
             edge_ids = edge_ids_by_y(
                 [(b["line_id"], b["y0"]) for b in blocks],
                 config.boilerplate_edge_lines,
@@ -3034,7 +3201,7 @@ def ocr_pages_with_paddle(
             percent = progress_base + int(idx / total * progress_span)
             progress_cb(percent, "ocr", f"Paddle OCR page {idx}/{total}")
 
-    if removed_total and config.enable_boilerplate_removal:
+    if removed_total and boilerplate_enabled:
         LOGGER.info(
             "Boilerplate removal (OCR lines): removed %s lines (repeat_threshold=%s, repeated_lines=%s)",
             removed_total,

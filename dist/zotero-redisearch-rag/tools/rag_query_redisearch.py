@@ -138,6 +138,134 @@ def request_chat_stream(
     return "".join(content_parts)
 
 
+def parse_json_list(raw: str) -> List[str]:
+    if not raw:
+        return []
+    text = raw.strip()
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        for key in ("queries", "expanded", "expansions", "items"):
+            if isinstance(data.get(key), list):
+                data = data.get(key)
+                break
+    if isinstance(data, list):
+        cleaned: List[str] = []
+        for item in data:
+            if isinstance(item, str):
+                value = item.strip()
+                if value:
+                    cleaned.append(value)
+        return cleaned
+    # Fallback: split lines or bullets
+    lines = [line.strip(" -\t") for line in text.splitlines()]
+    return [line for line in lines if line]
+
+
+def expand_query(
+    base_url: str,
+    api_key: str,
+    model: str,
+    query: str,
+    count: int,
+) -> List[str]:
+    if not base_url or not model or not query or count <= 0:
+        return []
+    system_prompt = (
+        "You expand search queries for retrieval. "
+        "Return only a JSON array of strings with concise alternative queries. "
+        "Do not include the original query."
+    )
+    user_prompt = (
+        f"Original query: {query}\n"
+        f"Return {count} expanded queries as a JSON array of strings."
+    )
+    try:
+        response = request_chat(base_url, api_key, model, 0.0, system_prompt, user_prompt)
+        expanded = parse_json_list(response)
+    except Exception as exc:
+        eprint(f"Query expansion failed: {exc}")
+        return []
+    cleaned: List[str] = []
+    seen: Set[str] = set()
+    for item in expanded:
+        value = item.strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen or key == query.lower():
+            continue
+        seen.add(key)
+        cleaned.append(value)
+        if len(cleaned) >= count:
+            break
+    return cleaned
+
+
+def load_reranker(model_name: str):
+    try:
+        from sentence_transformers import CrossEncoder  # type: ignore
+    except Exception as exc:
+        eprint(f"Reranker unavailable (sentence-transformers not installed): {exc}")
+        return None
+    try:
+        return CrossEncoder(model_name)
+    except Exception as exc:
+        eprint(f"Failed to load reranker model '{model_name}': {exc}")
+        return None
+
+
+def truncate_rerank_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return text
+    cleaned = text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    trimmed = cleaned[:max_chars]
+    last_space = trimmed.rfind(" ")
+    if last_space > 0:
+        trimmed = trimmed[:last_space]
+    return trimmed.rstrip() + "..."
+
+
+def rerank_candidates(
+    reranker,
+    query: str,
+    candidates: List[Dict[str, Any]],
+    max_chars: int,
+) -> List[Dict[str, Any]]:
+    if reranker is None:
+        return candidates
+    pairs: List[List[str]] = []
+    items: List[Dict[str, Any]] = []
+    for item in candidates:
+        text = str(item.get("text", "") or "").strip()
+        if not text:
+            continue
+        trimmed = truncate_rerank_text(text, max_chars)
+        pairs.append([query, trimmed])
+        items.append(item)
+    if not pairs:
+        return candidates
+    try:
+        scores = reranker.predict(pairs)
+    except Exception as exc:
+        eprint(f"Reranking failed: {exc}")
+        return candidates
+    scored: List[Tuple[float, int, Dict[str, Any]]] = []
+    for idx, item in enumerate(items):
+        try:
+            score = float(scores[idx])
+        except Exception:
+            score = 0.0
+        item["rerank_score"] = score
+        scored.append((score, idx, item))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [row[2] for row in scored]
+
+
 def decode_value(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="ignore")
@@ -401,6 +529,15 @@ def dedupe_by_chunk_id(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return deduped
 
 
+_MIN_CONTEXT_CHUNKS = 3
+_MIN_CONTEXT_CHARS = 1500
+_MAX_ACCEPTABLE_SCORE = 0.4
+_MIN_NARRATIVE_RATIO = 0.5
+_MIN_CONTENT_FOR_RATIO = 4
+_RERANK_MAX_CHARS_DEFAULT = 2000
+_RRF_K = 60
+
+
 def retrieve_chunks(
     client: redis.Redis,
     index: str,
@@ -408,8 +545,12 @@ def retrieve_chunks(
     k: int,
     keywords: List[str],
     strict: bool = True,
+    rrf_k: int = _RRF_K,
+    rrf_log_top: int = 0,
+    max_per_doc: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    retrieved = search_redis_knn(client, index, vec, k)
+    vector_results = search_redis_knn(client, index, vec, k)
+    retrieved = vector_results
 
     lexical_limit = max(k, 5)
     lexical_results = run_lexical_search(client, index, keywords, lexical_limit)
@@ -455,12 +596,12 @@ def retrieve_chunks(
             seen_ids.add(key)
 
     metrics = compute_retrieval_metrics(retrieved, filtered)
-    ordered = apply_tag_boosting(filtered, keywords)
-    if lexical_ids:
-        lexical_set = set(lexical_ids)
-        lexical_first = [item for item in ordered if chunk_key(item) in lexical_set]
-        rest = [item for item in ordered if chunk_key(item) not in lexical_set]
-        ordered = lexical_first + rest
+    rrf_scores = build_rrf_scores(vector_results, lexical_results, rrf_k=rrf_k)
+    ordered = order_by_rrf(filtered, rrf_scores)
+    if rrf_log_top > 0:
+        log_rrf_top(ordered, rrf_scores, rrf_log_top)
+    ordered = apply_tag_boosting(ordered, keywords)
+    ordered = apply_doc_cap(ordered, max_per_doc)
     return ordered, metrics
 
 
@@ -647,13 +788,6 @@ def is_short_query(query: str) -> bool:
     return len(tokens) <= 3
 
 
-_MIN_CONTEXT_CHUNKS = 3
-_MIN_CONTEXT_CHARS = 1500
-_MAX_ACCEPTABLE_SCORE = 0.4
-_MIN_NARRATIVE_RATIO = 0.5
-_MIN_CONTENT_FOR_RATIO = 4
-
-
 def should_broaden_retrieval(metrics: Dict[str, Any], k: int) -> Tuple[bool, List[str]]:
     reasons: List[str] = []
     min_chunks = min(_MIN_CONTEXT_CHUNKS, max(1, k))
@@ -671,6 +805,123 @@ def should_broaden_retrieval(metrics: Dict[str, Any], k: int) -> Tuple[bool, Lis
         if ratio < _MIN_NARRATIVE_RATIO:
             reasons.append("narrative_filtered")
     return bool(reasons), reasons
+
+
+def build_rrf_scores(
+    vector_results: Sequence[Dict[str, Any]],
+    lexical_results: Sequence[Dict[str, Any]],
+    rrf_k: int = _RRF_K,
+) -> Dict[str, float]:
+    rrf_k = max(1, int(rrf_k))
+    scores: Dict[str, float] = {}
+    for rank, item in enumerate(vector_results, start=1):
+        key = chunk_key(item)
+        if not key:
+            continue
+        scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
+    for rank, item in enumerate(lexical_results, start=1):
+        key = chunk_key(item)
+        if not key:
+            continue
+        scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
+    return scores
+
+
+def order_by_rrf(
+    candidates: List[Dict[str, Any]],
+    rrf_scores: Dict[str, float],
+) -> List[Dict[str, Any]]:
+    if not candidates or not rrf_scores:
+        return candidates
+    scored: List[Tuple[float, int, Dict[str, Any]]] = []
+    for idx, item in enumerate(candidates):
+        key = chunk_key(item)
+        score = rrf_scores.get(key, 0.0) if key else 0.0
+        scored.append((score, idx, item))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    return [row[2] for row in scored]
+
+
+def apply_doc_cap(
+    results: List[Dict[str, Any]],
+    max_per_doc: int,
+) -> List[Dict[str, Any]]:
+    if max_per_doc <= 0 or not results:
+        return results
+    capped: List[Dict[str, Any]] = []
+    counts: Dict[str, int] = {}
+    for item in results:
+        doc_id = str(item.get("doc_id", "") or "")
+        if not doc_id:
+            capped.append(item)
+            continue
+        count = counts.get(doc_id, 0)
+        if count >= max_per_doc:
+            continue
+        counts[doc_id] = count + 1
+        capped.append(item)
+    return capped
+
+
+def log_rrf_top(
+    ordered: Sequence[Dict[str, Any]],
+    rrf_scores: Dict[str, float],
+    top_n: int,
+) -> None:
+    if top_n <= 0 or not ordered:
+        return
+    limit = min(top_n, len(ordered))
+    eprint(f"RRF top {limit}:")
+    for idx, item in enumerate(ordered[:limit], start=1):
+        key = chunk_key(item)
+        score = rrf_scores.get(key, 0.0) if key else 0.0
+        doc_id = item.get("doc_id", "")
+        chunk_id = item.get("chunk_id", "")
+        vector_score = item.get("score", "")
+        eprint(
+            f"  {idx}. rrf={score:.6f} doc_id={doc_id} chunk_id={chunk_id} score={vector_score}"
+        )
+
+
+def retrieve_with_broadening(
+    client: redis.Redis,
+    index: str,
+    vec: bytes,
+    k: int,
+    keywords: List[str],
+    rrf_k: int = _RRF_K,
+    rrf_log_top: int = 0,
+    max_per_doc: int = 0,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    retrieved, metrics = retrieve_chunks(
+        client,
+        index,
+        vec,
+        k,
+        keywords,
+        strict=True,
+        rrf_k=rrf_k,
+        rrf_log_top=rrf_log_top,
+        max_per_doc=max_per_doc,
+    )
+    broaden, _ = should_broaden_retrieval(metrics, k)
+    if broaden:
+        fallback_k = max(k * 2, 12)
+        try:
+            retrieved, _ = retrieve_chunks(
+                client,
+                index,
+                vec,
+                fallback_k,
+                keywords,
+                strict=False,
+                rrf_k=rrf_k,
+                rrf_log_top=rrf_log_top,
+                max_per_doc=max_per_doc,
+            )
+        except Exception as exc:
+            eprint(f"Fallback retrieval failed: {exc}")
+    return retrieved, metrics
 
 def build_context(retrieved: List[Dict[str, Any]]) -> str:
     blocks = []
@@ -775,38 +1026,124 @@ def main() -> int:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--history-file", help="Optional JSON file with recent chat history")
+    parser.add_argument("--expand-query", action="store_true")
+    parser.add_argument("--expand-count", type=int, default=3)
+    parser.add_argument("--rerank", action="store_true")
+    parser.add_argument("--rerank-model", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    parser.add_argument("--rerank-candidates", type=int, default=4)
+    parser.add_argument("--rerank-max-chars", type=int, default=_RERANK_MAX_CHARS_DEFAULT)
+    parser.add_argument("--rrf-k", type=int, default=_RRF_K)
+    parser.add_argument("--rrf-log-top", type=int, default=0)
+    parser.add_argument("--max-per-doc", type=int, default=0)
     args = parser.parse_args()
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
-    try:
-        embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, args.query)
+    use_combo = bool(args.expand_query or args.rerank)
+    expanded_queries: List[str] = []
+    raw_query = args.query
+    query_for_display = raw_query
+    index_dim_cache: Optional[int] = None
+    rrf_k = max(1, int(args.rrf_k or _RRF_K))
+    rrf_log_top = max(0, int(args.rrf_log_top or 0))
+    max_per_doc = max(0, int(args.max_per_doc or 0))
+
+    def embed_query(query_text: str) -> bytes:
+        nonlocal client, index_dim_cache
+        embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, query_text)
         embedding_dim = len(embedding)
-        index_dim = get_index_vector_dim(client, args.index)
-        if index_dim and index_dim != embedding_dim:
-            raise RuntimeError(f"Embedding dim mismatch: index={index_dim} model={embedding_dim}")
+        if index_dim_cache is None:
+            index_dim_cache = get_index_vector_dim(client, args.index)
+        if index_dim_cache and index_dim_cache != embedding_dim:
+            raise RuntimeError(f"Embedding dim mismatch: index={index_dim_cache} model={embedding_dim}")
         embedding = normalize_vector(embedding)
-        vec = vector_to_bytes(embedding)
-    except Exception as exc:
-        eprint(f"Failed to embed query: {exc}")
-        return 2
-    keywords = extract_keywords(args.query)
+        return vector_to_bytes(embedding)
 
-    base_k = args.k
-    if is_short_query(args.query):
-        base_k = max(base_k, 12)
-    try:
-        retrieved, metrics = retrieve_chunks(client, args.index, vec, base_k, keywords, strict=True)
-    except Exception as exc:
-        eprint(f"RedisSearch query failed: {exc}")
-        return 2
-
-    broaden, _ = should_broaden_retrieval(metrics, base_k)
-    if broaden:
-        fallback_k = max(base_k * 2, 12)
+    if use_combo:
+        if args.expand_query:
+            expanded_queries = expand_query(
+                args.chat_base_url,
+                args.chat_api_key,
+                args.chat_model,
+                raw_query,
+                max(1, int(args.expand_count or 0)),
+            )
+        if expanded_queries:
+            query_for_display = expanded_queries[0]
+        candidate_multiplier = max(1, int(args.rerank_candidates or 1))
+        base_k = max(1, int(args.k))
+        if is_short_query(raw_query):
+            base_k = max(base_k, 12)
+        candidate_k = max(base_k * candidate_multiplier, base_k)
+        query_variants = [raw_query] + expanded_queries
+        candidates_map: Dict[str, Dict[str, Any]] = {}
         try:
-            retrieved, _ = retrieve_chunks(client, args.index, vec, fallback_k, keywords, strict=False)
+            for variant in query_variants:
+                vec = embed_query(variant)
+                keywords = extract_keywords(variant)
+                retrieved_variant, _ = retrieve_with_broadening(
+                    client,
+                    args.index,
+                    vec,
+                    candidate_k,
+                    keywords,
+                    rrf_k=rrf_k,
+                    rrf_log_top=rrf_log_top,
+                    max_per_doc=0,
+                )
+                for item in retrieved_variant:
+                    key = chunk_key(item)
+                    if not key:
+                        continue
+                    existing = candidates_map.get(key)
+                    if not existing:
+                        candidates_map[key] = item
+                        continue
+                    score_new = parse_score(item.get("score"))
+                    score_old = parse_score(existing.get("score"))
+                    if score_new is not None and (score_old is None or score_new < score_old):
+                        candidates_map[key] = item
         except Exception as exc:
-            eprint(f"Fallback retrieval failed: {exc}")
+            eprint(f"RedisSearch query failed: {exc}")
+            return 2
+
+        candidates = list(candidates_map.values())
+        if args.rerank:
+            rerank_query = query_for_display or raw_query
+            reranker = load_reranker(args.rerank_model)
+            reranked = rerank_candidates(
+                reranker,
+                rerank_query,
+                candidates,
+                max(200, int(args.rerank_max_chars or _RERANK_MAX_CHARS_DEFAULT)),
+            )
+            retrieved = apply_doc_cap(reranked, max_per_doc)[:base_k]
+        else:
+            ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
+            retrieved = apply_doc_cap(ordered, max_per_doc)[:base_k]
+    else:
+        try:
+            vec = embed_query(raw_query)
+        except Exception as exc:
+            eprint(f"Failed to embed query: {exc}")
+            return 2
+        keywords = extract_keywords(raw_query)
+        base_k = args.k
+        if is_short_query(raw_query):
+            base_k = max(base_k, 12)
+        try:
+            retrieved, _ = retrieve_with_broadening(
+                client,
+                args.index,
+                vec,
+                base_k,
+                keywords,
+                rrf_k=rrf_k,
+                rrf_log_top=rrf_log_top,
+                max_per_doc=max_per_doc,
+            )
+        except Exception as exc:
+            eprint(f"RedisSearch query failed: {exc}")
+            return 2
 
     context = build_context(retrieved)
 
@@ -866,7 +1203,11 @@ def main() -> int:
             return 2
 
     output = {
-        "query": args.query,
+        "query": query_for_display,
+        "raw_query": raw_query if expanded_queries else "",
+        "expanded_queries": expanded_queries,
+        "rerank_used": bool(args.rerank),
+        "rerank_model": args.rerank_model if args.rerank else "",
         "answer": answer,
         "citations": citations,
         "retrieved": retrieved,

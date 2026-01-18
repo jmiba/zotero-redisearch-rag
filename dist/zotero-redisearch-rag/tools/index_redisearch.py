@@ -20,6 +20,8 @@ EMBED_MAX_CHARS = 12000
 EMBED_MAX_CHARS_NON_ASCII = 8000
 EMBED_SUBCHUNK_CHARS_DEFAULT = 3500
 EMBED_SUBCHUNK_OVERLAP_DEFAULT = 200
+EMBED_CONTEXT_WINDOW_DEFAULT = 0
+EMBED_CONTEXT_CHARS_DEFAULT = 220
 
 
 def truncate_for_embedding(text: str) -> Tuple[str, bool]:
@@ -621,6 +623,35 @@ def build_embedding_text(
     return "\n".join(parts) + "\n\n" + text
 
 
+def truncate_context_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    trimmed = cleaned[:limit]
+    last_space = trimmed.rfind(" ")
+    if last_space > 0:
+        trimmed = trimmed[:last_space]
+    return trimmed.rstrip() + "..."
+
+
+def build_context_text(
+    focus_text: str,
+    prev_snippets: Sequence[str],
+    next_snippets: Sequence[str],
+) -> str:
+    parts: List[str] = []
+    if prev_snippets:
+        parts.append("Previous context:\n" + "\n".join(prev_snippets))
+    parts.append(focus_text)
+    if next_snippets:
+        parts.append("Next context:\n" + "\n".join(next_snippets))
+    return "\n\n".join(parts)
+
+
 def normalize_tag(tag: str) -> str:
     cleaned = tag.strip()
     cleaned = cleaned.strip("-,;:•")
@@ -735,6 +766,18 @@ def main() -> int:
         help="Overlap chars between embedding subchunks.",
     )
     parser.add_argument(
+        "--embed-context-window",
+        type=int,
+        default=EMBED_CONTEXT_WINDOW_DEFAULT,
+        help="Neighboring chunk count to include around each chunk in embeddings (0 disables).",
+    )
+    parser.add_argument(
+        "--embed-context-chars",
+        type=int,
+        default=EMBED_CONTEXT_CHARS_DEFAULT,
+        help="Max chars per neighboring chunk included in embeddings.",
+    )
+    parser.add_argument(
         "--embed-include-metadata",
         action="store_true",
         help="Include title/authors/tags/section metadata in the embedding text",
@@ -844,6 +887,8 @@ def main() -> int:
 
     embed_subchunk_chars = int(args.embed_subchunk_chars or 0)
     embed_subchunk_overlap = max(0, int(args.embed_subchunk_overlap or 0))
+    context_window = max(0, int(args.embed_context_window or 0))
+    context_chars = max(0, int(args.embed_context_chars or 0))
 
     prepared_chunks: List[Dict[str, Any]] = []
     for chunk in chunks:
@@ -874,12 +919,41 @@ def main() -> int:
     if not prepared_chunks:
         return 0
 
+    if context_window > 0 and context_chars > 0:
+        for idx, entry in enumerate(prepared_chunks):
+            prev_snippets: List[str] = []
+            next_snippets: List[str] = []
+            for offset in range(1, context_window + 1):
+                prev_idx = idx - offset
+                if prev_idx < 0:
+                    break
+                snippet = truncate_context_text(prepared_chunks[prev_idx]["text"], context_chars)
+                if snippet:
+                    prev_snippets.append(snippet)
+            for offset in range(1, context_window + 1):
+                next_idx = idx + offset
+                if next_idx >= len(prepared_chunks):
+                    break
+                snippet = truncate_context_text(prepared_chunks[next_idx]["text"], context_chars)
+                if snippet:
+                    next_snippets.append(snippet)
+            entry["context_prev"] = prev_snippets
+            entry["context_next"] = next_snippets
+
     first_chunk = prepared_chunks[0]["chunk"]
-    first_text = prepared_chunks[0]["sub_texts"][0]
+    first_entry = prepared_chunks[0]
+    first_text = first_entry["sub_texts"][0]
+    first_context_text = first_text
+    if context_window > 0 and context_chars > 0:
+        first_context_text = build_context_text(
+            first_text,
+            first_entry.get("context_prev", []),
+            first_entry.get("context_next", []),
+        )
     first_embedding_text = (
-        build_embedding_text(first_text, first_chunk, item_metadata)
+        build_embedding_text(first_context_text, first_chunk, item_metadata)
         if args.embed_include_metadata
-        else first_text
+        else first_context_text
     )
     first_len = len(first_embedding_text)
     first_embedding_text, truncated = truncate_for_embedding(first_embedding_text)
@@ -979,10 +1053,17 @@ def main() -> int:
                 if chunk is first_chunk and sub_idx == 1:
                     embedding = sample_embedding
                 else:
+                    context_text = sub_text
+                    if context_window > 0 and context_chars > 0:
+                        context_text = build_context_text(
+                            sub_text,
+                            entry.get("context_prev", []),
+                            entry.get("context_next", []),
+                        )
                     embedding_text = (
-                        build_embedding_text(sub_text, chunk, item_metadata)
+                        build_embedding_text(context_text, chunk, item_metadata)
                         if args.embed_include_metadata
-                        else sub_text
+                        else context_text
                     )
                     embed_len = len(embedding_text)
                     embedding_text, truncated = truncate_for_embedding(embedding_text)
