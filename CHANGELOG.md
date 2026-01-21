@@ -2,7 +2,7 @@
 
 ## 0.4.5
 
--Improved system prompt for footnote recognition in clean-up passes.
+- Improved system prompt for footnote recognition in clean-up passes.
 - Added a per-page OCR override setting and clarified OCR mode labels in settings.
 
 ## 0.4.4
