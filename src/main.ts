@@ -9211,6 +9211,9 @@ export default class ZoteroRagPlugin extends Plugin {
     if (this.settings.ocrMode === "force_low_quality") {
       args.push("--force-ocr-low-quality");
     }
+    if (this.settings.forcePerPageOcr) {
+      args.push("--force-per-page-ocr");
+    }
     args.push("--quality-threshold", String(this.settings.ocrQualityThreshold));
     if (languageHint) {
       args.push("--language-hint", languageHint);

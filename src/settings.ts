@@ -75,6 +75,7 @@ export interface ZoteroRagSettings {
   ocrEngine: OcrEngine;
   chunkingMode: ChunkingMode;
   ocrQualityThreshold: number;
+  forcePerPageOcr: boolean;
   paddleApiKey: string;
   paddleVlApiUrl: string;
   paddleStructureApiUrl: string;
@@ -200,6 +201,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   ocrQualityThreshold: 0.5,
   chunkingMode: "page",
   ocrEngine: "auto",
+  forcePerPageOcr: false,
   paddleApiKey: "",
   paddleVlApiUrl: "",
   paddleStructureApiUrl: "",
@@ -851,16 +853,28 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
 
       new Setting(tabEl)
-        .setName("OCR mode")
-        .setDesc("auto: skip OCR when text is readable; force if bad: OCR only when text looks poor; force: always OCR.")
+        .setName("OCR decision (when to OCR)")
+        .setDesc("Controls when OCR runs; per-page behavior is configured separately below.")
         .addDropdown((dropdown) =>
           dropdown
-            .addOption("auto", "auto")
-            .addOption("force_low_quality", "force if quality is bad")
-            .addOption("force", "force")
+            .addOption("auto", "Auto: use text layer when reliable")
+            .addOption("force_low_quality", "OCR only if text is poor")
+            .addOption("force", "Prefer OCR for full document")
             .setValue(this.plugin.settings.ocrMode)
             .onChange(async (value: string) => {
               this.plugin.settings.ocrMode = value as OcrMode;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("OCR layout override (per-page)")
+        .setDesc("Force per-page OCR when OCR runs, bypassing layout heuristics; can be slower for multi-column PDFs.")
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.forcePerPageOcr)
+            .onChange(async (value) => {
+              this.plugin.settings.forcePerPageOcr = value;
               await this.plugin.saveSettings();
             })
         );

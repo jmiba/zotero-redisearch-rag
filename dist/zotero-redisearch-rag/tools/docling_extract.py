@@ -142,6 +142,7 @@ class DoclingProcessingConfig:
     max_chunk_chars: int = 3000
     chunk_overlap_chars: int = 250
     per_page_ocr_on_low_quality: bool = True
+    force_per_page_ocr: bool = False
     force_ocr_on_low_quality_text: bool = False
     enable_post_correction: bool = True
     enable_dictionary_correction: bool = False
@@ -1533,6 +1534,8 @@ def decide_per_page_ocr(
     quality: TextQuality,
     config: DoclingProcessingConfig,
 ) -> Tuple[bool, str]:
+    if config.force_per_page_ocr:
+        return True, "Per-page OCR forced by config"
     if not config.per_page_ocr_on_low_quality:
         return False, "Per-page OCR disabled by config"
     if not has_text_layer and is_low_quality(quality, config):
@@ -2437,6 +2440,7 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
                     "content": (
                         "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. "
                         "Do not add content. Return corrected text only."
+                        "Detect footnote references and definitions and format them in Markdown as [^n] and [^n]: (for the note text). Preserve special characters and formatting. Do not create new footnotes or content; only reformat existing footnote markers/lines."
                     ),
                 },
                 {"role": "user", "content": text},
@@ -4023,8 +4027,9 @@ def convert_pdf_with_docling(
             rasterize_error = str(exc)
             LOGGER.warning("Failed to rasterize PDF for OCR: %s", exc)
     if rasterized_source:
-        decision.per_page_ocr = False
-        decision.per_page_reason = "Rasterized PDF for Docling OCR"
+        if not config.force_per_page_ocr:
+            decision.per_page_ocr = False
+            decision.per_page_reason = "Rasterized PDF for Docling OCR"
 
     if config.column_detect_enable and decision.ocr_used and (rasterized_source or not has_text_layer):
         try:
@@ -4051,7 +4056,12 @@ def convert_pdf_with_docling(
                 column_layout.reason,
             )
             emit(30, "layout", "Checked column layout")
-            if column_layout.detected and decision.use_external_ocr and decision.per_page_ocr:
+            if (
+                column_layout.detected
+                and decision.use_external_ocr
+                and decision.per_page_ocr
+                and not config.force_per_page_ocr
+            ):
                 decision.per_page_ocr = False
                 decision.per_page_reason = "Columns detected; keep Docling layout"
         except Exception as exc:
@@ -4869,6 +4879,11 @@ def main() -> int:
         help="Force OCR when text layer appears low quality",
     )
     parser.add_argument(
+        "--force-per-page-ocr",
+        action="store_true",
+        help="Force per-page OCR and bypass layout heuristics",
+    )
+    parser.add_argument(
         "--quality-threshold",
         type=float,
         help="Confidence threshold for treating text as low quality (0-1)",
@@ -5074,6 +5089,8 @@ def main() -> int:
         _apply_config_overrides(config, config_overrides, config_path)
         if args.force_ocr_low_quality:
             config.force_ocr_on_low_quality_text = True
+        if args.force_per_page_ocr:
+            config.force_per_page_ocr = True
         if args.quality_threshold is not None:
             config.quality_confidence_threshold = args.quality_threshold
         report = build_quality_report(args.pdf, config)
@@ -5099,6 +5116,8 @@ def main() -> int:
     _apply_config_overrides(config, config_overrides, config_path)
     if args.force_ocr_low_quality:
         config.force_ocr_on_low_quality_text = True
+    if args.force_per_page_ocr:
+        config.force_per_page_ocr = True
     if args.quality_threshold is not None:
         config.quality_confidence_threshold = args.quality_threshold
     if args.language_hint:

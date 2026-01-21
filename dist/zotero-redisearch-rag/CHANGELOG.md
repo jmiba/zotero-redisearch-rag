@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5
+
+- Added a per-page OCR override setting and clarified OCR mode labels in settings.
+
 ## 0.4.4
 
 - Added bidirectional YAML ↔ Zotero metadata sync (title, short title, date, abstract, tags, authors, editors) with per-field conflict prompts.
