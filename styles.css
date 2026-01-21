@@ -285,7 +285,6 @@
 .zrr-chunk-toolbar {
   display: inline-flex;
   gap: 0.1rem;
-  margin-left: 0.5rem;
   vertical-align: middle;
   padding: 1px;
   border: 1px solid var(--background-modifier-border);
@@ -297,6 +296,9 @@
   float: right;
   margin-left: 0.75rem;
   margin-right: 0;
+  margin-bottom: -1rem;
+  position: relative;
+  top: -0.5rem;
 }
 
 .zrr-chunk-button {

@@ -2437,6 +2437,7 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
                     "content": (
                         "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. "
                         "Do not add content. Return corrected text only."
+                        "Detect footnote references and definitions and format them in Markdown as [^n] and [^n]: (for the note text). Preserve special characters and formatting. Do not create new footnotes or content; only reformat existing footnote markers/lines."
                     ),
                 },
                 {"role": "user", "content": text},

@@ -4893,28 +4893,34 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         this.updatePreviewScrollHandler();
-        this.maybeSyncPendingPdf();
+        void this.maybeSyncPendingPdf();
       })
     );
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
         this.updatePreviewScrollHandler();
-        this.maybeSyncPendingPdf();
+        void this.maybeSyncPendingPdf();
       })
     );
     this.updatePreviewScrollHandler();
   }
 
-  private maybeSyncPendingPdf(): void {
-    if (!this.pendingPdfSync || !this.pdfSidebarLeaf) {
+  private async maybeSyncPendingPdf(): Promise<void> {
+    if (!this.pendingPdfSync) {
       return;
     }
-    if (!this.isLeafTabActive(this.pdfSidebarLeaf)) {
+    if (!this.pdfSidebarLeaf || this.pdfSidebarLeaf.view?.getViewType?.() !== "pdf") {
+      const leaf = await this.getPdfSidebarLeaf();
+      if (!leaf) {
+        return;
+      }
+    }
+    if (!this.pdfSidebarLeaf || !this.isLeafTabActive(this.pdfSidebarLeaf)) {
       return;
     }
     const pending = this.pendingPdfSync;
     this.pendingPdfSync = null;
-    void this.syncPdfSidebarForDoc(pending.docId, pending.pageNumber, pending.chunkId);
+    await this.syncPdfSidebarForDoc(pending.docId, pending.pageNumber, pending.chunkId);
   }
 
   private updatePreviewScrollHandler(): void {
@@ -5332,7 +5338,7 @@ export default class ZoteroRagPlugin extends Plugin {
         {
           role: "system",
           content:
-            "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. Do not add content. Return corrected text only.",
+            "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. Do not add content. Return corrected text only. Detect footnote references and definitions and format them in Markdown as [^n] and [^n]: (for the note text). Preserve special characters and formatting. Do not create new footnotes or content; only reformat existing footnote markers/lines.",
         },
         { role: "user", content: text },
       ],
@@ -7295,6 +7301,12 @@ export default class ZoteroRagPlugin extends Plugin {
       this.updatePdfSidebarIcon(existing);
       return existing;
     }
+    const created = this.app.workspace.getRightLeaf(true);
+    if (created && this.isRightSidebarLeaf(created)) {
+      this.pdfSidebarLeaf = created;
+      this.updatePdfSidebarIcon(created);
+      return created;
+    }
     return null;
   }
 
@@ -7476,6 +7488,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const leaf = await this.getPdfSidebarLeaf();
     if (!leaf) {
+      this.pendingPdfSync = { docId, pageNumber, chunkId };
       return;
     }
     this.updatePdfSidebarIcon(leaf);
@@ -8605,7 +8618,84 @@ export default class ZoteroRagPlugin extends Plugin {
       return "";
     }
     const resolved = vars ?? await this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
-    return this.renderTemplate(template, resolved, "", { appendDocling: false }).trim();
+    const rendered = this.renderTemplate(template, resolved, "", { appendDocling: false }).trim();
+    return this.stripEmptyFrontmatterFields(rendered);
+  }
+
+  private stripEmptyFrontmatterFields(frontmatter: string): string {
+    if (!frontmatter.trim()) {
+      return "";
+    }
+    const lines = frontmatter.split(/\r?\n/);
+    const cleaned: string[] = [];
+    const keyRe = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/;
+    const listItemRe = /^[ \t]+-\s*(.*)$/;
+    const preserveEmpty = new Set(["abstract"]);
+    const emptyValue = (value: string): boolean => {
+      return value === "" || value === "\"\"" || value === "''";
+    };
+
+    let idx = 0;
+    while (idx < lines.length) {
+      const line = lines[idx];
+      const keyMatch = line.match(keyRe);
+      if (!keyMatch) {
+        cleaned.push(line);
+        idx += 1;
+        continue;
+      }
+      const key = keyMatch[1];
+      const value = keyMatch[2].trim();
+      if (preserveEmpty.has(key)) {
+        cleaned.push(line);
+        idx += 1;
+        continue;
+      }
+      if (!emptyValue(value)) {
+        cleaned.push(line);
+        idx += 1;
+        continue;
+      }
+      let j = idx + 1;
+      const listLines: string[] = [];
+      while (j < lines.length) {
+        const listMatch = lines[j].match(listItemRe);
+        if (!listMatch) {
+          break;
+        }
+        listLines.push(lines[j]);
+        j += 1;
+      }
+      if (listLines.length === 0) {
+        idx = j;
+        while (idx < lines.length && lines[idx].trim() === "") {
+          idx += 1;
+        }
+        continue;
+      }
+      const filteredList = listLines.filter((item) => {
+        const match = item.match(listItemRe);
+        if (!match) {
+          return false;
+        }
+        const itemValue = match[1].trim();
+        return !emptyValue(itemValue);
+      });
+      if (filteredList.length > 0) {
+        cleaned.push(line, ...filteredList);
+      }
+      idx = j;
+      if (filteredList.length === 0) {
+        while (idx < lines.length && lines[idx].trim() === "") {
+          idx += 1;
+        }
+      }
+    }
+
+    while (cleaned.length > 0 && cleaned[cleaned.length - 1].trim() === "") {
+      cleaned.pop();
+    }
+    return cleaned.join("\n").trim();
   }
 
   private renderTemplate(
