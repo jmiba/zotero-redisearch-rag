@@ -239,7 +239,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   enableQueryExpansion: false,
   queryExpansionCount: 3,
   enableCrossEncoderRerank: false,
-  rerankModel: "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  rerankModel: "BAAI/bge-reranker-v2-m3",
   rerankCandidateMultiplier: 4,
   rrfK: 60,
   rrfLogTop: 0,
@@ -1652,10 +1652,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setDesc("Local reranker model name or path.")
         .addText((text) =>
           text
-            .setPlaceholder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            .setPlaceholder("BAAI/bge-reranker-v2-m3")
             .setValue(this.plugin.settings.rerankModel)
             .onChange(async (value) => {
-              this.plugin.settings.rerankModel = value.trim() || "cross-encoder/ms-marco-MiniLM-L-6-v2";
+              this.plugin.settings.rerankModel = value.trim() || "BAAI/bge-reranker-v2-m3";
               await this.plugin.saveSettings();
             })
         );
