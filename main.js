@@ -55,7 +55,7 @@ item_json: {{item_json_yaml}}`,tagSanitizeMode:"kebab",noteBodyTemplate:"{{pdf_b
   <path d="M6.2694512 16.288346H17.916711"/>
 </svg>
 `};var ce=require("@codemirror/state"),ne=require("@codemirror/view"),U=require("obsidian");var j=u=>{if(typeof u=="string")return u.trim();if(typeof u=="number"&&Number.isFinite(u))return String(u);if(Array.isArray(u))for(let p of u){if(typeof p=="string"&&p.trim())return p.trim();if(typeof p=="number"&&Number.isFinite(p))return String(p)}if(u&&typeof u=="object"){let p=u[0];if(typeof p=="string"&&p.trim())return p.trim();if(typeof p=="number"&&Number.isFinite(p))return String(p)}return""},yn=u=>{let p=[u.key,u.itemKey,u.id,u.citationKey];for(let e of p)if(typeof e=="string"&&e.trim())return e.trim();return null},bn=u=>{var e,n,t;let p=(t=(n=u.key)!=null?n:(e=u.data)==null?void 0:e.key)!=null?t:"";return typeof p=="string"?p:""},Ye=u=>{if(!u)return"";let p=u.match(/\b(\d{4})\b/);return p?p[1]:""},xn=u=>{var e,n,t,i;let p=(i=(t=(e=u.meta)==null?void 0:e.parsedDate)!=null?t:(n=u.data)==null?void 0:n.date)!=null?i:"";return typeof p!="string"?"":Ye(p)},me=u=>{if(!u||typeof u!="object")return"";if(u.name)return String(u.name);let p=u.firstName?String(u.firstName):"",e=u.lastName?String(u.lastName):"";return[e,p].filter(Boolean).join(", ")||`${p} ${e}`.trim()},kn=(u,p)=>{let e=[p==null?void 0:p.citationKey,p==null?void 0:p.citekey,p==null?void 0:p.citeKey,p==null?void 0:p.betterBibtexKey,p==null?void 0:p.betterbibtexkey,u.citationKey,u.citekey,u.citeKey,u.betterBibtexKey,u.betterbibtexkey];for(let i of e){let r=j(i);if(r)return r}let n=typeof u.extra=="string"?u.extra:"";if(!n)return"";let t=n.split(/\r?\n/);for(let i of t){let r=i.match(/^\s*(citation key|citekey|citation-key|bibtex key|bibtexkey)\s*:\s*(.+)\s*$/i);if(r&&r[2])return r[2].trim()}return""},vn=u=>{var e,n;if(!u)return"";let p=(n=(e=u["title-short"])!=null?e:u.shortTitle)!=null?n:u.short_title;return typeof p=="string"?p.trim():""},he=u=>{let p=j(u.shortTitle);if(p)return p;let e=j(u.short_title);if(e)return e;let n=j(u["title-short"]);return n||""},wn=u=>{let p=typeof u.extra=="string"?u.extra:"";if(!p)return"";let e=p.split(/\r?\n/);for(let t of e){let i=t.match(/^\s*doi\s*:\s*(.+)\s*$/i);if(i&&i[1])return i[1].trim().replace(/[.,;]+$/,"")}let n=p.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+\b/i);return n?n[0].replace(/[.,;]+$/,""):""},Pn=u=>{var e;if(!u)return"";let p=(e=u.DOI)!=null?e:u.doi;return typeof p=="string"?p.trim().replace(/[.,;]+$/,""):""},Yn=u=>{if(!u)return[];let p=[u.attachments,u.children,u.items,u.attachment,u.allAttachments],e=[];for(let n of p)n&&(Array.isArray(n)?e.push(...n):typeof n=="object"&&e.push(n));return e},Qn=u=>{var n,t,i,r,a,s,o,l,d,c,_,m,y,x,L;if(((s=(a=(i=(n=u==null?void 0:u.contentType)!=null?n:u==null?void 0:u.mimeType)!=null?i:(t=u==null?void 0:u.data)==null?void 0:t.contentType)!=null?a:(r=u==null?void 0:u.data)==null?void 0:r.mimeType)!=null?s:"")==="application/pdf")return!0;let e=(L=(x=(m=(_=(d=(o=u==null?void 0:u.filename)!=null?o:u==null?void 0:u.fileName)!=null?d:(l=u==null?void 0:u.data)==null?void 0:l.filename)!=null?_:(c=u==null?void 0:u.data)==null?void 0:c.fileName)!=null?m:u==null?void 0:u.path)!=null?x:(y=u==null?void 0:u.data)==null?void 0:y.path)!=null?L:"";return!!(typeof e=="string"&&e.toLowerCase().endsWith(".pdf"))},Cn=u=>{var n;let p=Yn(u.data);if(p.length>0)return p.some(i=>Qn(i))?"yes":"no";let e=(n=u.meta)==null?void 0:n.numChildren;return typeof e=="number"&&e===0?"no":"unknown"};var Ln=[{label:"Auto (no hint)",value:""},{label:"English (en)",value:"en"},{label:"German (de)",value:"de"},{label:"German + English (de,en)",value:"de,en"},{label:"French (fr)",value:"fr"},{label:"Spanish (es)",value:"es"},{label:"Italian (it)",value:"it"},{label:"Dutch (nl)",value:"nl"},{label:"Portuguese (pt)",value:"pt"},{label:"Polish (pl)",value:"pl"},{label:"Swedish (sv)",value:"sv"},{label:"Other (custom ISO code)",value:"__custom__"}],et=u=>u.includes("STDERR")?"zrr-log-stderr":u.includes("ERROR")?"zrr-log-error":u.includes("WARNING")||u.includes("WARN")?"zrr-log-warning":u.includes("INFO")?"zrr-log-info":null,An=u=>{let p=new ce.RangeSetBuilder;for(let{from:e,to:n}of u.visibleRanges){let t=e;for(;t<=n;){let i=u.state.doc.lineAt(t),r=et(i.text);r&&p.add(i.from,i.from,ne.Decoration.line({class:r})),t=i.to+1}}return p.finish()},En=ne.EditorView.theme({".cm-editor":{height:"100%",display:"flex",flexDirection:"column",minHeight:"0"},".cm-scroller":{fontFamily:"var(--font-monospace)",fontSize:"0.85rem",flex:"1",height:"100%",maxHeight:"100%",overflow:"auto"},".zrr-log-error":{color:"var(--text-error)"},".zrr-log-warning":{color:"var(--text-accent)"},".zrr-log-info":{color:"var(--text-muted)"},".zrr-log-stderr":{color:"var(--text-accent)"}}),Sn=ne.ViewPlugin.fromClass(class{constructor(u){this.decorations=An(u)}update(u){(u.docChanged||u.viewportChanged)&&(this.decorations=An(u.view))}},{decorations:u=>u.decorations}),ke=class extends U.Modal{constructor(p,e,n,t,i="Value cannot be empty."){super(p),this.titleText=e,this.placeholder=n,this.onSubmit=t,this.emptyMessage=i}onOpen(){let{contentEl:p}=this;p.empty(),p.createEl("h3",{text:this.titleText});let e=p.createEl("input",{type:"text",placeholder:this.placeholder});e.style.width="100%",e.focus();let n=p.createEl("button",{text:"Submit"});n.style.marginTop="0.75rem";let t=()=>{let i=e.value.trim();if(!i){new U.Notice(this.emptyMessage);return}this.close(),this.onSubmit(i)};n.addEventListener("click",t),e.addEventListener("keydown",i=>{i.key==="Enter"&&t()})}},De=class extends U.Modal{constructor(p,e,n,t,i){super(p),this.chunkId=e,this.initialTags=n,this.onSubmit=t,this.onRegenerate=i}onOpen(){let{contentEl:p}=this;p.empty(),p.createEl("h3",{text:`Edit tags for ${this.chunkId}`});let e=p.createEl("textarea",{attr:{rows:"3"}});e.style.width="100%",e.placeholder="tag1, tag2, tag3",e.value=this.initialTags.join(", "),e.focus();let n=p.createEl("div");n.style.display="flex",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let t=n.createEl("button",{text:"Save tags"}),i=async()=>{let a=(e.value||"").split(/[,;\n]+/).map(o=>o.trim()).filter(o=>o.length>0),s=Array.from(new Set(a));this.close(),await Promise.resolve(this.onSubmit(s))};if(this.onRegenerate){let r=n.createEl("button",{text:"Regenerate"});r.addEventListener("click",async()=>{var a;r.setAttribute("disabled","true"),t.setAttribute("disabled","true");try{let s=await((a=this.onRegenerate)==null?void 0:a.call(this));s&&s.length>0?(e.value=s.join(", "),await Promise.resolve(this.onSubmit(s))):s&&new U.Notice("No tags were generated.")}finally{r.removeAttribute("disabled"),t.removeAttribute("disabled")}})}t.addEventListener("click",i),e.addEventListener("keydown",r=>{r.key==="Enter"&&(r.metaKey||r.ctrlKey)&&i()})}},Te=class extends U.Modal{constructor(p,e,n,t=""){super(p),this.titleText=e,this.content=n,this.noteText=t}onOpen(){let{contentEl:p}=this;if(p.empty(),p.createEl("h3",{text:this.titleText}),this.noteText){let n=p.createEl("div",{text:this.noteText});n.className="zrr-indexed-note"}let e=p.createEl("textarea",{attr:{rows:"12",readonly:"true"}});e.style.width="100%",e.value=this.content}},Oe=class extends U.Modal{constructor(e,n,t=""){super(e);this.bodyText="";this.plugin=n,this.initialTerm=t}onOpen(){let{contentEl:e}=this;e.empty(),this.modalEl&&(this.modalEl.style.width="80vw",this.modalEl.style.maxWidth="1200px",this.modalEl.style.height="80vh",this.modalEl.style.maxHeight="90vh",this.modalEl.style.resize="both",this.modalEl.style.overflow="hidden"),e.style.display="flex",e.style.flexDirection="column",e.style.height="100%",e.style.overflow="hidden",e.style.minHeight="0";let n=e.createDiv();n.style.display="flex",n.style.alignItems="center",n.style.justifyContent="space-between",n.style.gap="0.5rem",n.createEl("h3",{text:"Redis index search"});let t=n.createEl("button",{text:"Copy All"});t.style.marginLeft="auto",t.addEventListener("click",()=>{this.copyResultsToClipboard()});let i=e.createDiv();i.style.display="flex",i.style.alignItems="center",i.style.gap="0.5rem",i.style.margin="0.5rem 0";let r=i.createEl("input");r.type="text",r.placeholder="Search term",r.value=this.initialTerm,r.style.flex="1",r.style.minWidth="0",this.inputEl=r,i.createEl("button",{text:"Search"}).addEventListener("click",()=>{this.runSearch()}),r.addEventListener("keydown",d=>{d.key==="Enter"&&(d.preventDefault(),this.runSearch())});let s=e.createDiv();s.style.color="var(--text-muted)",s.style.marginBottom="0.5rem",this.statusEl=s;let o=e.createDiv();o.style.flex="1 1 0",o.style.minHeight="0",o.style.border="1px solid var(--background-modifier-border)",o.style.borderRadius="6px",o.style.display="flex",o.style.flexDirection="column",o.style.overflow="auto";let l=ce.EditorState.create({doc:this.bodyText,extensions:[En,Sn,ne.EditorView.editable.of(!1),ce.EditorState.readOnly.of(!0),ne.EditorView.lineWrapping]});this.editorView=new ne.EditorView({state:l,parent:o}),this.initialTerm&&this.runSearch()}onClose(){var e;(e=this.editorView)==null||e.destroy(),this.editorView=void 0}async runSearch(){var t;let e=(((t=this.inputEl)==null?void 0:t.value)||"").trim();if(!e){this.statusEl&&(this.statusEl.textContent="Enter a search term.");return}this.statusEl&&(this.statusEl.textContent="Searching...");let n=await this.plugin.runRedisSearch(e);this.updateEditor(n),this.statusEl&&(this.statusEl.textContent=`Results for "${e}"`)}updateEditor(e){if(!this.editorView)return;let n=this.editorView,t=n.scrollDOM.scrollTop,i=n.state.selection.main,r=e.length,a=Math.min(i.anchor,r),s=Math.min(i.head,r);n.dispatch({changes:{from:0,to:n.state.doc.length,insert:e},selection:{anchor:a,head:s}}),n.scrollDOM.scrollTop=t,this.bodyText=e}copyResultsToClipboard(){let e=this.bodyText||"";if(!e){new U.Notice("Nothing to copy.");return}navigator.clipboard.writeText(e).then(()=>new U.Notice("Results copied to clipboard.")).catch(()=>new U.Notice("Failed to copy results."))}},ye=class extends U.Modal{constructor(p,e,n,t){super(p),this.titleText=e,this.bodyText=n,this.options=t}onOpen(){var r,a,s,o;let{contentEl:p}=this;p.empty(),this.modalEl&&(this.modalEl.style.width="80vw",this.modalEl.style.maxWidth="1200px",this.modalEl.style.height="80vh",this.modalEl.style.maxHeight="90vh",this.modalEl.style.resize="both",this.modalEl.style.overflow="hidden"),p.style.display="flex",p.style.flexDirection="column",p.style.height="100%",p.style.overflow="hidden",p.style.minHeight="0";let e=p.createDiv();e.style.display="flex",e.style.alignItems="center",e.style.justifyContent="space-between",e.style.gap="0.5rem",e.createEl("h3",{text:this.titleText});let n=e.createDiv();if(n.style.display="flex",n.style.gap="0.5rem",(r=this.options)!=null&&r.onClear){let l=(a=this.options.clearLabel)!=null?a:"Clear log";n.createEl("button",{text:l}).addEventListener("click",async()=>{var c,_;try{await((_=(c=this.options)==null?void 0:c.onClear)==null?void 0:_.call(c))}finally{await this.refreshFromSource()}})}let t=p.createDiv();t.style.flex="1 1 0",t.style.minHeight="0",t.style.border="1px solid var(--background-modifier-border)",t.style.borderRadius="6px",t.style.display="flex",t.style.flexDirection="column",t.style.overflow="auto";let i=ce.EditorState.create({doc:this.bodyText,extensions:[En,Sn,ne.EditorView.editable.of(!0),ce.EditorState.readOnly.of(!1),ne.EditorView.lineWrapping]});if(this.editorView=new ne.EditorView({state:i,parent:t}),this.refreshFromSource(),(s=this.options)!=null&&s.autoRefresh&&this.options.onRefresh){let l=(o=this.options.refreshIntervalMs)!=null?o:2e3;this.refreshTimer=window.setInterval(()=>{this.refreshFromSource()},l)}}onClose(){var p;this.refreshTimer!==void 0&&(window.clearInterval(this.refreshTimer),this.refreshTimer=void 0),(p=this.editorView)==null||p.destroy(),this.editorView=void 0}async refreshFromSource(){var s;if(!((s=this.options)!=null&&s.onRefresh)||!this.editorView)return;let p="";try{p=await this.options.onRefresh()||""}catch(o){return}if(p===this.bodyText)return;let e=this.editorView,n=e.scrollDOM.scrollTop,t=e.state.selection.main,i=p.length,r=Math.min(t.anchor,i),a=Math.min(t.head,i);e.dispatch({changes:{from:0,to:e.state.doc.length,insert:p},selection:{anchor:r,head:a}}),e.scrollDOM.scrollTop=n,this.bodyText=p}},Ie=class extends U.Modal{constructor(e,n,t){super(e);this.resolved=!1;this.filePath=n,this.onResolve=t}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Overwrite existing note?"}),e.createEl("p",{text:`This will overwrite: ${this.filePath}`});let n=e.createEl("div");n.style.display="flex",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let t=n.createEl("button",{text:"Cancel"}),i=n.createEl("button",{text:"Overwrite"});t.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},Fe=class extends U.Modal{constructor(e,n,t,i){super(e);this.resolved=!1;this.notePath=n,this.docId=t,this.onResolve=i}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Delete note and cached data?"}),e.createEl("p",{text:`This will delete the note and cached chunks/items for doc_id ${this.docId}.`}),e.createEl("p",{text:`Note: ${this.notePath}`});let n=e.createEl("div");n.style.display="flex",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let t=n.createEl("button",{text:"Cancel"}),i=n.createEl("button",{text:"Delete"});t.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},ze=class extends U.Modal{constructor(e,n,t){super(e);this.resolved=!1;this.reason=n,this.onResolve=t}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Rebuild Redis index?"}),e.createEl("p",{text:this.reason}),e.createEl("p",{text:"This will drop the RedisSearch index (and embeddings) and rebuild it from cached chunks."});let n=e.createEl("div");n.style.display="flex",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let t=n.createEl("button",{text:"Cancel"}),i=n.createEl("button",{text:"Drop & rebuild"});t.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},qe=class extends U.Modal{constructor(e,n){super(e);this.resolved=!1;this.onResolve=n}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Purge Redis orphaned chunks?"}),e.createEl("p",{text:"This removes Redis chunk keys that have no cached item.json or chunk.json on disk."}),e.createEl("p",{text:"Cache files are not deleted. Use this to clean up stale Redis data."});let n=e.createEl("div");n.style.display="flex",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let t=n.createEl("button",{text:"Cancel"}),i=n.createEl("button",{text:"Purge orphans"});t.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},Me=class extends U.Modal{constructor(e,n,t,i,r,a,s){super(e);this.resolved=!1;this.fieldLabel=n,this.noteLabel=t,this.zoteroLabel=i,this.noteValue=r,this.zoteroValue=a,this.onResolve=s}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:`Resolve metadata conflict: ${this.fieldLabel}`});let n=e.createEl("div");n.style.display="grid",n.style.gap="0.5rem",n.createEl("div",{text:"Note value"});let t=n.createEl("textarea",{attr:{readonly:"true",rows:"4"}});t.style.width="100%",t.value=this.noteValue||"(empty)",n.createEl("div",{text:"Zotero value"});let i=n.createEl("textarea",{attr:{readonly:"true",rows:"4"}});i.style.width="100%",i.value=this.zoteroValue||"(empty)";let r=e.createEl("div");r.style.display="flex",r.style.gap="0.5rem",r.style.marginTop="0.75rem";let a=r.createEl("button",{text:this.noteLabel}),s=r.createEl("button",{text:this.zoteroLabel}),o=r.createEl("button",{text:"Skip"});a.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve("note")}),s.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve("zotero")}),o.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve("skip")})}onClose(){this.resolved||this.onResolve("skip")}},je=class extends U.SuggestModal{constructor(e,n){super(e);this.resolved=!1;this.resolveSelection=n,this.setPlaceholder("Select a language for OCR/quality...")}getSuggestions(e){let n=e.trim().toLowerCase();return n?Ln.filter(t=>t.label.toLowerCase().includes(n)||t.value.toLowerCase().includes(n)):Ln}renderSuggestion(e,n){n.setText(e.label),n.addEventListener("click",()=>this.handleSelection(e))}onChooseSuggestion(e){this.handleSelection(e)}onClose(){this.resolved||this.resolveSelection(null)}handleSelection(e){if(!this.resolved){if(this.resolved=!0,e.value==="__custom__"){this.close(),new ke(this.app,"Custom language hint","e.g., en, de, fr, de,en",n=>this.resolveSelection(n.trim()),"Language hint cannot be empty.").open();return}this.resolveSelection(e.value),this.close()}}},$e=class extends U.SuggestModal{constructor(e,n,t){super(e);this.lastError=null;this.indexedDocIds=null;this.attachmentStatusCache=new Map;this.attachmentChecks=new Set;this.plugin=n,this.resolveSelection=t,this.setPlaceholder("Search Zotero items...")}async getSuggestions(e){try{if(!this.indexedDocIds){let n=await this.plugin.getDocIndex();this.indexedDocIds=new Set(Object.keys(n))}return await this.plugin.searchZoteroItems(e)}catch(n){let t=n instanceof Error?n.message:String(n);return this.lastError!==t&&(this.lastError=t,new U.Notice(t)),console.error("Zotero search failed",n),[]}}renderSuggestion(e,n){var c,_,m;let t=(_=(c=e.data)==null?void 0:c.title)!=null?_:"[No title]",i=xn(e),r=bn(e),a=r?(m=this.indexedDocIds)==null?void 0:m.has(r):!1,s=Cn(e);a&&n.addClass("zrr-indexed-item"),s==="no"&&n.addClass("zrr-no-pdf-item"),n.createEl("div",{text:t});let o=n.createEl("small"),l=!1,d=()=>{l&&o.createSpan({text:" - "})};if(i&&(o.createSpan({text:i}),l=!0),a&&(d(),o.createSpan({text:"Indexed",cls:"zrr-indexed-flag"}),l=!0),s==="no"&&(d(),o.createSpan({text:"No PDF attachment",cls:"zrr-no-pdf-flag"}),l=!0),s==="unknown"){let y=r?this.attachmentStatusCache.get(r):void 0;y==="no"?(d(),o.createSpan({text:"No PDF attachment",cls:"zrr-no-pdf-flag"}),l=!0,n.addClass("zrr-no-pdf-item")):y==="yes"||r&&this.refreshAttachmentStatus(r,e,n,o)}n.addEventListener("click",()=>{this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()})}onChooseSuggestion(e,n){this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()}onClose(){this.resolveSelection&&(this.resolveSelection(null),this.resolveSelection=null)}async refreshAttachmentStatus(e,n,t,i){if(!this.attachmentChecks.has(e)){this.attachmentChecks.add(e);try{let r=await this.plugin.hasProcessableAttachment(n);this.attachmentStatusCache.set(e,r?"yes":"no"),!r&&i.isConnected&&t.isConnected&&(i.querySelector(".zrr-no-pdf-flag")||(i.childNodes.length>0&&i.createSpan({text:" - "}),i.createSpan({text:"No PDF attachment",cls:"zrr-no-pdf-flag"})),t.addClass("zrr-no-pdf-item"))}finally{this.attachmentChecks.delete(e)}}}};var Nn={"docling_extract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 import argparse
 import atexit
 import base64
@@ -5641,7 +5641,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"ocr_paddle.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 from __future__ import annotations
 
 import json
@@ -8860,7 +8860,7 @@ def ocr_pages_with_paddle(
     )
     return pages, {"ocr_confidence_avg": avg_conf}
 `,"ocr_tesseract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 from __future__ import annotations
 
 import logging
@@ -9165,7 +9165,7 @@ def ocr_pages_with_tesseract(
     )
     return pages, {"ocr_confidence_avg": avg_conf}
 `,"index_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 import argparse
 import html
 import json
@@ -10308,7 +10308,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"drop_redis_index.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 import argparse
 import sys
 
@@ -10348,7 +10348,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"ocr_layered_pdf.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 import argparse
 import io
 import json
@@ -10507,7 +10507,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"rag_query_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 
 import argparse
 import json
@@ -11732,7 +11732,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"search_redis.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 
 import argparse
 import json
@@ -12025,7 +12025,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"redis_diagnostics.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 
 import argparse
 import json
@@ -12116,7 +12116,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"purge_redis_orphans.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 
 import argparse
 import json
@@ -12225,7 +12225,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"batch_index_pyzotero.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 import argparse
 import json
 import os
@@ -12430,7 +12430,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"utils_embedding.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.4.5
+# zotero-redisearch-rag tool version: 0.4.6
 import math
 import struct
 import requests
@@ -12461,7 +12461,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
     if not embedding:
         raise RuntimeError("Embedding response missing embedding")
     return [float(x) for x in embedding]
-`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.4.5
+`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.4.6
 aai
 aam
 abb
@@ -14756,7 +14756,7 @@ zwi
 \xF6ffent
 \xF6pnv
 \xFCberarb
-`,"requirements.txt":`# zotero-redisearch-rag tool version: 0.4.5
+`,"requirements.txt":`# zotero-redisearch-rag tool version: 0.4.6
 docling
 langcodes[data]
 markdown
@@ -14779,7 +14779,7 @@ wordfreq
 # Optional for language normalization and spellchecking
 # hunspell  # Disabled: fails to build on macOS/Python 3.13, use spylls fallback
 spylls
-`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.4.5
+`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.4.6
 services:
   redis-stack:
     image: redis/redis-stack-server:latest
@@ -14791,7 +14791,7 @@ services:
     volumes:
       - "\${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
       - "./redis-stack.conf:/redis-stack.conf:ro"
-`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.4.5
+`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.4.6
 # Redis Stack persistence config for local RAG index
 appendonly yes
 appendfsync everysec

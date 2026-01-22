@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.6
+
+- Default reranker model updated to `BAAI/bge-reranker-v2-m3` for better multilingual retrieval.
+- Internal refactor: extracted PDF sidebar, chunk marker, and attachment helpers into dedicated modules.
+
 ## 0.4.5
 
 - Improved system prompt for footnote recognition in clean-up passes.
