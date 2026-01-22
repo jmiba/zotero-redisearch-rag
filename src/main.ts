@@ -1,28 +1,19 @@
 import {
-  App,
   FileSystemAdapter,
   Editor,
   MarkdownRenderer,
   MarkdownView,
-  Modal,
   Notice,
   Plugin,
-  SuggestModal,
   TFile,
   WorkspaceLeaf,
   addIcon,
-  setIcon,
   normalizePath,
 } from "obsidian";
-import { EditorState, RangeSetBuilder, Text as CMText } from "@codemirror/state";
 import {
-  Decoration,
-  EditorView,
-  ViewPlugin,
-  WidgetType,
-  type DecorationSet,
-  type ViewUpdate,
-} from "@codemirror/view";
+  createChunkToolsExtension,
+  createSyncBadgeExtension,
+} from "./editorExtensions";
 import { spawn, type ChildProcess } from "child_process";
 import { promises as fs, existsSync } from "fs";
 import http from "http";
@@ -31,7 +22,7 @@ import net from "net";
 import os from "os";
 import tls from "tls";
 import path from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { pathToFileURL } from "url";
 import { createHash } from "crypto";
 import {
   CHUNK_CACHE_DIR,
@@ -42,66 +33,58 @@ import {
   ZoteroRagSettingTab,
   ZoteroRagSettings,
 } from "./settings";
+import { PdfSidebarController } from "./pdfSidebar";
 import { ICON_ASSETS } from "./iconAssets";
+import {
+  ChunkTagModal,
+  ChunkTextPreviewModal,
+  ConfirmDeleteNoteModal,
+  ConfirmOverwriteModal,
+  ConfirmPurgeRedisOrphansModal,
+  ConfirmRebuildIndexModal,
+  LanguageSuggestModal,
+  MetadataConflictModal,
+  OutputModal,
+  RedisSearchModal,
+  TextPromptModal,
+  ZoteroItemSuggestModal,
+} from "./modals";
 import { TOOL_ASSETS } from "./toolAssets";
+import type {
+  DocIndexEntry,
+  MetadataDecision,
+  NoteMetadataFields,
+  ZoteroItemValues,
+  ZoteroLocalItem,
+} from "./types";
+import {
+  ZRR_CHUNK_END_RE,
+  ZRR_CHUNK_EXCLUDE_ANY_RE,
+  ZRR_CHUNK_START_RE,
+  ZRR_SYNC_END_RE,
+  ZRR_SYNC_START_RE,
+  extractDocIdFromDoc,
+  extractFirstChunkMarkerFromContent,
+  findChunkStartLineInDoc,
+  parseChunkMarkerLine,
+} from "./chunkMarkers";
+import {
+  downloadZoteroPdf,
+  resolvePdfAttachment,
+} from "./pdfAttachments";
+import {
+  coerceString,
+  extractCitekey,
+  extractDoiFromCsl,
+  extractDoiFromExtra,
+  extractShortTitleFromCsl,
+  extractShortTitleFromValues,
+  extractYear,
+  formatCreatorName,
+  getDocIdFromValues,
+} from "./zoteroItemHelpers";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage, ChatRetrievedChunk } from "./chatView";
-
-type ZoteroItemValues = Record<string, any> & { version?: number };
-
-type ZoteroLocalItem = {
-  key: string;
-  data: Record<string, any>;
-  meta?: Record<string, any>;
-};
-
-type PdfAttachment = {
-  key: string;
-  filePath?: string;
-};
-
-type NoteMetadataFields = {
-  title: string;
-  short_title: string;
-  date: string;
-  abstract: string;
-  tags: string[];
-  authors: string[];
-  editors: string[];
-};
-
-type MetadataDecision = "note" | "zotero" | "skip";
-
-type DocIndexEntry = {
-  doc_id: string;
-  note_path: string;
-  note_title: string;
-  zotero_title?: string;
-  short_title?: string;
-  pdf_path?: string;
-  attachment_key?: string;
-  updated_at: string;
-};
-
-type LanguageOption = {
-  label: string;
-  value: string;
-};
-
-const LANGUAGE_OPTIONS: LanguageOption[] = [
-  { label: "Auto (no hint)", value: "" },
-  { label: "English (en)", value: "en" },
-  { label: "German (de)", value: "de" },
-  { label: "German + English (de,en)", value: "de,en" },
-  { label: "French (fr)", value: "fr" },
-  { label: "Spanish (es)", value: "es" },
-  { label: "Italian (it)", value: "it" },
-  { label: "Dutch (nl)", value: "nl" },
-  { label: "Portuguese (pt)", value: "pt" },
-  { label: "Polish (pl)", value: "pl" },
-  { label: "Swedish (sv)", value: "sv" },
-  { label: "Other (custom ISO code)", value: "__custom__" },
-];
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -125,1435 +108,6 @@ type ParsedChunkBlock = {
   text: string;
   excludeFlag: boolean;
 };
-
-type ChunkMarkerInfo = {
-  chunkId?: string;
-  pageNumber?: number;
-};
-
-const ZRR_SYNC_START_RE = /<!--\s*zrr:sync-start[^>]*-->/i;
-const ZRR_SYNC_END_RE = /<!--\s*zrr:sync-end\s*-->/i;
-const ZRR_CHUNK_START_RE = /<!--\s*zrr:chunk\b([^>]*)-->/i;
-const ZRR_CHUNK_END_RE = /<!--\s*zrr:chunk\s+end\s*-->/i;
-const ZRR_CHUNK_EXCLUDE_ANY_RE = /<!--\s*zrr:(?:exclude|delete)\s*-->/i;
-
-type ZrrBadgeInfo = {
-  type: "sync-start" | "sync-end" | "chunk-start" | "chunk-end";
-  docId?: string;
-  chunkId?: string;
-  excluded?: boolean;
-  pageNumber?: number;
-  chunkKind?: "page" | "section";
-};
-
-const parseZrrBadgeInfo = (data: string): ZrrBadgeInfo | null => {
-  const trimmed = data.trim();
-  if (!trimmed.toLowerCase().startsWith("zrr:")) {
-    return null;
-  }
-  if (/^zrr:sync-start\b/i.test(trimmed)) {
-    const docMatch = trimmed.match(/\bdoc_id=(["']?)([^"'\s]+)\1/i);
-    return {
-      type: "sync-start",
-      docId: docMatch ? docMatch[2] : undefined,
-    };
-  }
-  if (/^zrr:sync-end\b/i.test(trimmed)) {
-    return { type: "sync-end" };
-  }
-  if (/^zrr:chunk\s+end\b/i.test(trimmed)) {
-    return { type: "chunk-end" };
-  }
-  const chunkMatch = trimmed.match(/^zrr:chunk\b(.*)$/i);
-  if (!chunkMatch) {
-    return null;
-  }
-  const attrs = chunkMatch[1] || "";
-  const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
-  const chunkId = idMatch ? idMatch[2] : "";
-  const pageAttrMatch = attrs.match(/\bpage(?:_start)?=(["']?)(\d+)\1/i);
-  const pageAttr = pageAttrMatch ? Number.parseInt(pageAttrMatch[2], 10) : undefined;
-  const pageMatch = chunkId.match(/^p(\d+)$/i);
-  const pageFromId = pageMatch ? Number.parseInt(pageMatch[1], 10) : undefined;
-  const pageNumber = Number.isFinite(pageAttr ?? NaN) ? pageAttr : pageFromId;
-  const excluded = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
-  return {
-    type: "chunk-start",
-    chunkId: chunkId || undefined,
-    excluded,
-    pageNumber: Number.isFinite(pageNumber ?? NaN) ? pageNumber : undefined,
-    chunkKind: pageNumber ? "page" : "section",
-  };
-};
-
-const parseChunkMarkerLine = (line: string): ChunkMarkerInfo | null => {
-  if (!line) {
-    return null;
-  }
-  const match = line.match(ZRR_CHUNK_START_RE);
-  if (!match) {
-    return null;
-  }
-  const attrs = match[1] || "";
-  const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
-  const chunkId = idMatch ? idMatch[2].trim() : undefined;
-  const pageAttrMatch = attrs.match(/\bpage(?:_start)?=(["']?)(\d+)\1/i);
-  const pageAttr = pageAttrMatch ? Number.parseInt(pageAttrMatch[2], 10) : undefined;
-  const pageFromId = chunkId ? extractPageNumberFromChunkId(chunkId) ?? undefined : undefined;
-  const pageNumber = Number.isFinite(pageAttr ?? NaN) ? pageAttr : pageFromId;
-  return {
-    chunkId,
-    pageNumber: Number.isFinite(pageNumber ?? NaN) ? Number(pageNumber) : undefined,
-  };
-};
-
-const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElement | null => {
-  const badge = document.createElement("div");
-  badge.classList.add("zrr-sync-badge");
-  if (info.type === "sync-start" || info.type === "sync-end") {
-    badge.classList.add("zrr-sync-badge--sync");
-    badge.classList.add(
-      info.type === "sync-start" ? "zrr-sync-badge--sync-start" : "zrr-sync-badge--sync-end"
-    );
-    if (info.type === "sync-start") {
-      badge.textContent = info.docId ? `Redis Index Sync start • ${info.docId}` : "Redis Index Sync start";
-    } else {
-      badge.textContent = "Redis Index Sync end";
-    }
-    return badge;
-  }
-  if (info.type === "chunk-end") {
-    badge.classList.add("zrr-sync-badge--chunk-end");
-    badge.textContent = info.chunkKind === "page" ? "Page end" : "Section end";
-    if (info.chunkKind) {
-      badge.classList.add(`zrr-sync-badge--${info.chunkKind}`);
-    }
-    return badge;
-  }
-  if (info.type !== "chunk-start") {
-    return null;
-  }
-  badge.classList.add("zrr-sync-badge--chunk");
-  if (info.chunkKind) {
-    badge.classList.add(`zrr-sync-badge--${info.chunkKind}`);
-  }
-  if (info.excluded) {
-    badge.classList.add("is-excluded");
-  }
-  if (info.pageNumber && totalPages > 0) {
-    badge.textContent = `Page ${info.pageNumber}/${totalPages}`;
-  } else if (info.pageNumber) {
-    badge.textContent = `Page ${info.pageNumber}`;
-  } else if (info.chunkId) {
-    badge.textContent = `Section ${info.chunkId}`;
-  } else {
-    badge.textContent = "Section";
-  }
-  if (info.excluded) {
-    badge.textContent = `${badge.textContent} • excluded`;
-  }
-  return badge;
-};
-
-class TextPromptModal extends Modal {
-  private titleText: string;
-  private placeholder: string;
-  private onSubmit: (value: string) => void;
-  private emptyMessage: string;
-
-  constructor(
-    app: App,
-    titleText: string,
-    placeholder: string,
-    onSubmit: (value: string) => void,
-    emptyMessage = "Value cannot be empty."
-  ) {
-    super(app);
-    this.titleText = titleText;
-    this.placeholder = placeholder;
-    this.onSubmit = onSubmit;
-    this.emptyMessage = emptyMessage;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: this.titleText });
-
-    const input = contentEl.createEl("input", {
-      type: "text",
-      placeholder: this.placeholder,
-    });
-    input.style.width = "100%";
-    input.focus();
-
-    const submit = contentEl.createEl("button", { text: "Submit" });
-    submit.style.marginTop = "0.75rem";
-
-    const submitValue = (): void => {
-      const value = input.value.trim();
-      if (!value) {
-        new Notice(this.emptyMessage);
-        return;
-      }
-      this.close();
-      this.onSubmit(value);
-    };
-
-    submit.addEventListener("click", submitValue);
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        submitValue();
-      }
-    });
-  }
-}
-
-class ChunkTagModal extends Modal {
-  private chunkId: string;
-  private initialTags: string[];
-  private onSubmit: (tags: string[]) => Promise<void> | void;
-  private onRegenerate?: () => Promise<string[] | null>;
-
-  constructor(
-    app: App,
-    chunkId: string,
-    initialTags: string[],
-    onSubmit: (tags: string[]) => Promise<void> | void,
-    onRegenerate?: () => Promise<string[] | null>
-  ) {
-    super(app);
-    this.chunkId = chunkId;
-    this.initialTags = initialTags;
-    this.onSubmit = onSubmit;
-    this.onRegenerate = onRegenerate;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: `Edit tags for ${this.chunkId}` });
-
-    const input = contentEl.createEl("textarea", {
-      attr: { rows: "3" },
-    });
-    input.style.width = "100%";
-    input.placeholder = "tag1, tag2, tag3";
-    input.value = this.initialTags.join(", ");
-    input.focus();
-
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-
-    const submit = actions.createEl("button", { text: "Save tags" });
-
-    const handleSubmit = async (): Promise<void> => {
-      const raw = input.value || "";
-      const tags = raw
-        .split(/[,;\n]+/)
-        .map((tag) => tag.trim())
-        .filter((tag) => tag.length > 0);
-      const unique = Array.from(new Set(tags));
-      this.close();
-      await Promise.resolve(this.onSubmit(unique));
-    };
-
-    if (this.onRegenerate) {
-      const regenerate = actions.createEl("button", { text: "Regenerate" });
-      regenerate.addEventListener("click", async () => {
-        regenerate.setAttribute("disabled", "true");
-        submit.setAttribute("disabled", "true");
-        try {
-          const tags = await this.onRegenerate?.();
-          if (tags && tags.length > 0) {
-            input.value = tags.join(", ");
-            await Promise.resolve(this.onSubmit(tags));
-          } else if (tags) {
-            new Notice("No tags were generated.");
-          }
-        } finally {
-          regenerate.removeAttribute("disabled");
-          submit.removeAttribute("disabled");
-        }
-      });
-    }
-
-    submit.addEventListener("click", handleSubmit);
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        handleSubmit();
-      }
-    });
-  }
-}
-
-class ChunkTextPreviewModal extends Modal {
-  private titleText: string;
-  private content: string;
-  private noteText: string;
-
-  constructor(app: App, titleText: string, content: string, noteText = "") {
-    super(app);
-    this.titleText = titleText;
-    this.content = content;
-    this.noteText = noteText;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: this.titleText });
-    if (this.noteText) {
-      const note = contentEl.createEl("div", { text: this.noteText });
-      note.className = "zrr-indexed-note";
-    }
-    const area = contentEl.createEl("textarea", {
-      attr: { rows: "12", readonly: "true" },
-    });
-    area.style.width = "100%";
-    area.value = this.content;
-  }
-}
-
-const getLogLineClass = (text: string): string | null => {
-  if (text.includes("STDERR")) {
-    return "zrr-log-stderr";
-  }
-  if (text.includes("ERROR")) {
-    return "zrr-log-error";
-  }
-  if (text.includes("WARNING") || text.includes("WARN")) {
-    return "zrr-log-warning";
-  }
-  if (text.includes("INFO")) {
-    return "zrr-log-info";
-  }
-  return null;
-};
-
-const buildLogDecorations = (view: EditorView): DecorationSet => {
-  const builder = new RangeSetBuilder<Decoration>();
-  for (const { from, to } of view.visibleRanges) {
-    let pos = from;
-    while (pos <= to) {
-      const line = view.state.doc.lineAt(pos);
-      const className = getLogLineClass(line.text);
-      if (className) {
-        builder.add(line.from, line.from, Decoration.line({ class: className }));
-      }
-      pos = line.to + 1;
-    }
-  }
-  return builder.finish();
-};
-
-const LOG_THEME = EditorView.theme({
-  ".cm-editor": {
-    height: "100%",
-    display: "flex",
-    flexDirection: "column",
-    minHeight: "0",
-  },
-  ".cm-scroller": {
-    fontFamily: "var(--font-monospace)",
-    fontSize: "0.85rem",
-    flex: "1",
-    height: "100%",
-    maxHeight: "100%",
-    overflow: "auto",
-  },
-  ".zrr-log-error": { color: "var(--text-error)" },
-  ".zrr-log-warning": { color: "var(--text-accent)" },
-  ".zrr-log-info": { color: "var(--text-muted)" },
-  ".zrr-log-stderr": { color: "var(--text-accent)" },
-});
-
-const extractDocIdFromDoc = (doc: CMText): string | null => {
-  for (let line = 1; line <= doc.lines; line += 1) {
-    const text = doc.line(line).text;
-    if (ZRR_SYNC_START_RE.test(text)) {
-      const docMatch = text.match(/doc_id=([\"']?)([^\"'\s]+)\1/i);
-      return docMatch ? docMatch[2].trim() : null;
-    }
-  }
-  return null;
-};
-
-const findChunkStartLineInDoc = (
-  doc: CMText,
-  fromLine: number
-): { line: number; text: string } | null => {
-  let line = fromLine;
-  for (; line >= 1; line -= 1) {
-    const text = doc.line(line).text;
-    if (ZRR_CHUNK_START_RE.test(text)) {
-      return { line, text };
-    }
-    if (ZRR_SYNC_START_RE.test(text) || ZRR_SYNC_END_RE.test(text)) {
-      break;
-    }
-  }
-  return null;
-};
-
-const findChunkEndLineInDoc = (doc: CMText, fromLine: number): number | null => {
-  for (let line = fromLine; line <= doc.lines; line += 1) {
-    const text = doc.line(line).text;
-    if (ZRR_CHUNK_END_RE.test(text)) {
-      return line;
-    }
-    if (ZRR_SYNC_END_RE.test(text)) {
-      break;
-    }
-  }
-  return null;
-};
-
-const findChunkAtCursorInDoc = (
-  doc: CMText,
-  cursorLine: number
-): { startLine: number; endLine: number; text: string } | null => {
-  const start = findChunkStartLineInDoc(doc, cursorLine);
-  if (!start) {
-    return null;
-  }
-  const endLine = findChunkEndLineInDoc(doc, start.line + 1);
-  if (endLine === null || cursorLine < start.line || cursorLine > endLine) {
-    return null;
-  }
-  return { startLine: start.line, endLine, text: start.text };
-};
-
-const hasExcludeMarkerInRange = (doc: CMText, startLine: number, endLine: number): boolean => {
-  if (startLine > endLine) {
-    return false;
-  }
-  for (let line = startLine; line <= endLine; line += 1) {
-    const text = doc.line(line).text;
-    if (ZRR_CHUNK_EXCLUDE_ANY_RE.test(text)) {
-      return true;
-    }
-  }
-  return false;
-};
-
-const extractPageNumberFromChunkId = (chunkId: string): number | null => {
-  if (!chunkId) {
-    return null;
-  }
-  const normalized = chunkId.includes(":") ? chunkId.split(":").pop() ?? chunkId : chunkId;
-  const pageMatch = normalized.match(/^p(\d+)$/i);
-  if (!pageMatch) {
-    return null;
-  }
-  const pageNumber = Number.parseInt(pageMatch[1], 10);
-  return Number.isFinite(pageNumber) ? pageNumber : null;
-};
-
-const extractPageNumberFromChunkLine = (line: string): number | null => {
-  const info = parseChunkMarkerLine(line);
-  return info?.pageNumber ?? null;
-};
-
-const extractFirstChunkMarkerFromContent = (content: string): ChunkMarkerInfo | null => {
-  if (!content) {
-    return null;
-  }
-  const match = content.match(/<!--\s*zrr:chunk\b[^>]*-->/i);
-  if (!match) {
-    return null;
-  }
-  return parseChunkMarkerLine(match[0]);
-};
-
-const getTopVisibleLineNumber = (view: EditorView): number | null => {
-  const rect = view.scrollDOM.getBoundingClientRect();
-  const pos = view.posAtCoords({ x: rect.left + 8, y: rect.top + 4 });
-  if (pos === null) {
-    return null;
-  }
-  return view.state.doc.lineAt(pos).number;
-};
-
-class ChunkToolsWidget extends WidgetType {
-  private plugin: ZoteroRagPlugin;
-  private docId: string;
-  private chunkId: string;
-  private startLine: number;
-  private excluded: boolean;
-
-  constructor(
-    plugin: ZoteroRagPlugin,
-    docId: string,
-    chunkId: string,
-    startLine: number,
-    excluded: boolean
-  ) {
-    super();
-    this.plugin = plugin;
-    this.docId = docId;
-    this.chunkId = chunkId;
-    this.startLine = startLine;
-    this.excluded = excluded;
-  }
-
-  eq(other: ChunkToolsWidget): boolean {
-    return (
-      this.docId === other.docId
-      && this.chunkId === other.chunkId
-      && this.startLine === other.startLine
-      && this.excluded === other.excluded
-    );
-  }
-
-  toDOM(): HTMLElement {
-    const wrap = document.createElement("span");
-    wrap.className = "zrr-chunk-toolbar";
-    wrap.setAttribute("data-chunk-id", this.chunkId);
-
-    const applyTooltip = (el: HTMLElement, text: string): void => {
-      el.setAttribute("title", text);
-      el.setAttribute("aria-label", text);
-      el.setAttribute("data-tooltip-position", "top");
-    };
-
-    const applyButtonIcon = (button: HTMLButtonElement, iconName: string, label: string): void => {
-      const iconEl = document.createElement("span");
-      iconEl.className = "zrr-chunk-button-icon";
-      setIcon(iconEl, iconName);
-      const textEl = document.createElement("span");
-      textEl.className = "zrr-chunk-button-label";
-      textEl.textContent = label;
-      button.appendChild(iconEl);
-      button.appendChild(textEl);
-    };
-
-    const clean = document.createElement("button");
-    clean.type = "button";
-    clean.className = "zrr-chunk-button";
-    applyButtonIcon(clean, "sparkles", "Clean");
-    applyTooltip(clean, "Clean this chunk with the OCR cleanup model");
-    clean.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.cleanChunkFromToolbar(this.startLine);
-    });
-    wrap.appendChild(clean);
-
-    const tags = document.createElement("button");
-    tags.type = "button";
-    tags.className = "zrr-chunk-button";
-    applyButtonIcon(tags, "tag", "Tags");
-    applyTooltip(tags, "Edit chunk tags");
-    tags.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.openChunkTagEditor(this.docId, this.chunkId);
-    });
-    wrap.appendChild(tags);
-
-    const preview = document.createElement("button");
-    preview.type = "button";
-    preview.className = "zrr-chunk-button";
-    applyButtonIcon(preview, "search", "Indexed");
-    applyTooltip(preview, "Preview indexed chunk text");
-    preview.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.openChunkIndexedTextPreview(this.docId, this.chunkId);
-    });
-    wrap.appendChild(preview);
-
-    const zotero = document.createElement("button");
-    zotero.type = "button";
-    zotero.className = "zrr-chunk-button";
-    applyButtonIcon(zotero, "external-link", "Zotero");
-    applyTooltip(zotero, "Open this page in Zotero");
-    zotero.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.plugin.openChunkInZotero(this.docId, this.chunkId);
-    });
-    wrap.appendChild(zotero);
-
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "zrr-chunk-button";
-    const toggleLabel = this.excluded ? "Include" : "Exclude";
-    const toggleIcon = this.excluded ? "check" : "ban";
-    applyButtonIcon(toggle, toggleIcon, toggleLabel);
-    applyTooltip(
-      toggle,
-      this.excluded ? "Include this chunk in the index" : "Exclude this chunk from the index"
-    );
-    toggle.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      this.plugin.toggleChunkExcludeFromToolbar(this.startLine);
-    });
-    wrap.appendChild(toggle);
-
-    return wrap;
-  }
-
-  ignoreEvent(): boolean {
-    return true;
-  }
-}
-
-const buildChunkToolsDecorations = (
-  view: EditorView,
-  plugin: ZoteroRagPlugin
-): DecorationSet => {
-  const doc = view.state.doc;
-  const docId = extractDocIdFromDoc(doc);
-  if (!docId) {
-    return Decoration.none;
-  }
-  const cursorPos = view.state.selection.main.head;
-  const cursorLine = doc.lineAt(cursorPos).number;
-  const chunk = findChunkAtCursorInDoc(doc, cursorLine);
-  if (!chunk) {
-    return Decoration.none;
-  }
-  const startMatch = chunk.text.match(ZRR_CHUNK_START_RE);
-  if (!startMatch) {
-    return Decoration.none;
-  }
-  const attrs = (startMatch[1] ?? "").trim();
-  const idMatch = attrs.match(/id=([\"']?)([^\"'\s]+)\1/i);
-  if (!idMatch) {
-    return Decoration.none;
-  }
-  const chunkId = idMatch[2].trim();
-  if (!chunkId) {
-    return Decoration.none;
-  }
-  const hasExcludeAttr = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
-  const hasExcludeMarker = hasExcludeMarkerInRange(doc, chunk.startLine + 1, chunk.endLine - 1);
-  const excluded = hasExcludeAttr || hasExcludeMarker;
-  const line = doc.line(chunk.startLine);
-  const widget = Decoration.widget({
-    widget: new ChunkToolsWidget(plugin, docId, chunkId, chunk.startLine, excluded),
-    side: 1,
-  });
-  return Decoration.set([widget.range(line.to)]);
-};
-
-class ZrrBadgeWidget extends WidgetType {
-  private info: ZrrBadgeInfo;
-  private totalPages: number;
-
-  constructor(info: ZrrBadgeInfo, totalPages: number) {
-    super();
-    this.info = info;
-    this.totalPages = totalPages;
-  }
-
-  toDOM(): HTMLElement {
-    return createZrrBadgeElement(this.info, this.totalPages) ?? document.createElement("span");
-  }
-}
-
-const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
-  const sourceView = view.dom.closest(".markdown-source-view");
-  if (!sourceView || !sourceView.classList.contains("is-live-preview")) {
-    return Decoration.none;
-  }
-  const doc = view.state.doc;
-  const builder = new RangeSetBuilder<Decoration>();
-  const entries: Array<{ line: number; from: number; to: number; info: ZrrBadgeInfo }> = [];
-  const pageNumbers: number[] = [];
-  let hasPageChunks = false;
-  for (let lineNo = 1; lineNo <= doc.lines; lineNo += 1) {
-    const line = doc.line(lineNo);
-    const match = line.text.match(/<!--\s*([^>]*)\s*-->/);
-    if (!match) {
-      continue;
-    }
-    const info = parseZrrBadgeInfo(match[1]);
-    if (!info) {
-      continue;
-    }
-    if (info.type === "chunk-start") {
-      info.chunkKind = info.chunkKind ?? (info.pageNumber ? "page" : "section");
-      if (info.pageNumber) {
-        hasPageChunks = true;
-      }
-    } else if (info.type === "chunk-end") {
-      info.chunkKind = info.chunkKind ?? "section";
-    }
-    entries.push({ line: lineNo, from: line.from, to: line.to, info });
-    if (info.pageNumber) {
-      pageNumbers.push(info.pageNumber);
-    }
-  }
-  if (!entries.length) {
-    return Decoration.none;
-  }
-  if (hasPageChunks) {
-    for (const entry of entries) {
-      if (entry.info.type === "chunk-end") {
-        entry.info.chunkKind = "page";
-      }
-    }
-  }
-  const totalPages = pageNumbers.length ? Math.max(...pageNumbers) : 0;
-
-  for (const entry of entries) {
-    const widget = Decoration.replace({
-      widget: new ZrrBadgeWidget(entry.info, totalPages),
-    });
-    builder.add(entry.from, entry.to, widget);
-  }
-  return builder.finish();
-};
-
-const createSyncBadgeExtension = (): ViewPlugin<{
-  decorations: DecorationSet;
-}> =>
-  ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
-
-      constructor(view: EditorView) {
-        this.decorations = buildSyncBadgeDecorations(view);
-      }
-
-      update(update: ViewUpdate): void {
-        if (update.docChanged || update.viewportChanged) {
-          this.decorations = buildSyncBadgeDecorations(update.view);
-        }
-      }
-    },
-    {
-      decorations: (value) => value.decorations,
-    }
-  );
-
-const createChunkToolsExtension = (plugin: ZoteroRagPlugin): ViewPlugin<{
-  decorations: DecorationSet;
-}> =>
-  ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
-
-      constructor(view: EditorView) {
-        this.decorations = buildChunkToolsDecorations(view, plugin);
-      }
-
-      update(update: ViewUpdate): void {
-        if (update.docChanged || update.selectionSet || update.viewportChanged) {
-          this.decorations = buildChunkToolsDecorations(update.view, plugin);
-        }
-      }
-    },
-    {
-      decorations: (value) => value.decorations,
-    }
-  );
-
-const createPdfSidebarSyncExtension = (plugin: ZoteroRagPlugin): ViewPlugin<{}> =>
-  ViewPlugin.fromClass(
-    class {
-      private view: EditorView;
-      private docId: string | null = null;
-      private lastPage: number | null = null;
-      private lastChunkId: string | null = null;
-      private scrollFrame: number | null = null;
-      private onScroll: () => void;
-
-      constructor(view: EditorView) {
-        this.view = view;
-        this.docId = extractDocIdFromDoc(view.state.doc);
-        this.onScroll = () => this.scheduleSync(false);
-        view.scrollDOM.addEventListener("scroll", this.onScroll, { passive: true });
-        this.scheduleSync(true);
-      }
-
-      update(update: ViewUpdate): void {
-        if (update.docChanged) {
-          this.docId = extractDocIdFromDoc(update.view.state.doc);
-          this.lastPage = null;
-          this.lastChunkId = null;
-        }
-        if (update.docChanged || update.viewportChanged) {
-          this.scheduleSync(false);
-        }
-      }
-
-      destroy(): void {
-        this.view.scrollDOM.removeEventListener("scroll", this.onScroll);
-        if (this.scrollFrame !== null) {
-          window.cancelAnimationFrame(this.scrollFrame);
-          this.scrollFrame = null;
-        }
-      }
-
-      private scheduleSync(force: boolean): void {
-        if (this.scrollFrame !== null) {
-          return;
-        }
-        this.scrollFrame = window.requestAnimationFrame(() => {
-          this.scrollFrame = null;
-          this.syncPdfSidebar(this.view, force);
-        });
-      }
-
-      private syncPdfSidebar(view: EditorView, force: boolean): void {
-        const docId = this.docId;
-        if (!docId) {
-          return;
-        }
-        const cursorLine = getTopVisibleLineNumber(view);
-        if (cursorLine === null) {
-          return;
-        }
-        const chunkStart = findChunkStartLineInDoc(view.state.doc, cursorLine);
-        if (!chunkStart) {
-          return;
-        }
-        const info = parseChunkMarkerLine(chunkStart.text);
-        const pageNumber = info?.pageNumber ?? null;
-        const chunkId = info?.chunkId ?? null;
-        if (!pageNumber && !chunkId) {
-          return;
-        }
-        const samePage = pageNumber !== null && this.lastPage === pageNumber;
-        const sameChunk = pageNumber === null && chunkId !== null && this.lastChunkId === chunkId;
-        if (!force && (samePage || sameChunk)) {
-          return;
-        }
-        this.lastPage = pageNumber;
-        this.lastChunkId = chunkId;
-        void plugin.syncPdfSidebarForDoc(docId, pageNumber ?? undefined, chunkId ?? undefined);
-      }
-    }
-  );
-
-const LOG_HIGHLIGHT_PLUGIN = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet;
-    constructor(view: EditorView) {
-      this.decorations = buildLogDecorations(view);
-    }
-    update(update: ViewUpdate): void {
-      if (update.docChanged || update.viewportChanged) {
-        this.decorations = buildLogDecorations(update.view);
-      }
-    }
-  },
-  {
-    decorations: (value) => value.decorations,
-  }
-);
-
-type OutputModalOptions = {
-  autoRefresh?: boolean;
-  refreshIntervalMs?: number;
-  onRefresh?: () => Promise<string>;
-  onClear?: () => Promise<void>;
-  clearLabel?: string;
-};
-
-class RedisSearchModal extends Modal {
-  private plugin: ZoteroRagPlugin;
-  private initialTerm: string;
-  private editorView?: EditorView;
-  private bodyText = "";
-  private inputEl?: HTMLInputElement;
-  private statusEl?: HTMLElement;
-
-  constructor(app: App, plugin: ZoteroRagPlugin, initialTerm = "") {
-    super(app);
-    this.plugin = plugin;
-    this.initialTerm = initialTerm;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    if (this.modalEl) {
-      this.modalEl.style.width = "80vw";
-      this.modalEl.style.maxWidth = "1200px";
-      this.modalEl.style.height = "80vh";
-      this.modalEl.style.maxHeight = "90vh";
-      this.modalEl.style.resize = "both";
-      this.modalEl.style.overflow = "hidden";
-    }
-
-    contentEl.style.display = "flex";
-    contentEl.style.flexDirection = "column";
-    contentEl.style.height = "100%";
-    contentEl.style.overflow = "hidden";
-    contentEl.style.minHeight = "0";
-
-    const header = contentEl.createDiv();
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.gap = "0.5rem";
-    header.createEl("h3", { text: "Redis index search" });
-
-    const copyBtn = header.createEl("button", { text: "Copy All" });
-    copyBtn.style.marginLeft = "auto";
-    copyBtn.addEventListener("click", () => {
-      this.copyResultsToClipboard();
-    });
-
-    const searchRow = contentEl.createDiv();
-    searchRow.style.display = "flex";
-    searchRow.style.alignItems = "center";
-    searchRow.style.gap = "0.5rem";
-    searchRow.style.margin = "0.5rem 0";
-
-    const input = searchRow.createEl("input");
-    input.type = "text";
-    input.placeholder = "Search term";
-    input.value = this.initialTerm;
-    input.style.flex = "1";
-    input.style.minWidth = "0";
-    this.inputEl = input;
-
-    const button = searchRow.createEl("button", { text: "Search" });
-    button.addEventListener("click", () => {
-      void this.runSearch();
-    });
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        void this.runSearch();
-      }
-    });
-
-    const status = contentEl.createDiv();
-    status.style.color = "var(--text-muted)";
-    status.style.marginBottom = "0.5rem";
-    this.statusEl = status;
-
-    const editorWrap = contentEl.createDiv();
-    editorWrap.style.flex = "1 1 0";
-    editorWrap.style.minHeight = "0";
-    editorWrap.style.border = "1px solid var(--background-modifier-border)";
-    editorWrap.style.borderRadius = "6px";
-    editorWrap.style.display = "flex";
-    editorWrap.style.flexDirection = "column";
-    editorWrap.style.overflow = "auto";
-
-    const state = EditorState.create({
-      doc: this.bodyText,
-      extensions: [
-        LOG_THEME,
-        LOG_HIGHLIGHT_PLUGIN,
-        EditorView.editable.of(false),
-        EditorState.readOnly.of(true),
-        EditorView.lineWrapping,
-      ],
-    });
-
-    this.editorView = new EditorView({
-      state,
-      parent: editorWrap,
-    });
-
-    if (this.initialTerm) {
-      void this.runSearch();
-    }
-  }
-
-  onClose(): void {
-    this.editorView?.destroy();
-    this.editorView = undefined;
-  }
-
-  private async runSearch(): Promise<void> {
-    const term = (this.inputEl?.value || "").trim();
-    if (!term) {
-      if (this.statusEl) {
-        this.statusEl.textContent = "Enter a search term.";
-      }
-      return;
-    }
-    if (this.statusEl) {
-      this.statusEl.textContent = "Searching...";
-    }
-    const nextText = await this.plugin.runRedisSearch(term);
-    this.updateEditor(nextText);
-    if (this.statusEl) {
-      this.statusEl.textContent = `Results for “${term}”`;
-    }
-  }
-
-  private updateEditor(nextText: string): void {
-    if (!this.editorView) {
-      return;
-    }
-    const view = this.editorView;
-    const scrollTop = view.scrollDOM.scrollTop;
-    const selection = view.state.selection.main;
-    const maxPos = nextText.length;
-    const anchor = Math.min(selection.anchor, maxPos);
-    const head = Math.min(selection.head, maxPos);
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: nextText },
-      selection: { anchor, head },
-    });
-    view.scrollDOM.scrollTop = scrollTop;
-    this.bodyText = nextText;
-  }
-
-  private copyResultsToClipboard(): void {
-    const text = this.bodyText || "";
-    if (!text) {
-      new Notice("Nothing to copy.");
-      return;
-    }
-    navigator.clipboard.writeText(text)
-      .then(() => new Notice("Results copied to clipboard."))
-      .catch(() => new Notice("Failed to copy results."));
-  }
-}
-
-class OutputModal extends Modal {
-  private titleText: string;
-  private bodyText: string;
-  private editorView?: EditorView;
-  private refreshTimer?: number;
-  private options?: OutputModalOptions;
-
-  constructor(app: App, titleText: string, bodyText: string, options?: OutputModalOptions) {
-    super(app);
-    this.titleText = titleText;
-    this.bodyText = bodyText;
-    this.options = options;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    if (this.modalEl) {
-      this.modalEl.style.width = "80vw";
-      this.modalEl.style.maxWidth = "1200px";
-      this.modalEl.style.height = "80vh";
-      this.modalEl.style.maxHeight = "90vh";
-      this.modalEl.style.resize = "both";
-      this.modalEl.style.overflow = "hidden";
-    }
-    contentEl.style.display = "flex";
-    contentEl.style.flexDirection = "column";
-    contentEl.style.height = "100%";
-    contentEl.style.overflow = "hidden";
-    contentEl.style.minHeight = "0";
-
-    const header = contentEl.createDiv();
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.gap = "0.5rem";
-    header.createEl("h3", { text: this.titleText });
-    const actions = header.createDiv();
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    if (this.options?.onClear) {
-      const clearLabel = this.options.clearLabel ?? "Clear log";
-      const clearButton = actions.createEl("button", { text: clearLabel });
-      clearButton.addEventListener("click", async () => {
-        try {
-          await this.options?.onClear?.();
-        } finally {
-          await this.refreshFromSource();
-        }
-      });
-    }
-    const editorWrap = contentEl.createDiv();
-    editorWrap.style.flex = "1 1 0";
-    editorWrap.style.minHeight = "0";
-    editorWrap.style.border = "1px solid var(--background-modifier-border)";
-    editorWrap.style.borderRadius = "6px";
-    editorWrap.style.display = "flex";
-    editorWrap.style.flexDirection = "column";
-    editorWrap.style.overflow = "auto";
-
-    const state = EditorState.create({
-      doc: this.bodyText,
-      extensions: [
-        LOG_THEME,
-        LOG_HIGHLIGHT_PLUGIN,
-        EditorView.editable.of(true),
-        EditorState.readOnly.of(false),
-        EditorView.lineWrapping,
-      ],
-    });
-
-    this.editorView = new EditorView({
-      state,
-      parent: editorWrap,
-    });
-
-    void this.refreshFromSource();
-    if (this.options?.autoRefresh && this.options.onRefresh) {
-      const intervalMs = this.options.refreshIntervalMs ?? 2000;
-      this.refreshTimer = window.setInterval(() => {
-        void this.refreshFromSource();
-      }, intervalMs);
-    }
-  }
-
-  onClose(): void {
-    if (this.refreshTimer !== undefined) {
-      window.clearInterval(this.refreshTimer);
-      this.refreshTimer = undefined;
-    }
-    this.editorView?.destroy();
-    this.editorView = undefined;
-  }
-
-  private async refreshFromSource(): Promise<void> {
-    if (!this.options?.onRefresh || !this.editorView) {
-      return;
-    }
-    let nextText = "";
-    try {
-      nextText = (await this.options.onRefresh()) || "";
-    } catch {
-      return;
-    }
-    if (nextText === this.bodyText) {
-      return;
-    }
-    const view = this.editorView;
-    const scrollTop = view.scrollDOM.scrollTop;
-    const selection = view.state.selection.main;
-    const maxPos = nextText.length;
-    const anchor = Math.min(selection.anchor, maxPos);
-    const head = Math.min(selection.head, maxPos);
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: nextText },
-      selection: { anchor, head },
-    });
-    view.scrollDOM.scrollTop = scrollTop;
-    this.bodyText = nextText;
-  }
-}
-
-class ConfirmOverwriteModal extends Modal {
-  private filePath: string;
-  private onResolve: (confirmed: boolean) => void;
-  private resolved = false;
-
-  constructor(app: App, filePath: string, onResolve: (confirmed: boolean) => void) {
-    super(app);
-    this.filePath = filePath;
-    this.onResolve = onResolve;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: "Overwrite existing note?" });
-    contentEl.createEl("p", {
-      text: `This will overwrite: ${this.filePath}`,
-    });
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-    const cancel = actions.createEl("button", { text: "Cancel" });
-    const confirm = actions.createEl("button", { text: "Overwrite" });
-    cancel.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(false);
-    });
-    confirm.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(true);
-    });
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.onResolve(false);
-    }
-  }
-}
-
-class ConfirmDeleteNoteModal extends Modal {
-  private notePath: string;
-  private docId: string;
-  private onResolve: (confirmed: boolean) => void;
-  private resolved = false;
-
-  constructor(app: App, notePath: string, docId: string, onResolve: (confirmed: boolean) => void) {
-    super(app);
-    this.notePath = notePath;
-    this.docId = docId;
-    this.onResolve = onResolve;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: "Delete note and cached data?" });
-    contentEl.createEl("p", {
-      text: `This will delete the note and cached chunks/items for doc_id ${this.docId}.`,
-    });
-    contentEl.createEl("p", {
-      text: `Note: ${this.notePath}`,
-    });
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-    const cancel = actions.createEl("button", { text: "Cancel" });
-    const confirm = actions.createEl("button", { text: "Delete" });
-    cancel.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(false);
-    });
-    confirm.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(true);
-    });
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.onResolve(false);
-    }
-  }
-}
-
-class ConfirmRebuildIndexModal extends Modal {
-  private reason: string;
-  private onResolve: (confirmed: boolean) => void;
-  private resolved = false;
-
-  constructor(app: App, reason: string, onResolve: (confirmed: boolean) => void) {
-    super(app);
-    this.reason = reason;
-    this.onResolve = onResolve;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: "Rebuild Redis index?" });
-    contentEl.createEl("p", { text: this.reason });
-    contentEl.createEl("p", {
-      text: "This will drop the RedisSearch index (and embeddings) and rebuild it from cached chunks.",
-    });
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-    const cancel = actions.createEl("button", { text: "Cancel" });
-    const confirm = actions.createEl("button", { text: "Drop & rebuild" });
-    cancel.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(false);
-    });
-    confirm.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(true);
-    });
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.onResolve(false);
-    }
-  }
-}
-
-class ConfirmPurgeRedisOrphansModal extends Modal {
-  private onResolve: (confirmed: boolean) => void;
-  private resolved = false;
-
-  constructor(app: App, onResolve: (confirmed: boolean) => void) {
-    super(app);
-    this.onResolve = onResolve;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: "Purge Redis orphaned chunks?" });
-    contentEl.createEl("p", {
-      text: "This removes Redis chunk keys that have no cached item.json or chunk.json on disk.",
-    });
-    contentEl.createEl("p", {
-      text: "Cache files are not deleted. Use this to clean up stale Redis data.",
-    });
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-    const cancel = actions.createEl("button", { text: "Cancel" });
-    const confirm = actions.createEl("button", { text: "Purge orphans" });
-    cancel.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(false);
-    });
-    confirm.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve(true);
-    });
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.onResolve(false);
-    }
-  }
-}
-
-class MetadataConflictModal extends Modal {
-  private fieldLabel: string;
-  private noteLabel: string;
-  private zoteroLabel: string;
-  private noteValue: string;
-  private zoteroValue: string;
-  private onResolve: (decision: MetadataDecision) => void;
-  private resolved = false;
-
-  constructor(
-    app: App,
-    fieldLabel: string,
-    noteLabel: string,
-    zoteroLabel: string,
-    noteValue: string,
-    zoteroValue: string,
-    onResolve: (decision: MetadataDecision) => void
-  ) {
-    super(app);
-    this.fieldLabel = fieldLabel;
-    this.noteLabel = noteLabel;
-    this.zoteroLabel = zoteroLabel;
-    this.noteValue = noteValue;
-    this.zoteroValue = zoteroValue;
-    this.onResolve = onResolve;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: `Resolve metadata conflict: ${this.fieldLabel}` });
-    const grid = contentEl.createEl("div");
-    grid.style.display = "grid";
-    grid.style.gap = "0.5rem";
-
-    grid.createEl("div", { text: "Note value" });
-    const noteBox = grid.createEl("textarea", {
-      attr: { readonly: "true", rows: "4" },
-    });
-    noteBox.style.width = "100%";
-    noteBox.value = this.noteValue || "(empty)";
-
-    grid.createEl("div", { text: "Zotero value" });
-    const zoteroBox = grid.createEl("textarea", {
-      attr: { readonly: "true", rows: "4" },
-    });
-    zoteroBox.style.width = "100%";
-    zoteroBox.value = this.zoteroValue || "(empty)";
-
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-    const keepNote = actions.createEl("button", { text: this.noteLabel });
-    const keepZotero = actions.createEl("button", { text: this.zoteroLabel });
-    const skip = actions.createEl("button", { text: "Skip" });
-    keepNote.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve("note");
-    });
-    keepZotero.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve("zotero");
-    });
-    skip.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve("skip");
-    });
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.onResolve("skip");
-    }
-  }
-}
-
-class LanguageSuggestModal extends SuggestModal<LanguageOption> {
-  private resolveSelection: (value: string | null) => void;
-  private resolved = false;
-
-  constructor(app: App, onSelect: (value: string | null) => void) {
-    super(app);
-    this.resolveSelection = onSelect;
-    this.setPlaceholder("Select a language for OCR/quality...");
-  }
-
-  getSuggestions(query: string): LanguageOption[] {
-    const trimmed = query.trim().toLowerCase();
-    if (!trimmed) {
-      return LANGUAGE_OPTIONS;
-    }
-    return LANGUAGE_OPTIONS.filter(
-      (option) =>
-        option.label.toLowerCase().includes(trimmed) ||
-        option.value.toLowerCase().includes(trimmed)
-    );
-  }
-
-  renderSuggestion(option: LanguageOption, el: HTMLElement): void {
-    el.setText(option.label);
-    el.addEventListener("click", () => this.handleSelection(option));
-  }
-
-  onChooseSuggestion(option: LanguageOption): void {
-    this.handleSelection(option);
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.resolveSelection(null);
-    }
-  }
-
-  private handleSelection(option: LanguageOption): void {
-    if (this.resolved) {
-      return;
-    }
-    this.resolved = true;
-    if (option.value === "__custom__") {
-      this.close();
-      new TextPromptModal(
-        this.app,
-        "Custom language hint",
-        "e.g., en, de, fr, de,en",
-        (value) => this.resolveSelection(value.trim()),
-        "Language hint cannot be empty."
-      ).open();
-      return;
-    }
-    this.resolveSelection(option.value);
-    this.close();
-  }
-}
 
 export default class ZoteroRagPlugin extends Plugin {
   settings!: ZoteroRagSettings;
@@ -1590,20 +144,30 @@ export default class ZoteroRagPlugin extends Plugin {
     | "unknown"
     | null = null;
   private lastRedisSearchTerm = "";
-  private pdfSidebarLeaf: WorkspaceLeaf | null = null;
-  private pdfSidebarDocId: string | null = null;
-  private pdfSidebarPdfPath: string | null = null;
-  private pdfSidebarPage: number | null = null;
-  private pendingPdfSync: { docId: string; pageNumber?: number; chunkId?: string } | null = null;
-  private chunkPageCache = new Map<string, Map<string, number>>();
-  private previewScrollEl: HTMLElement | null = null;
-  private previewScrollHandler: ((event: Event) => void) | null = null;
-  private previewScrollFrame: number | null = null;
+  private pdfSidebar!: PdfSidebarController;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     await this.migrateCachePaths();
     this.addSettingTab(new ZoteroRagSettingTab(this.app, this));
+    this.pdfSidebar = new PdfSidebarController(
+      {
+        app: this.app,
+        iconSvg: ZRR_PDF_ICON,
+        resolveDocIdForNote: this.resolveDocIdForNote.bind(this),
+        getDocIndexEntry: this.getDocIndexEntry.bind(this),
+        hydrateDocIndexFromCache: this.hydrateDocIndexFromCache.bind(this),
+        toVaultRelativePath: this.toVaultRelativePath.bind(this),
+        normalizeChunkIdForNote: this.normalizeChunkIdForNote.bind(this),
+        readChunkPayload: this.readChunkPayload.bind(this),
+      },
+      {
+        extractDocIdFromDoc,
+        findChunkStartLineInDoc,
+        parseChunkMarkerLine,
+        extractFirstChunkMarkerFromContent,
+      }
+    );
 
     this.registerRibbonIcons();
     this.registerView(VIEW_TYPE_ZOTERO_CHAT, (leaf) => new ZoteroChatView(leaf, this));
@@ -1615,7 +179,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerNoteDeleteMenu();
     this.registerEditorExtension(createChunkToolsExtension(this));
     this.registerEditorExtension(createSyncBadgeExtension());
-    this.registerEditorExtension(createPdfSidebarSyncExtension(this));
+    this.registerEditorExtension(this.pdfSidebar.createSyncExtension());
 
     try {
       await this.ensureBundledTools();
@@ -1782,7 +346,7 @@ export default class ZoteroRagPlugin extends Plugin {
       values.key = item.key;
     }
 
-    const docId = this.getDocId(values);
+    const docId = getDocIdFromValues(values);
     if (!docId) {
       new Notice("Could not resolve a stable doc_id from Zotero item.");
       return;
@@ -1791,7 +355,9 @@ export default class ZoteroRagPlugin extends Plugin {
     const languageHint = await this.resolveLanguageHint(values, item.key ?? values.key);
     const doclingLanguageHint = this.buildDoclingLanguageHint(languageHint ?? undefined);
 
-    const attachment = await this.resolvePdfAttachment(values, docId);
+    const attachment = await resolvePdfAttachment(values, docId, {
+      fetchZoteroChildren: this.fetchZoteroChildren.bind(this),
+    });
     if (!attachment) {
       new Notice("No PDF attachment found for item.");
       return;
@@ -1873,14 +439,34 @@ export default class ZoteroRagPlugin extends Plugin {
       if (this.settings.copyPdfToVault) {
         const buffer = attachment.filePath
           ? await fs.readFile(attachment.filePath)
-          : await this.downloadZoteroPdf(attachment.key);
+          : await downloadZoteroPdf(attachment.key, {
+            buildZoteroUrl: this.buildZoteroUrl.bind(this),
+            getZoteroLibraryPath: this.getZoteroLibraryPath.bind(this),
+            canUseWebApi: this.canUseWebApi.bind(this),
+            buildWebApiUrl: this.buildWebApiUrl.bind(this),
+            getWebApiLibraryPath: this.getWebApiLibraryPath.bind(this),
+            requestLocalApiRaw: this.requestLocalApiRaw.bind(this),
+            requestWebApiRaw: this.requestWebApiRaw.bind(this),
+            requestLocalApi: this.requestLocalApi.bind(this),
+            readFile: fs.readFile,
+          });
         await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
         pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
       } else if (attachment.filePath) {
         pdfSourcePath = attachment.filePath;
       } else {
         await this.ensureFolder(this.settings.outputPdfDir);
-        const buffer = await this.downloadZoteroPdf(attachment.key);
+        const buffer = await downloadZoteroPdf(attachment.key, {
+          buildZoteroUrl: this.buildZoteroUrl.bind(this),
+          getZoteroLibraryPath: this.getZoteroLibraryPath.bind(this),
+          canUseWebApi: this.canUseWebApi.bind(this),
+          buildWebApiUrl: this.buildWebApiUrl.bind(this),
+          getWebApiLibraryPath: this.getWebApiLibraryPath.bind(this),
+          requestLocalApiRaw: this.requestLocalApiRaw.bind(this),
+          requestWebApiRaw: this.requestWebApiRaw.bind(this),
+          requestLocalApi: this.requestLocalApi.bind(this),
+          readFile: fs.readFile,
+        });
         await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
         pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
         new Notice("Local PDF path unavailable; copied PDF into vault for processing.");
@@ -2068,7 +654,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      const shortTitle = this.extractShortTitleFromValues(values);
+      const shortTitle = extractShortTitleFromValues(values);
       await this.updateDocIndex({
         doc_id: docId,
         note_path: notePath,
@@ -3167,7 +1753,7 @@ export default class ZoteroRagPlugin extends Plugin {
           if (title) {
             updates.zotero_title = title;
           }
-          const shortTitle = this.extractShortTitleFromValues(values);
+          const shortTitle = extractShortTitleFromValues(values);
           if (shortTitle) {
             updates.short_title = shortTitle;
           }
@@ -4809,16 +3395,6 @@ export default class ZoteroRagPlugin extends Plugin {
     console.info("Zotero Web API metadata PUT response", { status: response.statusCode });
   }
 
-  private getDocId(values: ZoteroItemValues): string | null {
-    const candidates = [values.key, values.itemKey, values.id, values.citationKey];
-    for (const candidate of candidates) {
-      if (typeof candidate === "string" && candidate.trim()) {
-        return candidate.trim();
-      }
-    }
-    return null;
-  }
-
   private sanitizeFileName(value: string): string {
     const cleaned = value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
     if (!cleaned) {
@@ -4882,8 +3458,8 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!(file instanceof TFile) || file.extension !== "md") {
           return;
         }
-        void this.syncPdfSidebarForFile(file);
-        this.updatePreviewScrollHandler();
+        void this.pdfSidebar.syncPdfSidebarForFile(file);
+        this.pdfSidebar.updatePreviewScrollHandler();
         this.scheduleNoteMetadataSync(file, 600, "open");
       })
     );
@@ -4892,124 +3468,17 @@ export default class ZoteroRagPlugin extends Plugin {
   private registerPreviewScrollSyncHandlers(): void {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        this.updatePreviewScrollHandler();
-        void this.maybeSyncPendingPdf();
+        this.pdfSidebar.updatePreviewScrollHandler();
+        void this.pdfSidebar.maybeSyncPendingPdf();
       })
     );
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
-        this.updatePreviewScrollHandler();
-        void this.maybeSyncPendingPdf();
+        this.pdfSidebar.updatePreviewScrollHandler();
+        void this.pdfSidebar.maybeSyncPendingPdf();
       })
     );
-    this.updatePreviewScrollHandler();
-  }
-
-  private async maybeSyncPendingPdf(): Promise<void> {
-    if (!this.pendingPdfSync) {
-      return;
-    }
-    if (!this.pdfSidebarLeaf || this.pdfSidebarLeaf.view?.getViewType?.() !== "pdf") {
-      const leaf = await this.getPdfSidebarLeaf();
-      if (!leaf) {
-        return;
-      }
-    }
-    if (!this.pdfSidebarLeaf || !this.isLeafTabActive(this.pdfSidebarLeaf)) {
-      return;
-    }
-    const pending = this.pendingPdfSync;
-    this.pendingPdfSync = null;
-    await this.syncPdfSidebarForDoc(pending.docId, pending.pageNumber, pending.chunkId);
-  }
-
-  private updatePreviewScrollHandler(): void {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view || view.getMode() !== "preview") {
-      this.detachPreviewScrollHandler();
-      return;
-    }
-    const container = view.previewMode?.containerEl;
-    if (!container) {
-      this.detachPreviewScrollHandler();
-      return;
-    }
-    if (this.previewScrollEl === container) {
-      return;
-    }
-    this.detachPreviewScrollHandler();
-    const handler = () => this.schedulePreviewSync(view);
-    container.addEventListener("scroll", handler, { passive: true });
-    this.previewScrollEl = container;
-    this.previewScrollHandler = handler;
-    this.schedulePreviewSync(view);
-  }
-
-  private detachPreviewScrollHandler(): void {
-    if (this.previewScrollEl && this.previewScrollHandler) {
-      this.previewScrollEl.removeEventListener("scroll", this.previewScrollHandler);
-    }
-    this.previewScrollEl = null;
-    this.previewScrollHandler = null;
-    if (this.previewScrollFrame !== null) {
-      window.cancelAnimationFrame(this.previewScrollFrame);
-      this.previewScrollFrame = null;
-    }
-  }
-
-  private schedulePreviewSync(view: MarkdownView): void {
-    if (this.previewScrollFrame !== null) {
-      return;
-    }
-    this.previewScrollFrame = window.requestAnimationFrame(() => {
-      this.previewScrollFrame = null;
-      this.syncPdfSidebarForPreview(view);
-    });
-  }
-
-  private syncPdfSidebarForPreview(view: MarkdownView): void {
-    const container = this.previewScrollEl;
-    if (!container) {
-      return;
-    }
-    const content = view.getViewData();
-    if (!content) {
-      return;
-    }
-    const doc = CMText.of(content.split(/\r?\n/));
-    const docId = extractDocIdFromDoc(doc);
-    if (!docId) {
-      return;
-    }
-    const topLine = this.getPreviewTopLineNumber(container);
-    if (topLine === null) {
-      return;
-    }
-    const chunkStart = findChunkStartLineInDoc(doc, topLine + 1);
-    if (!chunkStart) {
-      return;
-    }
-    const info = parseChunkMarkerLine(chunkStart.text);
-    if (!info?.pageNumber && !info?.chunkId) {
-      return;
-    }
-    void this.syncPdfSidebarForDoc(docId, info?.pageNumber, info?.chunkId);
-  }
-
-  private getPreviewTopLineNumber(container: HTMLElement): number | null {
-    const containerTop = container.getBoundingClientRect().top;
-    const blocks = container.querySelectorAll<HTMLElement>("[data-line]");
-    for (const block of Array.from(blocks)) {
-      const rect = block.getBoundingClientRect();
-      if (rect.bottom >= containerTop + 2) {
-        const lineAttr = block.getAttribute("data-line") ?? "";
-        const lineNumber = Number.parseInt(lineAttr, 10);
-        if (Number.isFinite(lineNumber)) {
-          return lineNumber;
-        }
-      }
-    }
-    return null;
+    this.pdfSidebar.updatePreviewScrollHandler();
   }
 
   private registerNoteDeleteMenu(): void {
@@ -5874,7 +4343,7 @@ export default class ZoteroRagPlugin extends Plugin {
       docId,
     ];
     for (const candidate of candidates) {
-      const resolved = this.coerceString(candidate);
+      const resolved = coerceString(candidate);
       if (resolved) {
         return resolved;
       }
@@ -5908,20 +4377,20 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private extractZoteroMetadata(values: ZoteroItemValues): NoteMetadataFields {
     const title = this.normalizeMetadataString(values?.title);
-    const shortTitle = this.normalizeMetadataString(this.extractShortTitleFromValues(values));
+    const shortTitle = this.normalizeMetadataString(extractShortTitleFromValues(values));
     const date = this.normalizeMetadataString(values?.date);
     const abstractNote = this.normalizeMetadataString(values?.abstractNote);
     const creators = Array.isArray(values?.creators) ? values.creators : [];
     const authors = creators
       .filter((creator) => creator?.creatorType === "author")
-      .map((creator) => this.formatCreatorName(creator))
+      .map((creator) => formatCreatorName(creator))
       .filter(Boolean);
     const editors = creators
       .filter(
         (creator) =>
           creator?.creatorType === "editor" || creator?.creatorType === "seriesEditor"
       )
-      .map((creator) => this.formatCreatorName(creator))
+      .map((creator) => formatCreatorName(creator))
       .filter(Boolean);
     const tagsRaw = Array.isArray(values?.tags)
       ? values.tags
@@ -6179,7 +4648,7 @@ export default class ZoteroRagPlugin extends Plugin {
       ) {
         continue;
       }
-      const name = this.formatCreatorName(creator);
+      const name = formatCreatorName(creator);
       if (name) {
         normalizedEditors.set(name.trim().toLowerCase(), creator.creatorType);
       }
@@ -6701,94 +5170,14 @@ export default class ZoteroRagPlugin extends Plugin {
 
   public async hasProcessableAttachment(item: ZoteroLocalItem): Promise<boolean> {
     const values: ZoteroItemValues = item.data ?? item;
-    const itemKey = typeof item.key === "string" ? item.key : this.coerceString(values.key);
+    const itemKey = typeof item.key === "string" ? item.key : coerceString(values.key);
     if (!itemKey) {
       return false;
     }
-    const attachment = await this.resolvePdfAttachment(values, itemKey);
+    const attachment = await resolvePdfAttachment(values, itemKey, {
+      fetchZoteroChildren: this.fetchZoteroChildren.bind(this),
+    });
     return Boolean(attachment);
-  }
-
-  private async resolvePdfAttachment(values: ZoteroItemValues, itemKey: string): Promise<PdfAttachment | null> {
-    const fromValues = this.pickPdfAttachment(values);
-    if (fromValues) {
-      return fromValues;
-    }
-
-    try {
-      const children = await this.fetchZoteroChildren(itemKey);
-      for (const child of children) {
-        const attachment = this.toPdfAttachment(child);
-        if (attachment) {
-          return attachment;
-        }
-      }
-    } catch (error) {
-      console.error("Failed to fetch Zotero children", error);
-    }
-
-    return null;
-  }
-
-  private pickPdfAttachment(values: ZoteroItemValues): PdfAttachment | null {
-    const attachments = this.collectAttachmentCandidates(values);
-    for (const attachment of attachments) {
-      const pdfAttachment = this.toPdfAttachment(attachment);
-      if (pdfAttachment) {
-        return pdfAttachment;
-      }
-    }
-    return null;
-  }
-
-  private collectAttachmentCandidates(values: ZoteroItemValues): any[] {
-    const buckets = [
-      values.attachments,
-      values.children,
-      values.items,
-      (values as any).attachment,
-      (values as any).allAttachments,
-    ];
-    const collected: any[] = [];
-    for (const bucket of buckets) {
-      if (!bucket) {
-        continue;
-      }
-      if (Array.isArray(bucket)) {
-        collected.push(...bucket);
-      } else if (typeof bucket === "object") {
-        collected.push(bucket);
-      }
-    }
-    return collected;
-  }
-
-  private toPdfAttachment(attachment: any): PdfAttachment | null {
-    const contentType = attachment?.contentType ?? attachment?.mimeType ?? attachment?.data?.contentType;
-    if (contentType !== "application/pdf") {
-      return null;
-    }
-    const key = attachment?.key ?? attachment?.attachmentKey ?? attachment?.data?.key;
-    if (!key) {
-      return null;
-    }
-    const filePath = this.extractAttachmentPath(attachment);
-    return filePath ? { key, filePath } : { key };
-  }
-
-  private extractAttachmentPath(attachment: any): string | null {
-    const href =
-      attachment?.links?.enclosure?.href ??
-      attachment?.enclosure?.href ??
-      attachment?.data?.links?.enclosure?.href;
-    if (typeof href === "string" && href.startsWith("file://")) {
-      try {
-        return fileURLToPath(href);
-      } catch {
-        return null;
-      }
-    }
-    return null;
   }
 
   private async fetchZoteroChildren(itemKey: string): Promise<any[]> {
@@ -6804,36 +5193,6 @@ export default class ZoteroRagPlugin extends Plugin {
       const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children`);
       const payload = await this.requestWebApi(webUrl, `Zotero Web API children request failed for ${webUrl}`);
       return JSON.parse(payload.toString("utf8"));
-    }
-  }
-
-  private async downloadZoteroPdf(attachmentKey: string): Promise<Buffer> {
-    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${attachmentKey}/file`);
-    try {
-      const response = await this.requestLocalApiRaw(url);
-      const redirected = await this.followFileRedirect(response);
-      if (redirected) {
-        return redirected;
-      }
-      if (response.statusCode >= 300) {
-        throw new Error(`Request failed, status ${response.statusCode}`);
-      }
-      return response.body;
-    } catch (error) {
-      console.warn("Failed to download PDF from local API", error);
-      if (!this.canUseWebApi()) {
-        throw error;
-      }
-      const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${attachmentKey}/file`);
-      const response = await this.requestWebApiRaw(webUrl);
-      const redirected = await this.followFileRedirect(response);
-      if (redirected) {
-        return redirected;
-      }
-      if (response.statusCode >= 300) {
-        throw new Error(`Web API request failed, status ${response.statusCode}`);
-      }
-      return response.body;
     }
   }
 
@@ -6994,27 +5353,6 @@ export default class ZoteroRagPlugin extends Plugin {
     return { statusCode: response.statusCode, body: response.body };
   }
 
-  private async followFileRedirect(
-    response: { statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }
-  ): Promise<Buffer | null> {
-    if (response.statusCode < 300 || response.statusCode >= 400) {
-      return null;
-    }
-    const location = response.headers.location;
-    const href = Array.isArray(location) ? location[0] : location;
-    if (!href || typeof href !== "string") {
-      return null;
-    }
-    if (href.startsWith("file://")) {
-      const filePath = fileURLToPath(href);
-      return fs.readFile(filePath);
-    }
-    if (href.startsWith("http://") || href.startsWith("https://")) {
-      return this.requestLocalApi(href);
-    }
-    return null;
-  }
-
   private bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
     return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
   }
@@ -7112,7 +5450,9 @@ export default class ZoteroRagPlugin extends Plugin {
     title: string,
     showNotices: boolean
   ): Promise<{ sourcePdf: string; attachmentKey?: string } | null> {
-    let attachment = await this.resolvePdfAttachment(values, itemKey);
+    let attachment = await resolvePdfAttachment(values, itemKey, {
+      fetchZoteroChildren: this.fetchZoteroChildren.bind(this),
+    });
     if (!attachment && attachmentKey) {
       attachment = { key: attachmentKey };
     }
@@ -7140,7 +5480,17 @@ export default class ZoteroRagPlugin extends Plugin {
       if (filePath && (await this.isFileAccessible(filePath))) {
         buffer = await fs.readFile(filePath);
       } else if (resolvedAttachmentKey) {
-        buffer = await this.downloadZoteroPdf(resolvedAttachmentKey);
+        buffer = await downloadZoteroPdf(resolvedAttachmentKey, {
+          buildZoteroUrl: this.buildZoteroUrl.bind(this),
+          getZoteroLibraryPath: this.getZoteroLibraryPath.bind(this),
+          canUseWebApi: this.canUseWebApi.bind(this),
+          buildWebApiUrl: this.buildWebApiUrl.bind(this),
+          getWebApiLibraryPath: this.getWebApiLibraryPath.bind(this),
+          requestLocalApiRaw: this.requestLocalApiRaw.bind(this),
+          requestWebApiRaw: this.requestWebApiRaw.bind(this),
+          requestLocalApi: this.requestLocalApi.bind(this),
+          readFile: fs.readFile,
+        });
         if (!this.settings.copyPdfToVault && showNotices) {
           new Notice("Local PDF path unavailable; copied PDF into vault for processing.");
         }
@@ -7265,267 +5615,6 @@ export default class ZoteroRagPlugin extends Plugin {
       return fallback;
     }
     return this.app.workspace.getLeaf("tab");
-  }
-
-  private async getPdfSidebarLeaf(): Promise<WorkspaceLeaf | null> {
-    if (this.pdfSidebarLeaf && this.pdfSidebarLeaf.view?.getViewType?.() === "pdf") {
-      return this.pdfSidebarLeaf;
-    }
-    const workspaceAny = this.app.workspace as unknown as {
-      ensureSideLeaf?: (
-        type: string,
-        side: "left" | "right",
-        options?: { active?: boolean; split?: boolean; reveal?: boolean; state?: any }
-      ) => Promise<WorkspaceLeaf>;
-    };
-    if (typeof workspaceAny.ensureSideLeaf === "function") {
-      try {
-        const leaf = await workspaceAny.ensureSideLeaf("pdf", "right", {
-          active: false,
-          split: false,
-          reveal: true,
-        });
-        if (!this.isRightSidebarLeaf(leaf)) {
-          return null;
-        }
-        this.pdfSidebarLeaf = leaf;
-        this.updatePdfSidebarIcon(leaf);
-        return leaf;
-      } catch (error) {
-        console.warn("Failed to ensure PDF side leaf", error);
-      }
-    }
-    const existing = this.app.workspace.getRightLeaf(false);
-    if (existing && this.isRightSidebarLeaf(existing)) {
-      this.pdfSidebarLeaf = existing;
-      this.updatePdfSidebarIcon(existing);
-      return existing;
-    }
-    const created = this.app.workspace.getRightLeaf(true);
-    if (created && this.isRightSidebarLeaf(created)) {
-      this.pdfSidebarLeaf = created;
-      this.updatePdfSidebarIcon(created);
-      return created;
-    }
-    return null;
-  }
-
-  private isRightSidebarLeaf(leaf: WorkspaceLeaf | null): boolean {
-    if (!leaf) {
-      return false;
-    }
-    const leafAny = leaf as unknown as { containerEl?: HTMLElement };
-    const containerEl = leafAny.containerEl;
-    return Boolean(containerEl?.closest(".workspace-split.mod-right-split, .mod-right-split"));
-  }
-
-  private updatePdfSidebarIcon(leaf: WorkspaceLeaf | null): void {
-    if (!leaf || !this.isRightSidebarLeaf(leaf)) {
-      return;
-    }
-    const leafAny = leaf as unknown as { containerEl?: HTMLElement };
-    const containerEl = leafAny.containerEl;
-    const targets: HTMLElement[] = [];
-    if (containerEl) {
-      targets.push(...Array.from(containerEl.querySelectorAll<HTMLElement>(".view-header-icon")));
-    }
-    const leafAnyTabs = leaf as unknown as {
-      tabHeaderEl?: HTMLElement;
-      tabHeaderInnerIconEl?: HTMLElement;
-    };
-    if (leafAnyTabs.tabHeaderEl) {
-      targets.push(
-        ...Array.from(
-          leafAnyTabs.tabHeaderEl.querySelectorAll<HTMLElement>(
-            ".workspace-tab-header-inner-icon, .view-header-icon"
-          )
-        )
-      );
-    }
-    if (leafAnyTabs.tabHeaderInnerIconEl) {
-      targets.push(leafAnyTabs.tabHeaderInnerIconEl);
-    }
-    if (targets.length === 0) {
-      return;
-    }
-    const seen = new Set<HTMLElement>();
-    for (const iconEl of targets) {
-      if (seen.has(iconEl)) {
-        continue;
-      }
-      seen.add(iconEl);
-      iconEl.innerHTML = "";
-      setIcon(iconEl, "zrr-pdf");
-      if (!iconEl.querySelector("svg") && ZRR_PDF_ICON) {
-        iconEl.innerHTML = ZRR_PDF_ICON;
-      }
-      if (iconEl.dataset) {
-        iconEl.dataset.zrrIcon = "zrr-pdf";
-      }
-    }
-    const viewAny = leaf.view as unknown as { icon?: string; getIcon?: () => string };
-    viewAny.icon = "zrr-pdf";
-    if (typeof viewAny.getIcon === "function") {
-      viewAny.getIcon = () => "zrr-pdf";
-    }
-  }
-
-  private async openPdfLinkInLeaf(leaf: WorkspaceLeaf, linkText: string): Promise<void> {
-    const pdfPlus = this.getPluginsRegistry()?.["pdf-plus"];
-    const pdfPlusOpen = pdfPlus?.lib?.workspace?.openPDFLinkTextInLeaf;
-    if (typeof pdfPlusOpen === "function") {
-      await pdfPlusOpen.call(pdfPlus.lib.workspace, leaf, linkText, "", { active: false });
-      return;
-    }
-    const leafAny = leaf as unknown as {
-      openLinkText?: (link: string, sourcePath: string, state?: { active?: boolean }) => Promise<void>;
-    };
-    if (typeof leafAny.openLinkText === "function") {
-      await leafAny.openLinkText(linkText, "", { active: false });
-      return;
-    }
-    await this.app.workspace.openLinkText(linkText, "", false);
-  }
-
-  private getPluginsRegistry(): Record<string, any> | undefined {
-    return (this.app as any).plugins?.plugins as Record<string, any> | undefined;
-  }
-
-  private isLeafTabActive(leaf: WorkspaceLeaf): boolean {
-    const leafAny = leaf as unknown as {
-      containerEl?: HTMLElement;
-      tabHeaderEl?: HTMLElement;
-      parent?: { activeLeaf?: WorkspaceLeaf };
-    };
-    if (leafAny.parent?.activeLeaf) {
-      return leafAny.parent.activeLeaf === leaf;
-    }
-    const containerEl = leafAny.containerEl;
-    if (containerEl?.classList.contains("is-active") || containerEl?.classList.contains("mod-active")) {
-      return true;
-    }
-    const tabHeaderEl = leafAny.tabHeaderEl;
-    if (tabHeaderEl?.classList.contains("is-active") || tabHeaderEl?.classList.contains("mod-active")) {
-      return true;
-    }
-    return false;
-  }
-
-  private async syncPdfSidebarForFile(file: TFile): Promise<void> {
-    try {
-      const content = await this.app.vault.read(file);
-      const docId = await this.resolveDocIdForNote(file, content);
-      if (!docId) {
-        return;
-      }
-      const firstMarker = extractFirstChunkMarkerFromContent(content);
-      await this.syncPdfSidebarForDoc(docId, firstMarker?.pageNumber, firstMarker?.chunkId);
-    } catch (error) {
-      console.warn("Failed to sync PDF sidebar for opened note", error);
-    }
-  }
-
-  private async resolvePageNumberForChunk(docId: string, chunkId: string): Promise<number | null> {
-    if (!docId || !chunkId) {
-      return null;
-    }
-    const normalizedId = this.normalizeChunkIdForNote(chunkId, docId) || chunkId;
-    const existing = this.chunkPageCache.get(docId);
-    if (existing && existing.has(normalizedId)) {
-      return existing.get(normalizedId) ?? null;
-    }
-    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
-    const adapter = this.app.vault.adapter;
-    if (!(await adapter.exists(chunkPath))) {
-      return null;
-    }
-    const payload = await this.readChunkPayload(chunkPath);
-    const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
-    const map = new Map<string, number>();
-    for (const chunk of chunks) {
-      const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id.trim() : "";
-      if (!id) {
-        continue;
-      }
-      const pageStart = Number.isFinite(chunk?.page_start ?? NaN) ? Number(chunk.page_start) : null;
-      const pageEnd = Number.isFinite(chunk?.page_end ?? NaN) ? Number(chunk.page_end) : null;
-      const pageNumber = pageStart ?? pageEnd;
-      if (pageNumber !== null) {
-        map.set(id, pageNumber);
-        map.set(`${docId}:${id}`, pageNumber);
-      }
-    }
-    this.chunkPageCache.set(docId, map);
-    return map.get(normalizedId) ?? map.get(chunkId) ?? null;
-  }
-
-  public async syncPdfSidebarForDoc(docId: string | null, pageNumber?: number, chunkId?: string): Promise<void> {
-    if (!docId) {
-      return;
-    }
-    let entry = await this.getDocIndexEntry(docId);
-    if (!entry) {
-      entry = await this.hydrateDocIndexFromCache(docId);
-    }
-    const pdfPath = entry?.pdf_path ? String(entry.pdf_path) : "";
-    if (!pdfPath) {
-      return;
-    }
-    let relativePdf = this.toVaultRelativePath(pdfPath);
-    if (!relativePdf) {
-      const normalized = normalizePath(pdfPath);
-      const directFile = this.app.vault.getAbstractFileByPath(normalized);
-      if (directFile instanceof TFile) {
-        relativePdf = normalized;
-      }
-    }
-    if (!relativePdf) {
-      return;
-    }
-    const file = this.app.vault.getAbstractFileByPath(relativePdf);
-    if (!(file instanceof TFile) || file.extension.toLowerCase() !== "pdf") {
-      return;
-    }
-    const leaf = await this.getPdfSidebarLeaf();
-    if (!leaf) {
-      this.pendingPdfSync = { docId, pageNumber, chunkId };
-      return;
-    }
-    this.updatePdfSidebarIcon(leaf);
-    if (!this.isLeafTabActive(leaf)) {
-      this.pendingPdfSync = { docId, pageNumber, chunkId };
-      return;
-    }
-    let nextPage = Number.isFinite(pageNumber ?? NaN) ? Number(pageNumber) : null;
-    if (nextPage === null && chunkId) {
-      nextPage = await this.resolvePageNumberForChunk(docId, chunkId);
-    }
-    if (nextPage === null) {
-      return;
-    }
-    if (
-      this.pdfSidebarDocId === docId
-      && this.pdfSidebarPdfPath === file.path
-      && this.pdfSidebarPage === nextPage
-    ) {
-      return;
-    }
-    this.pdfSidebarDocId = docId;
-    this.pdfSidebarPdfPath = file.path;
-    this.pdfSidebarPage = nextPage;
-    const relativeLink = relativePdf;
-    const linkText = nextPage !== null ? `${relativeLink}#page=${nextPage}` : relativeLink;
-    const workspace = this.app.workspace;
-    const activeLeaf = workspace.getMostRecentLeaf();
-    workspace.setActiveLeaf(leaf, { focus: false });
-    try {
-      await this.openPdfLinkInLeaf(leaf, linkText);
-      this.updatePdfSidebarIcon(leaf);
-    } finally {
-      if (activeLeaf) {
-        workspace.setActiveLeaf(activeLeaf, { focus: false });
-      }
-    }
   }
 
   public async openNoteInMain(notePath: string): Promise<void> {
@@ -7887,7 +5976,7 @@ export default class ZoteroRagPlugin extends Plugin {
         if (title) {
           updates.zotero_title = title;
         }
-        const shortTitle = this.extractShortTitleFromValues(values);
+        const shortTitle = extractShortTitleFromValues(values);
         if (shortTitle) {
           updates.short_title = shortTitle;
         }
@@ -8257,7 +6346,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      const shortTitle = this.extractShortTitleFromValues(values);
+      const shortTitle = extractShortTitleFromValues(values);
       await this.updateDocIndex({
         doc_id: docId,
         note_path: notePath,
@@ -8721,18 +6810,18 @@ export default class ZoteroRagPlugin extends Plugin {
     pdfLink: string,
     itemJsonLink: string
   ): Promise<Record<string, string>> {
-    const title = this.coerceString(values.title);
-    let shortTitle = this.coerceString(values.shortTitle);
-    const date = this.coerceString(values.date);
+    const title = coerceString(values.title);
+    let shortTitle = coerceString(values.shortTitle);
+    const date = coerceString(values.date);
     const parsedDate = typeof meta?.parsedDate === "string" ? meta.parsedDate : "";
-    const year = this.extractYear(parsedDate || date);
+    const year = extractYear(parsedDate || date);
     const yearNumber = /^\d{4}$/.test(year) ? year : "";
     const creators = Array.isArray(values.creators) ? values.creators : [];
-    const authorsList = creators.filter((c) => c.creatorType === "author").map((c) => this.formatCreatorName(c));
+    const authorsList = creators.filter((c) => c.creatorType === "author").map((c) => formatCreatorName(c));
     const authors = authorsList.join("; ");
     const editorsList = creators
       .filter((c) => c.creatorType === "editor" || c.creatorType === "seriesEditor")
-      .map((c) => this.formatCreatorName(c));
+      .map((c) => formatCreatorName(c));
     const editors = editorsList.join("; ");
     const rawTagsList = Array.isArray(values.tags)
       ? values.tags.map((tag: any) => (typeof tag === "string" ? tag : tag?.tag)).filter(Boolean)
@@ -8743,37 +6832,37 @@ export default class ZoteroRagPlugin extends Plugin {
     const collectionTitle = collectionTitles.join("; ");
     const collectionLinks = this.toObsidianLinks(collectionTitles);
     const collectionLinksText = collectionLinks.join("; ");
-    const itemType = this.coerceString(values.itemType);
+    const itemType = coerceString(values.itemType);
     const creatorSummary = typeof meta?.creatorSummary === "string" ? meta.creatorSummary : "";
-    const publicationTitle = this.coerceString(values.publicationTitle);
-    const bookTitle = this.coerceString(values.bookTitle);
-    const journalAbbrev = this.coerceString(values.journalAbbreviation);
-    const volume = this.coerceString(values.volume);
-    const issue = this.coerceString(values.issue);
-    const pages = this.coerceString(values.pages);
+    const publicationTitle = coerceString(values.publicationTitle);
+    const bookTitle = coerceString(values.bookTitle);
+    const journalAbbrev = coerceString(values.journalAbbreviation);
+    const volume = coerceString(values.volume);
+    const issue = coerceString(values.issue);
+    const pages = coerceString(values.pages);
     const itemKey = typeof values.key === "string" ? values.key : docId;
-    let doi = this.coerceString(values.DOI);
+    let doi = coerceString(values.DOI);
     if (!doi) {
-      doi = this.extractDoiFromExtra(values);
+      doi = extractDoiFromExtra(values);
     }
     let csl: Record<string, any> | null = null;
     if (!doi || !shortTitle) {
       csl = await this.fetchZoteroItemCsl(itemKey);
     }
     if (!doi) {
-      doi = this.extractDoiFromCsl(csl);
+      doi = extractDoiFromCsl(csl);
     }
     if (!shortTitle) {
-      shortTitle = this.extractShortTitleFromCsl(csl);
+      shortTitle = extractShortTitleFromCsl(csl);
     }
-    const isbn = this.coerceString(values.ISBN);
-    const issn = this.coerceString(values.ISSN);
-    const publisher = this.coerceString(values.publisher);
-    const place = this.coerceString(values.place);
-    const url = this.coerceString(values.url);
-    const language = this.coerceString(values.language);
-    const abstractNote = this.coerceString(values.abstractNote);
-    const citekey = this.extractCitekey(values, meta);
+    const isbn = coerceString(values.ISBN);
+    const issn = coerceString(values.ISSN);
+    const publisher = coerceString(values.publisher);
+    const place = coerceString(values.place);
+    const url = coerceString(values.url);
+    const language = coerceString(values.language);
+    const abstractNote = coerceString(values.abstractNote);
+    const citekey = extractCitekey(values, meta);
     const itemLink = this.buildZoteroDeepLink(itemKey);
     const aliasesList = Array.from(
       new Set(
@@ -8845,140 +6934,6 @@ export default class ZoteroRagPlugin extends Plugin {
     vars["collections_links_list"] = vars["collections_links_yaml_list"];
 
     return vars;
-  }
-
-  private extractYear(value: string): string {
-    if (!value) {
-      return "";
-    }
-    const match = value.match(/\b(\d{4})\b/);
-    return match ? match[1] : "";
-  }
-
-  private formatCreatorName(creator: any): string {
-    if (!creator || typeof creator !== "object") {
-      return "";
-    }
-    if (creator.name) {
-      return String(creator.name);
-    }
-    const first = creator.firstName ? String(creator.firstName) : "";
-    const last = creator.lastName ? String(creator.lastName) : "";
-    const combined = [last, first].filter(Boolean).join(", ");
-    return combined || `${first} ${last}`.trim();
-  }
-
-  private extractCitekey(values: ZoteroItemValues, meta?: Record<string, any>): string {
-    const candidates = [
-      meta?.citationKey,
-      meta?.citekey,
-      meta?.citeKey,
-      meta?.betterBibtexKey,
-      meta?.betterbibtexkey,
-      values.citationKey,
-      values.citekey,
-      values.citeKey,
-      values.betterBibtexKey,
-      values.betterbibtexkey,
-    ];
-    for (const candidate of candidates) {
-      const resolved = this.coerceString(candidate);
-      if (resolved) {
-        return resolved;
-      }
-    }
-    const extra = typeof values.extra === "string" ? values.extra : "";
-    if (!extra) {
-      return "";
-    }
-    const lines = extra.split(/\r?\n/);
-    for (const line of lines) {
-      const match = line.match(/^\s*(citation key|citekey|citation-key|bibtex key|bibtexkey)\s*:\s*(.+)\s*$/i);
-      if (match && match[2]) {
-        return match[2].trim();
-      }
-    }
-    return "";
-  }
-
-  private extractShortTitleFromCsl(csl: Record<string, any> | null): string {
-    if (!csl) {
-      return "";
-    }
-    const shortTitle = csl["title-short"] ?? csl.shortTitle ?? csl.short_title;
-    return typeof shortTitle === "string" ? shortTitle.trim() : "";
-  }
-
-  private extractShortTitleFromValues(values: ZoteroItemValues): string {
-    const direct = this.coerceString((values as any).shortTitle);
-    if (direct) {
-      return direct;
-    }
-    const underscored = this.coerceString((values as any).short_title);
-    if (underscored) {
-      return underscored;
-    }
-    const hyphenated = this.coerceString((values as any)["title-short"]);
-    if (hyphenated) {
-      return hyphenated;
-    }
-    return "";
-  }
-
-  private extractDoiFromExtra(values: ZoteroItemValues): string {
-    const extra = typeof values.extra === "string" ? values.extra : "";
-    if (!extra) {
-      return "";
-    }
-    const lines = extra.split(/\r?\n/);
-    for (const line of lines) {
-      const match = line.match(/^\s*doi\s*:\s*(.+)\s*$/i);
-      if (match && match[1]) {
-        return match[1].trim().replace(/[.,;]+$/, "");
-      }
-    }
-    const doiMatch = extra.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+\b/i);
-    return doiMatch ? doiMatch[0].replace(/[.,;]+$/, "") : "";
-  }
-
-  private extractDoiFromCsl(csl: Record<string, any> | null): string {
-    if (!csl) {
-      return "";
-    }
-    const doi = csl.DOI ?? csl.doi;
-    if (typeof doi === "string") {
-      return doi.trim().replace(/[.,;]+$/, "");
-    }
-    return "";
-  }
-
-  private coerceString(value: unknown): string {
-    if (typeof value === "string") {
-      return value.trim();
-    }
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return String(value);
-    }
-    if (Array.isArray(value)) {
-      for (const entry of value) {
-        if (typeof entry === "string" && entry.trim()) {
-          return entry.trim();
-        }
-        if (typeof entry === "number" && Number.isFinite(entry)) {
-          return String(entry);
-        }
-      }
-    }
-    if (value && typeof value === "object") {
-      const first = (value as { 0?: unknown })[0];
-      if (typeof first === "string" && first.trim()) {
-        return first.trim();
-      }
-      if (typeof first === "number" && Number.isFinite(first)) {
-        return String(first);
-      }
-    }
-    return "";
   }
 
   private escapeYamlString(value: string): string {
@@ -10739,209 +8694,5 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       });
     });
-  }
-}
-
-class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
-  private plugin: ZoteroRagPlugin;
-  private resolveSelection: ((item: ZoteroLocalItem | null) => void) | null;
-  private lastError: string | null = null;
-  private indexedDocIds: Set<string> | null = null;
-  private attachmentStatusCache = new Map<string, "yes" | "no">();
-  private attachmentChecks = new Set<string>();
-
-  constructor(app: App, plugin: ZoteroRagPlugin, onSelect: (item: ZoteroLocalItem | null) => void) {
-    super(app);
-    this.plugin = plugin;
-    this.resolveSelection = onSelect;
-    this.setPlaceholder("Search Zotero items...");
-  }
-
-  async getSuggestions(query: string): Promise<ZoteroLocalItem[]> {
-    try {
-      if (!this.indexedDocIds) {
-        const index = await this.plugin.getDocIndex();
-        this.indexedDocIds = new Set(Object.keys(index));
-      }
-      return await this.plugin.searchZoteroItems(query);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (this.lastError !== message) {
-        this.lastError = message;
-        new Notice(message);
-      }
-      console.error("Zotero search failed", error);
-      return [];
-    }
-  }
-
-  renderSuggestion(item: ZoteroLocalItem, el: HTMLElement): void {
-    const title = item.data?.title ?? "[No title]";
-    const year = this.extractYear(item);
-    const docId = this.getDocId(item);
-    const isIndexed = docId ? this.indexedDocIds?.has(docId) : false;
-    const pdfStatus = this.getPdfStatus(item);
-    if (isIndexed) {
-      el.addClass("zrr-indexed-item");
-    }
-    if (pdfStatus === "no") {
-      el.addClass("zrr-no-pdf-item");
-    }
-    el.createEl("div", { text: title });
-    const metaEl = el.createEl("small");
-    let hasMeta = false;
-    const addSeparator = (): void => {
-      if (hasMeta) {
-        metaEl.createSpan({ text: " • " });
-      }
-    };
-    if (year) {
-      metaEl.createSpan({ text: year });
-      hasMeta = true;
-    }
-    if (isIndexed) {
-      addSeparator();
-      metaEl.createSpan({ text: "Indexed", cls: "zrr-indexed-flag" });
-      hasMeta = true;
-    }
-    if (pdfStatus === "no") {
-      addSeparator();
-      metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
-      hasMeta = true;
-    }
-    if (pdfStatus === "unknown") {
-      const cached = docId ? this.attachmentStatusCache.get(docId) : undefined;
-      if (cached === "no") {
-        addSeparator();
-        metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
-        hasMeta = true;
-        el.addClass("zrr-no-pdf-item");
-      } else if (cached === "yes") {
-        // Nothing to render.
-      } else if (docId) {
-        void this.refreshAttachmentStatus(docId, item, el, metaEl);
-      }
-    }
-    el.addEventListener("click", () => {
-      if (this.resolveSelection) {
-        this.resolveSelection(item);
-        this.resolveSelection = null;
-      }
-      this.close();
-    });
-  }
-
-  onChooseSuggestion(item: ZoteroLocalItem, evt: MouseEvent | KeyboardEvent): void {
-    if (this.resolveSelection) {
-      this.resolveSelection(item);
-      this.resolveSelection = null;
-    }
-    this.close();
-  }
-
-  onClose(): void {
-    if (this.resolveSelection) {
-      this.resolveSelection(null);
-      this.resolveSelection = null;
-    }
-  }
-
-  private getDocId(item: ZoteroLocalItem): string {
-    const key = item.key ?? item.data?.key ?? "";
-    return typeof key === "string" ? key : "";
-  }
-
-  private getPdfStatus(item: ZoteroLocalItem): "yes" | "no" | "unknown" {
-    const attachments = this.collectItemAttachments(item.data);
-    if (attachments.length > 0) {
-      const hasPdf = attachments.some((entry) => this.isPdfAttachment(entry));
-      return hasPdf ? "yes" : "no";
-    }
-    const numChildren = item.meta?.numChildren;
-    if (typeof numChildren === "number" && numChildren === 0) {
-      return "no";
-    }
-    return "unknown";
-  }
-
-  private collectItemAttachments(data: Record<string, any> | undefined): any[] {
-    if (!data) {
-      return [];
-    }
-    const buckets = [
-      data.attachments,
-      data.children,
-      data.items,
-      (data as any).attachment,
-      (data as any).allAttachments,
-    ];
-    const collected: any[] = [];
-    for (const bucket of buckets) {
-      if (!bucket) {
-        continue;
-      }
-      if (Array.isArray(bucket)) {
-        collected.push(...bucket);
-      } else if (typeof bucket === "object") {
-        collected.push(bucket);
-      }
-    }
-    return collected;
-  }
-
-  private isPdfAttachment(entry: any): boolean {
-    const contentType =
-      entry?.contentType ?? entry?.mimeType ?? entry?.data?.contentType ?? entry?.data?.mimeType ?? "";
-    if (contentType === "application/pdf") {
-      return true;
-    }
-    const filename =
-      entry?.filename ??
-      entry?.fileName ??
-      entry?.data?.filename ??
-      entry?.data?.fileName ??
-      entry?.path ??
-      entry?.data?.path ??
-      "";
-    if (typeof filename === "string" && filename.toLowerCase().endsWith(".pdf")) {
-      return true;
-    }
-    return false;
-  }
-
-  private extractYear(item: ZoteroLocalItem): string {
-    const parsed = item.meta?.parsedDate ?? item.data?.date ?? "";
-    if (typeof parsed !== "string") {
-      return "";
-    }
-    const match = parsed.match(/\b(\d{4})\b/);
-    return match ? match[1] : "";
-  }
-
-  private async refreshAttachmentStatus(
-    docId: string,
-    item: ZoteroLocalItem,
-    el: HTMLElement,
-    metaEl: HTMLElement
-  ): Promise<void> {
-    if (this.attachmentChecks.has(docId)) {
-      return;
-    }
-    this.attachmentChecks.add(docId);
-    try {
-      const hasPdf = await this.plugin.hasProcessableAttachment(item);
-      this.attachmentStatusCache.set(docId, hasPdf ? "yes" : "no");
-      if (!hasPdf && metaEl.isConnected && el.isConnected) {
-        if (!metaEl.querySelector(".zrr-no-pdf-flag")) {
-          if (metaEl.childNodes.length > 0) {
-            metaEl.createSpan({ text: " • " });
-          }
-          metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
-        }
-        el.addClass("zrr-no-pdf-item");
-      }
-    } finally {
-      this.attachmentChecks.delete(docId);
-    }
   }
 }
