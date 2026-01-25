@@ -223,7 +223,7 @@ class DoclingProcessingConfig:
     paddle_vl_api_token: Optional[str] = None
     paddle_vl_api_timeout_sec: int = 600
     paddle_vl_api_max_pages: int = 100
-    paddle_vl_api_max_chunk_bytes: int = 2000000
+    paddle_vl_api_max_chunk_bytes: int = 3000000
     paddle_vl_markdown_ignore_labels: Optional[Sequence[str]] = field(
         default_factory=lambda: ["header","header_image","footer","footer_image","number","aside_text"]
     )

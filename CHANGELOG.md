@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.7
+
+- Better BibTeX citekeys: recognize pinned keys in Extra (bibtex/biblatex) and fall back to CSL `citation-key` when needed.
+- Added `date_added` and `date_modified` template vars.
+
 ## 0.4.6
 
 - Default reranker model updated to `BAAI/bge-reranker-v2-m3` for better multilingual retrieval.

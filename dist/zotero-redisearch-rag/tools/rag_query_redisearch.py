@@ -1029,7 +1029,7 @@ def main() -> int:
     parser.add_argument("--expand-query", action="store_true")
     parser.add_argument("--expand-count", type=int, default=3)
     parser.add_argument("--rerank", action="store_true")
-    parser.add_argument("--rerank-model", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    parser.add_argument("--rerank-model", default="BAAI/bge-reranker-v2-m3")
     parser.add_argument("--rerank-candidates", type=int, default=4)
     parser.add_argument("--rerank-max-chars", type=int, default=_RERANK_MAX_CHARS_DEFAULT)
     parser.add_argument("--rrf-k", type=int, default=_RRF_K)

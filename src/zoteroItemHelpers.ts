@@ -77,12 +77,16 @@ export const formatCreatorName = (creator: any): string => {
 
 export const extractCitekey = (values: ZoteroItemValues, meta?: Record<string, any>): string => {
   const candidates = [
+    meta?.["citation-key"],
     meta?.citationKey,
+    meta?.citationkey,
     meta?.citekey,
     meta?.citeKey,
     meta?.betterBibtexKey,
     meta?.betterbibtexkey,
+    values["citation-key"],
     values.citationKey,
+    values.citationkey,
     values.citekey,
     values.citeKey,
     values.betterBibtexKey,
@@ -100,9 +104,35 @@ export const extractCitekey = (values: ZoteroItemValues, meta?: Record<string, a
   }
   const lines = extra.split(/\r?\n/);
   for (const line of lines) {
-    const match = line.match(/^\s*(citation key|citekey|citation-key|bibtex key|bibtexkey)\s*:\s*(.+)\s*$/i);
+    const biblatexMatch = line.match(/^\s*biblatexcitekey\s*\[([^\]]+)\]\s*$/i);
+    if (biblatexMatch && biblatexMatch[1]) {
+      return biblatexMatch[1].trim();
+    }
+    const match = line.match(
+      /^\s*(citation key|citationkey|citekey|citation-key|bibtex key|bibtexkey|bibtex)\s*:\s*(.+)\s*$/i
+    );
     if (match && match[2]) {
       return match[2].trim();
+    }
+  }
+  return "";
+};
+
+export const extractCitekeyFromCsl = (csl: Record<string, any> | null): string => {
+  if (!csl) {
+    return "";
+  }
+  const candidates = [
+    csl["citation-key"],
+    (csl as any).citationKey,
+    (csl as any).citationkey,
+    (csl as any).citekey,
+    (csl as any).citation_key,
+  ];
+  for (const candidate of candidates) {
+    const resolved = coerceString(candidate);
+    if (resolved) {
+      return resolved;
     }
   }
   return "";

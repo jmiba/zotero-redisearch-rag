@@ -1,7 +1,18 @@
 # Changelog
 
+## 0.4.7
+
+- Better BibTeX citekeys: recognize pinned keys in Extra (bibtex/biblatex) and fall back to CSL `citation-key` when needed.
+- Added `date_added` and `date_modified` template vars.
+
+## 0.4.6
+
+- Default reranker model updated to `BAAI/bge-reranker-v2-m3` for better multilingual retrieval.
+- Internal refactor: extracted PDF sidebar, chunk marker, and attachment helpers into dedicated modules.
+
 ## 0.4.5
 
+- Improved system prompt for footnote recognition in clean-up passes.
 - Added a per-page OCR override setting and clarified OCR mode labels in settings.
 
 ## 0.4.4

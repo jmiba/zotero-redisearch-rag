@@ -75,6 +75,7 @@ import {
 import {
   coerceString,
   extractCitekey,
+  extractCitekeyFromCsl,
   extractDoiFromCsl,
   extractDoiFromExtra,
   extractShortTitleFromCsl,
@@ -6840,13 +6841,16 @@ export default class ZoteroRagPlugin extends Plugin {
     const volume = coerceString(values.volume);
     const issue = coerceString(values.issue);
     const pages = coerceString(values.pages);
+    const dateAdded = coerceString(values.dateAdded);
+    const dateModified = coerceString(values.dateModified);
     const itemKey = typeof values.key === "string" ? values.key : docId;
     let doi = coerceString(values.DOI);
     if (!doi) {
       doi = extractDoiFromExtra(values);
     }
+    let citekey = extractCitekey(values, meta);
     let csl: Record<string, any> | null = null;
-    if (!doi || !shortTitle) {
+    if (!doi || !shortTitle || !citekey) {
       csl = await this.fetchZoteroItemCsl(itemKey);
     }
     if (!doi) {
@@ -6855,6 +6859,9 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!shortTitle) {
       shortTitle = extractShortTitleFromCsl(csl);
     }
+    if (!citekey) {
+      citekey = extractCitekeyFromCsl(csl);
+    }
     const isbn = coerceString(values.ISBN);
     const issn = coerceString(values.ISSN);
     const publisher = coerceString(values.publisher);
@@ -6862,7 +6869,6 @@ export default class ZoteroRagPlugin extends Plugin {
     const url = coerceString(values.url);
     const language = coerceString(values.language);
     const abstractNote = coerceString(values.abstractNote);
-    const citekey = extractCitekey(values, meta);
     const itemLink = this.buildZoteroDeepLink(itemKey);
     const aliasesList = Array.from(
       new Set(
@@ -6898,6 +6904,8 @@ export default class ZoteroRagPlugin extends Plugin {
       volume,
       issue,
       pages,
+      date_added: dateAdded,
+      date_modified: dateModified,
       doi,
       isbn,
       issn,

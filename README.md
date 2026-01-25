@@ -52,6 +52,7 @@ Common placeholders:
 - `doc_id`, `zotero_key`, `item_link` (zotero://select link), `citekey`
 - `title_quoted`, `short_title_quoted`, `publication_title_quoted`, `book_title_quoted`
 - `year`, `item_type_quoted`, `doi_quoted`, `isbn_quoted`, `issn_quoted`
+- `date_added`, `date_modified`
 - `authors_list`, `editors_list`, `tags_list`, `collections_list`
 - `collection_titles_quoted` (all collection titles joined with `; `)
 - `collections_links_list` (collections as `[[Obsidian Links]]`)
