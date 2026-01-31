@@ -16,6 +16,13 @@ export type NoteMetadataFields = {
   short_title: string;
   date: string;
   abstract: string;
+  doi: string;
+  publisher: string;
+  place: string;
+  issue: string;
+  volume: string;
+  pages: string;
+  item_type: string;
   tags: string[];
   authors: string[];
   editors: string[];

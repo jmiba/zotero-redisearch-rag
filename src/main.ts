@@ -29,6 +29,7 @@ import {
   CACHE_ROOT,
   DEFAULT_SETTINGS,
   ITEM_CACHE_DIR,
+  METADATA_SNAPSHOT_PATH,
   OcrEngineAvailability,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
@@ -44,6 +45,7 @@ import {
   ConfirmRebuildIndexModal,
   LanguageSuggestModal,
   MetadataConflictModal,
+  MetadataConflictBatchModal,
   OutputModal,
   RedisSearchModal,
   TextPromptModal,
@@ -104,6 +106,48 @@ const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
 const MAX_CITATION_TITLE_LENGTH = 80;
 
+const ZOTERO_FRONTMATTER_BASE_KEYS = [
+  "doc_id",
+  "zotero_key",
+  "zotero_link",
+  "item_link",
+  "item_key",
+  "citekey",
+  "title",
+  "short_title",
+  "date",
+  "year",
+  "year_number",
+  "authors",
+  "editors",
+  "aliases",
+  "tags",
+  "collection_title",
+  "collection_titles",
+  "collections",
+  "collections_links",
+  "item_type",
+  "creator_summary",
+  "publication_title",
+  "book_title",
+  "journal_abbrev",
+  "volume",
+  "issue",
+  "pages",
+  "date_added",
+  "date_modified",
+  "doi",
+  "isbn",
+  "issn",
+  "publisher",
+  "place",
+  "url",
+  "language",
+  "abstract",
+  "pdf_link",
+  "item_json",
+];
+
 type ParsedChunkBlock = {
   chunkId: string;
   text: string;
@@ -113,6 +157,7 @@ type ParsedChunkBlock = {
 export default class ZoteroRagPlugin extends Plugin {
   settings!: ZoteroRagSettings;
   private docIndex: Record<string, DocIndexEntry> | null = null;
+  private metadataSnapshotCache: Record<string, Partial<NoteMetadataFields>> | null = null;
   private statusBarEl?: HTMLElement;
   private statusLabelEl?: HTMLElement;
   private statusBarInnerEl?: HTMLElement;
@@ -2644,6 +2689,131 @@ export default class ZoteroRagPlugin extends Plugin {
     return results;
   }
 
+  private getZoteroFrontmatterKeyVariants(baseKey: string): string[] {
+    const preferred = baseKey.replace(/_/g, " ");
+    const variants = new Set<string>([preferred, baseKey, baseKey.replace(/_/g, "-")]);
+    if (baseKey.includes("_")) {
+      const parts = baseKey.split("_");
+      const camel = parts[0] + parts.slice(1).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("");
+      variants.add(camel);
+    }
+    return Array.from(variants);
+  }
+
+  private getFrontmatterValue(frontmatter: Record<string, any> | null | undefined, baseKey: string): any {
+    if (!frontmatter) {
+      return undefined;
+    }
+    const variants = this.getZoteroFrontmatterKeyVariants(baseKey);
+    for (const key of variants) {
+      if (Object.prototype.hasOwnProperty.call(frontmatter, key)) {
+        return (frontmatter as Record<string, any>)[key];
+      }
+    }
+    return undefined;
+  }
+
+  private normalizeZoteroFrontmatterKeys(frontmatter: Record<string, any>): boolean {
+    let changed = false;
+    for (const baseKey of ZOTERO_FRONTMATTER_BASE_KEYS) {
+      const preferred = baseKey.replace(/_/g, " ");
+      const variants = this.getZoteroFrontmatterKeyVariants(baseKey);
+      const hasPreferred = Object.prototype.hasOwnProperty.call(frontmatter, preferred);
+      let value = hasPreferred ? frontmatter[preferred] : undefined;
+      if (!hasPreferred) {
+        for (const key of variants) {
+          if (key === preferred) {
+            continue;
+          }
+          if (Object.prototype.hasOwnProperty.call(frontmatter, key)) {
+            value = frontmatter[key];
+            break;
+          }
+        }
+      }
+      if (value === undefined) {
+        continue;
+      }
+      if (!hasPreferred) {
+        frontmatter[preferred] = value;
+        changed = true;
+      }
+      for (const key of variants) {
+        if (key === preferred) {
+          continue;
+        }
+        if (Object.prototype.hasOwnProperty.call(frontmatter, key)) {
+          delete frontmatter[key];
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  private async normalizeZoteroFrontmatterKeysInFile(file: TFile): Promise<void> {
+    const cache = this.app.metadataCache.getFileCache(file);
+    const frontmatter = cache?.frontmatter;
+    if (!frontmatter) {
+      return;
+    }
+    const hasDocId = this.getFrontmatterValue(frontmatter, "doc_id");
+    const hasZoteroKey = this.getFrontmatterValue(frontmatter, "zotero_key");
+    if (!hasDocId && !hasZoteroKey) {
+      return;
+    }
+    const probe = { ...frontmatter };
+    if (!this.normalizeZoteroFrontmatterKeys(probe)) {
+      return;
+    }
+    const notePath = file.path;
+    this.noteSyncSuppressed.add(notePath);
+    this.noteMetadataSyncSuppressed.add(notePath);
+    try {
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        this.normalizeZoteroFrontmatterKeys(fm);
+      });
+    } catch (error) {
+      console.warn("Failed to normalize Zotero frontmatter keys", error);
+    } finally {
+      window.setTimeout(() => {
+        this.noteSyncSuppressed.delete(notePath);
+        this.noteMetadataSyncSuppressed.delete(notePath);
+      }, 1500);
+    }
+  }
+
+  private normalizeFrontmatterKeySpacing(frontmatter: string): string {
+    if (!frontmatter.trim()) {
+      return frontmatter;
+    }
+    const lines = frontmatter.split(/\r?\n/);
+    const cleaned = lines.map((line) => {
+      if (/^\s+-\s+/.test(line) || !line.includes(":")) {
+        return line;
+      }
+      const leading = line.match(/^\s*/)?.[0] ?? "";
+      if (leading) {
+        return line;
+      }
+      const colonIndex = line.indexOf(":");
+      if (colonIndex <= 0) {
+        return line;
+      }
+      const key = line.slice(0, colonIndex).trim();
+      const rest = line.slice(colonIndex);
+      for (const baseKey of ZOTERO_FRONTMATTER_BASE_KEYS) {
+        const preferred = baseKey.replace(/_/g, " ");
+        const variants = this.getZoteroFrontmatterKeyVariants(baseKey);
+        if (variants.includes(key)) {
+          return `${preferred}${rest}`;
+        }
+      }
+      return line;
+    });
+    return cleaned.join("\n");
+  }
+
   private extractDocIdFromFrontmatter(content: string): string | null {
     const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
     if (!match) {
@@ -2661,7 +2831,14 @@ export default class ZoteroRagPlugin extends Plugin {
         continue;
       }
       const key = parts[0].trim().toLowerCase();
-      if (key !== "doc_id" && key !== "zotero_key") {
+      if (
+        key !== "doc_id"
+        && key !== "doc id"
+        && key !== "doc-id"
+        && key !== "zotero_key"
+        && key !== "zotero key"
+        && key !== "zotero-key"
+      ) {
         continue;
       }
       const value = trimmed.slice(trimmed.indexOf(":") + 1).trim();
@@ -2678,16 +2855,16 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!match) {
       return false;
     }
-    return /^\s*doc_id\s*:/im.test(match[1]);
+    return /^\s*doc(?:[_\s-]?id)\s*:/im.test(match[1]);
   }
 
   private ensureDocIdInFrontmatter(frontmatter: string, docId: string): string {
     const trimmed = frontmatter.trim();
-    const docLine = `doc_id: ${this.escapeYamlString(docId)}`;
+    const docLine = `doc id: ${this.escapeYamlString(docId)}`;
     if (!trimmed) {
       return docLine;
     }
-    if (/^\s*doc_id\s*:/im.test(trimmed)) {
+    if (/^\s*doc(?:[_\s-]?id)\s*:/im.test(trimmed)) {
       return trimmed;
     }
     return `${docLine}\n${trimmed}`;
@@ -2695,7 +2872,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private ensureDocIdInNoteContent(content: string, docId: string): string {
     const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
-    const docLine = `doc_id: ${this.escapeYamlString(docId)}`;
+    const docLine = `doc id: ${this.escapeYamlString(docId)}`;
     if (!match) {
       return `---\n${docLine}\n---\n\n${content.trimStart()}`;
     }
@@ -2703,7 +2880,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const lines = body.split(/\r?\n/);
     let replaced = false;
     const nextLines = lines.map((line) => {
-      if (/^\s*doc_id\s*:/i.test(line)) {
+      if (/^\s*doc(?:[_\s-]?id)\s*:/i.test(line)) {
         replaced = true;
         return docLine;
       }
@@ -3462,6 +3639,7 @@ export default class ZoteroRagPlugin extends Plugin {
         void this.pdfSidebar.syncPdfSidebarForFile(file);
         this.pdfSidebar.updatePreviewScrollHandler();
         this.scheduleNoteMetadataSync(file, 600, "open");
+        void this.normalizeZoteroFrontmatterKeysInFile(file);
       })
     );
   }
@@ -4286,18 +4464,52 @@ export default class ZoteroRagPlugin extends Plugin {
 
       const noteFields = this.extractNoteMetadata(frontmatter);
       const zoteroFields = this.extractZoteroMetadata(zoteroValues);
+      const snapshot = await this.getMetadataSnapshot(docId, frontmatter, file);
       const noteUpdates: Partial<NoteMetadataFields> = {};
       const zoteroUpdates: Partial<NoteMetadataFields> = {};
+      const decisions: Partial<Record<keyof NoteMetadataFields, MetadataDecision>> = {};
+      const conflicts: Array<{
+        field: keyof NoteMetadataFields;
+        fieldLabel: string;
+        noteLabel: string;
+        zoteroLabel: string;
+        noteValue: string;
+        zoteroValue: string;
+      }> = [];
 
       const fieldOrder: Array<keyof NoteMetadataFields> = [
         "title",
         "short_title",
         "date",
         "abstract",
+        "doi",
+        "publisher",
+        "place",
+        "issue",
+        "volume",
+        "pages",
+        "item_type",
         "tags",
         "authors",
         "editors",
       ];
+
+      const fieldLabels: Record<keyof NoteMetadataFields, string> = {
+        title: "Title",
+        short_title: "Short title",
+        date: "Date",
+        abstract: "Abstract",
+        doi: "DOI",
+        publisher: "Publisher",
+        place: "Place",
+        issue: "Issue",
+        volume: "Volume",
+        pages: "Pages",
+        item_type: "Item type",
+        tags: "Tags",
+        authors: "Authors",
+        editors: "Editors",
+      };
 
       for (const field of fieldOrder) {
         const noteValue = noteFields[field];
@@ -4305,11 +4517,42 @@ export default class ZoteroRagPlugin extends Plugin {
         if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
           continue;
         }
-        const decision = await this.promptMetadataDecision(field, noteValue, zoteroValue);
-        if (decision === "note") {
-          this.assignMetadataUpdate(zoteroUpdates, field, noteValue);
-        } else if (decision === "zotero") {
-          this.assignMetadataUpdate(noteUpdates, field, zoteroValue);
+        const snapshotValue = snapshot?.[field];
+        if (snapshotValue !== undefined) {
+          const noteChanged = !this.metadataValuesEqual(field, noteValue, snapshotValue);
+          const zoteroChanged = !this.metadataValuesEqual(field, zoteroValue, snapshotValue);
+          if (noteChanged && !zoteroChanged) {
+            decisions[field] = "note";
+            this.assignMetadataUpdate(zoteroUpdates, field, noteValue);
+            continue;
+          }
+          if (!noteChanged && zoteroChanged) {
+            decisions[field] = "zotero";
+            this.assignMetadataUpdate(noteUpdates, field, zoteroValue);
+            continue;
+          }
+        }
+        const decisionLabels = this.getMetadataDecisionLabels(field, noteValue, zoteroValue, fieldLabels);
+        conflicts.push({
+          field,
+          fieldLabel: fieldLabels[field],
+          noteLabel: decisionLabels.noteLabel,
+          zoteroLabel: decisionLabels.zoteroLabel,
+          noteValue: this.formatMetadataValue(noteValue),
+          zoteroValue: this.formatMetadataValue(zoteroValue),
+        });
+      }
+
+      if (conflicts.length > 0) {
+        const conflictDecisions = await this.promptMetadataBatchDecision(conflicts);
+        for (const conflict of conflicts) {
+          const decision = conflictDecisions[conflict.field] ?? "skip";
+          decisions[conflict.field] = decision;
+          if (decision === "note") {
+            this.assignMetadataUpdate(zoteroUpdates, conflict.field, noteFields[conflict.field]);
+          } else if (decision === "zotero") {
+            this.assignMetadataUpdate(noteUpdates, conflict.field, zoteroFields[conflict.field]);
+          }
         }
       }
 
@@ -4325,6 +4568,7 @@ export default class ZoteroRagPlugin extends Plugin {
           zoteroUpdates
         );
       }
+      await this.updateMetadataSnapshot(file, docId, noteFields, zoteroFields, snapshot, decisions, fieldOrder);
     } catch (error) {
       console.warn("Failed to sync note metadata with Zotero", error);
     } finally {
@@ -4337,10 +4581,9 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private resolveZoteroItemKey(frontmatter: Record<string, any>, docId: string): string {
     const candidates = [
-      frontmatter?.zotero_key,
-      frontmatter?.zoteroKey,
-      frontmatter?.item_key,
-      frontmatter?.itemKey,
+      this.getFrontmatterValue(frontmatter, "zotero_key"),
+      this.getFrontmatterValue(frontmatter, "item_key"),
+      this.getFrontmatterValue(frontmatter, "doc_id"),
       docId,
     ];
     for (const candidate of candidates) {
@@ -4355,11 +4598,27 @@ export default class ZoteroRagPlugin extends Plugin {
   private extractNoteMetadata(frontmatter: Record<string, any>): NoteMetadataFields {
     const title = this.normalizeMetadataString(frontmatter?.title);
     const shortTitle = this.normalizeMetadataString(
-      frontmatter?.short_title ?? frontmatter?.shortTitle ?? frontmatter?.["title-short"]
+      frontmatter?.["short title"]
+        ?? frontmatter?.short_title
+        ?? frontmatter?.shortTitle
+        ?? frontmatter?.["short-title"]
+        ?? frontmatter?.["title-short"]
     );
     const date = this.normalizeMetadataString(frontmatter?.date);
     const abstractNote = this.normalizeMetadataString(
       frontmatter?.abstract ?? frontmatter?.abstractNote
+    );
+    const doi = this.normalizeMetadataString(frontmatter?.doi ?? frontmatter?.DOI);
+    const publisher = this.normalizeMetadataString(frontmatter?.publisher);
+    const place = this.normalizeMetadataString(frontmatter?.place);
+    const issue = this.normalizeMetadataString(frontmatter?.issue);
+    const volume = this.normalizeMetadataString(frontmatter?.volume);
+    const pages = this.normalizeMetadataString(frontmatter?.pages);
+    const itemType = this.normalizeMetadataString(
+      frontmatter?.["item type"]
+        ?? frontmatter?.item_type
+        ?? frontmatter?.itemType
+        ?? frontmatter?.["item-type"]
     );
     const tagsRaw = this.normalizeMetadataList(frontmatter?.tags);
     const authors = this.normalizeMetadataList(frontmatter?.authors);
@@ -4370,6 +4629,13 @@ export default class ZoteroRagPlugin extends Plugin {
       short_title: shortTitle,
       date,
       abstract: abstractNote,
+      doi,
+      publisher,
+      place,
+      issue,
+      volume,
+      pages,
+      item_type: itemType,
       tags: this.sanitizeObsidianTags(tagsRaw),
       authors,
       editors,
@@ -4381,6 +4647,15 @@ export default class ZoteroRagPlugin extends Plugin {
     const shortTitle = this.normalizeMetadataString(extractShortTitleFromValues(values));
     const date = this.normalizeMetadataString(values?.date);
     const abstractNote = this.normalizeMetadataString(values?.abstractNote);
+    const doi = this.normalizeMetadataString(values?.DOI ?? values?.doi);
+    const publisher = this.normalizeMetadataString(values?.publisher);
+    const place = this.normalizeMetadataString(values?.place);
+    const issue = this.normalizeMetadataString(values?.issue);
+    const volume = this.normalizeMetadataString(values?.volume);
+    const pages = this.normalizeMetadataString(values?.pages);
+    const itemType = this.normalizeMetadataString(
+      values?.itemType ?? values?.item_type ?? values?.["item-type"]
+    );
     const creators = Array.isArray(values?.creators) ? values.creators : [];
     const authors = creators
       .filter((creator) => creator?.creatorType === "author")
@@ -4404,6 +4679,13 @@ export default class ZoteroRagPlugin extends Plugin {
       short_title: shortTitle,
       date,
       abstract: abstractNote,
+      doi,
+      publisher,
+      place,
+      issue,
+      volume,
+      pages,
+      item_type: itemType,
       tags: this.sanitizeObsidianTags(tagsRaw),
       authors: this.normalizeMetadataList(authors),
       editors: this.normalizeMetadataList(editors),
@@ -4502,20 +4784,12 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.normalizeMetadataString(value);
   }
 
-  private async promptMetadataDecision(
+  private getMetadataDecisionLabels(
     field: keyof NoteMetadataFields,
     noteValue: string | string[],
-    zoteroValue: string | string[]
-  ): Promise<MetadataDecision> {
-    const fieldLabels: Record<keyof NoteMetadataFields, string> = {
-      title: "Title",
-      short_title: "Short title",
-      date: "Date",
-      abstract: "Abstract",
-      tags: "Tags",
-      authors: "Authors",
-      editors: "Editors",
-    };
+    zoteroValue: string | string[],
+    fieldLabels: Record<keyof NoteMetadataFields, string>
+  ): { fieldLabel: string; noteLabel: string; zoteroLabel: string } {
     const noteEmpty = this.isMetadataValueEmpty(noteValue);
     const zoteroEmpty = this.isMetadataValueEmpty(zoteroValue);
     let noteLabel = "Keep note";
@@ -4527,17 +4801,320 @@ export default class ZoteroRagPlugin extends Plugin {
       noteLabel = "Update Zotero from note";
       zoteroLabel = "Clear note";
     }
+    return {
+      fieldLabel: fieldLabels[field],
+      noteLabel,
+      zoteroLabel,
+    };
+  }
+
+  private async promptMetadataDecision(
+    field: keyof NoteMetadataFields,
+    noteValue: string | string[],
+    zoteroValue: string | string[]
+  ): Promise<MetadataDecision> {
+    const fieldLabels: Record<keyof NoteMetadataFields, string> = {
+      title: "Title",
+      short_title: "Short title",
+      date: "Date",
+      abstract: "Abstract",
+      doi: "DOI",
+      publisher: "Publisher",
+      place: "Place",
+      issue: "Issue",
+      volume: "Volume",
+      pages: "Pages",
+      item_type: "Item type",
+      tags: "Tags",
+      authors: "Authors",
+      editors: "Editors",
+    };
+    const labels = this.getMetadataDecisionLabels(field, noteValue, zoteroValue, fieldLabels);
     return new Promise((resolve) => {
       new MetadataConflictModal(
         this.app,
-        fieldLabels[field],
-        noteLabel,
-        zoteroLabel,
+        labels.fieldLabel,
+        labels.noteLabel,
+        labels.zoteroLabel,
         this.formatMetadataValue(noteValue),
         this.formatMetadataValue(zoteroValue),
         resolve
       ).open();
     });
+  }
+
+  private async promptMetadataBatchDecision(
+    conflicts: Array<{
+      field: keyof NoteMetadataFields;
+      fieldLabel: string;
+      noteLabel: string;
+      zoteroLabel: string;
+      noteValue: string;
+      zoteroValue: string;
+    }>
+  ): Promise<Record<keyof NoteMetadataFields, MetadataDecision>> {
+    return new Promise((resolve) => {
+      new MetadataConflictBatchModal(
+        this.app,
+        conflicts.map((conflict) => ({
+          field: conflict.field,
+          fieldLabel: conflict.fieldLabel,
+          noteLabel: conflict.noteLabel,
+          zoteroLabel: conflict.zoteroLabel,
+          noteValue: conflict.noteValue,
+          zoteroValue: conflict.zoteroValue,
+        })),
+        (decisions) => resolve(decisions as Record<keyof NoteMetadataFields, MetadataDecision>)
+      ).open();
+    });
+  }
+
+  private normalizeSnapshotValue(
+    field: keyof NoteMetadataFields,
+    value: unknown
+  ): string | string[] {
+    if (Array.isArray(value)) {
+      const list = this.normalizeMetadataList(value);
+      if (field === "tags") {
+        return [...list].sort();
+      }
+      return list;
+    }
+    const str = this.normalizeMetadataString(value);
+    return str;
+  }
+
+  private getMetadataSnapshotCachePath(): string {
+    return normalizePath(METADATA_SNAPSHOT_PATH);
+  }
+
+  private normalizeMetadataSnapshotRecord(raw: unknown): Partial<NoteMetadataFields> | null {
+    if (!raw) {
+      return null;
+    }
+    let parsed: any = raw;
+    if (typeof raw === "string") {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    const snapshot: Partial<NoteMetadataFields> = {};
+    const fieldOrder: Array<keyof NoteMetadataFields> = [
+      "title",
+      "short_title",
+      "date",
+      "abstract",
+      "doi",
+      "publisher",
+      "place",
+      "issue",
+      "volume",
+      "pages",
+      "item_type",
+      "tags",
+      "authors",
+      "editors",
+    ];
+    for (const field of fieldOrder) {
+      if (Object.prototype.hasOwnProperty.call(parsed, field)) {
+        snapshot[field] = this.normalizeSnapshotValue(field, parsed[field]);
+      }
+    }
+    return Object.keys(snapshot).length > 0 ? snapshot : null;
+  }
+
+  private parseLegacyMetadataSnapshot(frontmatter: Record<string, any>): Partial<NoteMetadataFields> | null {
+    if (!frontmatter) {
+      return null;
+    }
+    const raw =
+      (frontmatter as Record<string, any>).zrr_metadata_snapshot
+      ?? (frontmatter as Record<string, any>)["zrr metadata snapshot"];
+    if (!raw) {
+      return null;
+    }
+    return this.normalizeMetadataSnapshotRecord(raw);
+  }
+
+  private async loadMetadataSnapshotCache(): Promise<Record<string, Partial<NoteMetadataFields>>> {
+    const adapter = this.app.vault.adapter;
+    const cachePath = this.getMetadataSnapshotCachePath();
+    if (!(await adapter.exists(cachePath))) {
+      return {};
+    }
+    try {
+      const raw = await adapter.read(cachePath);
+      const payload = JSON.parse(raw);
+      const entries = payload?.entries ?? payload;
+      if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+        return {};
+      }
+      const snapshots: Record<string, Partial<NoteMetadataFields>> = {};
+      for (const [docId, snapshotRaw] of Object.entries(entries)) {
+        const normalized = this.normalizeMetadataSnapshotRecord(snapshotRaw);
+        if (normalized) {
+          snapshots[String(docId)] = normalized;
+        }
+      }
+      return snapshots;
+    } catch (error) {
+      console.error("Failed to read metadata snapshot cache", error);
+      return {};
+    }
+  }
+
+  private async getMetadataSnapshotCache(): Promise<Record<string, Partial<NoteMetadataFields>>> {
+    if (this.metadataSnapshotCache) {
+      return this.metadataSnapshotCache;
+    }
+    this.metadataSnapshotCache = await this.loadMetadataSnapshotCache();
+    return this.metadataSnapshotCache;
+  }
+
+  private async saveMetadataSnapshotCache(
+    cache: Record<string, Partial<NoteMetadataFields>>
+  ): Promise<void> {
+    await this.ensureFolder(CACHE_ROOT);
+    const adapter = this.app.vault.adapter;
+    const cachePath = this.getMetadataSnapshotCachePath();
+    const payload = { version: 1, entries: cache };
+    await adapter.write(cachePath, JSON.stringify(payload, null, 2));
+    this.metadataSnapshotCache = cache;
+  }
+
+  private async removeLegacyMetadataSnapshotFrontmatter(
+    file: TFile,
+    frontmatter?: Record<string, any> | null
+  ): Promise<void> {
+    const hasLegacy = Boolean(
+      frontmatter
+        && (Object.prototype.hasOwnProperty.call(frontmatter, "zrr_metadata_snapshot")
+          || Object.prototype.hasOwnProperty.call(frontmatter, "zrr metadata snapshot"))
+    );
+    if (!hasLegacy) {
+      return;
+    }
+    const notePath = file.path;
+    this.noteSyncSuppressed.add(notePath);
+    this.noteMetadataSyncSuppressed.add(notePath);
+    try {
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        delete (fm as Record<string, any>).zrr_metadata_snapshot;
+        delete (fm as Record<string, any>)["zrr metadata snapshot"];
+      });
+    } catch (error) {
+      console.warn("Failed to remove legacy metadata snapshot", error);
+    } finally {
+      window.setTimeout(() => {
+        this.noteSyncSuppressed.delete(notePath);
+        this.noteMetadataSyncSuppressed.delete(notePath);
+      }, 1500);
+    }
+  }
+
+  private async getMetadataSnapshot(
+    docId: string,
+    frontmatter: Record<string, any> | null,
+    file: TFile
+  ): Promise<Partial<NoteMetadataFields> | null> {
+    if (!docId) {
+      return null;
+    }
+    const cache = await this.getMetadataSnapshotCache();
+    const cached = cache[docId];
+    if (cached) {
+      return cached;
+    }
+    const legacy = frontmatter ? this.parseLegacyMetadataSnapshot(frontmatter) : null;
+    if (!legacy) {
+      return null;
+    }
+    cache[docId] = legacy;
+    await this.saveMetadataSnapshotCache(cache);
+    await this.removeLegacyMetadataSnapshotFrontmatter(file, frontmatter);
+    return legacy;
+  }
+
+  private serializeMetadataSnapshot(
+    snapshot: Partial<NoteMetadataFields>,
+    fieldOrder: Array<keyof NoteMetadataFields>
+  ): string {
+    const ordered: Record<string, any> = {};
+    for (const field of fieldOrder) {
+      if (snapshot[field] !== undefined) {
+        ordered[field] = snapshot[field];
+      }
+    }
+    return JSON.stringify(ordered);
+  }
+
+  private async updateMetadataSnapshot(
+    file: TFile,
+    docId: string,
+    noteFields: NoteMetadataFields,
+    zoteroFields: NoteMetadataFields,
+    snapshot: Partial<NoteMetadataFields> | null,
+    decisions: Partial<Record<keyof NoteMetadataFields, MetadataDecision>>,
+    fieldOrder: Array<keyof NoteMetadataFields>
+  ): Promise<void> {
+    if (!docId) {
+      return;
+    }
+    const nextSnapshot: Partial<NoteMetadataFields> = snapshot ? { ...snapshot } : {};
+    for (const field of fieldOrder) {
+      const noteValue = noteFields[field];
+      const zoteroValue = zoteroFields[field];
+      if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
+        nextSnapshot[field] = this.normalizeSnapshotValue(field, noteValue);
+        continue;
+      }
+      const decision = decisions[field];
+      if (decision === "note") {
+        nextSnapshot[field] = this.normalizeSnapshotValue(field, noteValue);
+      } else if (decision === "zotero") {
+        nextSnapshot[field] = this.normalizeSnapshotValue(field, zoteroValue);
+      }
+    }
+    const serialized = this.serializeMetadataSnapshot(nextSnapshot, fieldOrder);
+    const cache = await this.getMetadataSnapshotCache();
+    const existingSnapshot = cache[docId];
+    const existingSerialized = existingSnapshot
+      ? this.serializeMetadataSnapshot(existingSnapshot, fieldOrder)
+      : "";
+    if (serialized === existingSerialized) {
+      return;
+    }
+    cache[docId] = nextSnapshot;
+    try {
+      await this.saveMetadataSnapshotCache(cache);
+    } catch (error) {
+      console.warn("Failed to update metadata snapshot cache", error);
+    }
+    await this.removeLegacyMetadataSnapshotFrontmatter(
+      file,
+      this.app.metadataCache.getFileCache(file)?.frontmatter ?? null
+    );
+  }
+
+  private async removeMetadataSnapshot(docId: string): Promise<void> {
+    if (!docId) {
+      return;
+    }
+    const cache = await this.getMetadataSnapshotCache();
+    if (!cache[docId]) {
+      return;
+    }
+    delete cache[docId];
+    try {
+      await this.saveMetadataSnapshotCache(cache);
+    } catch (error) {
+      console.warn("Failed to remove metadata snapshot", error);
+    }
   }
 
   private async applyNoteMetadataUpdates(
@@ -4556,13 +5133,40 @@ export default class ZoteroRagPlugin extends Plugin {
           frontmatter.title = updates.title ?? "";
         }
         if ("short_title" in updates) {
-          frontmatter.short_title = updates.short_title ?? "";
+          frontmatter["short title"] = updates.short_title ?? "";
+          delete (frontmatter as Record<string, any>).short_title;
+          delete (frontmatter as Record<string, any>).shortTitle;
+          delete (frontmatter as Record<string, any>)["title-short"];
         }
         if ("date" in updates) {
           frontmatter.date = updates.date ?? "";
         }
         if ("abstract" in updates) {
           frontmatter.abstract = updates.abstract ?? "";
+        }
+        if ("doi" in updates) {
+          frontmatter.doi = updates.doi ?? "";
+        }
+        if ("publisher" in updates) {
+          frontmatter.publisher = updates.publisher ?? "";
+        }
+        if ("place" in updates) {
+          frontmatter.place = updates.place ?? "";
+        }
+        if ("issue" in updates) {
+          frontmatter.issue = updates.issue ?? "";
+        }
+        if ("volume" in updates) {
+          frontmatter.volume = updates.volume ?? "";
+        }
+        if ("pages" in updates) {
+          frontmatter.pages = updates.pages ?? "";
+        }
+        if ("item_type" in updates) {
+          frontmatter["item type"] = updates.item_type ?? "";
+          delete (frontmatter as Record<string, any>).item_type;
+          delete (frontmatter as Record<string, any>).itemType;
+          delete (frontmatter as Record<string, any>)["item-type"];
         }
         if ("tags" in updates) {
           frontmatter.tags = Array.isArray(updates.tags) ? updates.tags : [];
@@ -4606,6 +5210,27 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     if ("abstract" in updates) {
       payload.abstractNote = updates.abstract ?? "";
+    }
+    if ("doi" in updates) {
+      payload.DOI = updates.doi ?? "";
+    }
+    if ("publisher" in updates) {
+      payload.publisher = updates.publisher ?? "";
+    }
+    if ("place" in updates) {
+      payload.place = updates.place ?? "";
+    }
+    if ("issue" in updates) {
+      payload.issue = updates.issue ?? "";
+    }
+    if ("volume" in updates) {
+      payload.volume = updates.volume ?? "";
+    }
+    if ("pages" in updates) {
+      payload.pages = updates.pages ?? "";
+    }
+    if ("item_type" in updates) {
+      payload.itemType = updates.item_type ?? "";
     }
     if ("tags" in updates) {
       payload.tags = this.buildZoteroTags(noteFields.tags, values?.tags);
@@ -4905,7 +5530,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private isZoteroNoteFile(file: TFile): boolean {
     const cache = this.app.metadataCache.getFileCache(file);
     const frontmatter = cache?.frontmatter;
-    return Boolean(frontmatter?.doc_id || frontmatter?.zotero_key);
+    return Boolean(this.getFrontmatterValue(frontmatter, "doc_id") || this.getFrontmatterValue(frontmatter, "zotero_key"));
   }
 
   private async deleteZoteroNoteAndCacheForFile(file: TFile): Promise<void> {
@@ -5974,10 +6599,12 @@ export default class ZoteroRagPlugin extends Plugin {
   private async removeDocIndexEntry(docId: string): Promise<void> {
     const index = await this.getDocIndex();
     if (!index[docId]) {
+      await this.removeMetadataSnapshot(docId);
       return;
     }
     delete index[docId];
     await this.saveDocIndex(index);
+    await this.removeMetadataSnapshot(docId);
   }
 
   private async hydrateDocIndexFromCache(docId: string): Promise<DocIndexEntry | null> {
@@ -6730,7 +7357,8 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const resolved = vars ?? await this.buildTemplateVars(values, meta, docId, pdfLink, itemJsonLink);
     const rendered = this.renderTemplate(template, resolved, "", { appendDocling: false }).trim();
-    return this.stripEmptyFrontmatterFields(rendered);
+    const cleaned = this.stripEmptyFrontmatterFields(rendered);
+    return this.normalizeFrontmatterKeySpacing(cleaned);
   }
 
   private stripEmptyFrontmatterFields(frontmatter: string): string {
@@ -6739,7 +7367,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const lines = frontmatter.split(/\r?\n/);
     const cleaned: string[] = [];
-    const keyRe = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/;
+    const keyRe = /^([A-Za-z0-9][A-Za-z0-9 _-]*)\s*:\s*(.*)$/;
     const listItemRe = /^[ \t]+-\s*(.*)$/;
     const preserveEmpty = new Set(["abstract"]);
     const emptyValue = (value: string): boolean => {
@@ -6755,7 +7383,7 @@ export default class ZoteroRagPlugin extends Plugin {
         idx += 1;
         continue;
       }
-      const key = keyMatch[1];
+      const key = keyMatch[1].trim();
       const value = keyMatch[2].trim();
       if (preserveEmpty.has(key)) {
         cleaned.push(line);

@@ -19,6 +19,7 @@ export type OcrEngineAvailability = {
 export const CACHE_ROOT = ".zotero-redisearch-rag";
 export const ITEM_CACHE_DIR = `${CACHE_ROOT}/items`;
 export const CHUNK_CACHE_DIR = `${CACHE_ROOT}/chunks`;
+export const METADATA_SNAPSHOT_PATH = `${CACHE_ROOT}/metadata_snapshots.json`;
 
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
