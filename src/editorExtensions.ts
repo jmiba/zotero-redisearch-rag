@@ -59,9 +59,19 @@ const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElem
     badge.classList.add("is-excluded");
   }
   if (info.pageNumber && totalPages > 0) {
-    badge.textContent = `Page ${info.pageNumber}/${totalPages}`;
+    if (info.chunkKind === "section") {
+      const label = info.chunkId ? `Section ${info.chunkId}` : "Section";
+      badge.textContent = `${label} (p${info.pageNumber}/${totalPages})`;
+    } else {
+      badge.textContent = `Page ${info.pageNumber}/${totalPages}`;
+    }
   } else if (info.pageNumber) {
-    badge.textContent = `Page ${info.pageNumber}`;
+    if (info.chunkKind === "section") {
+      const label = info.chunkId ? `Section ${info.chunkId}` : "Section";
+      badge.textContent = `${label} (p${info.pageNumber})`;
+    } else {
+      badge.textContent = `Page ${info.pageNumber}`;
+    }
   } else if (info.chunkId) {
     badge.textContent = `Section ${info.chunkId}`;
   } else {
@@ -263,6 +273,7 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
   const entries: Array<{ line: number; from: number; to: number; info: ZrrBadgeInfo }> = [];
   const pageNumbers: number[] = [];
   let hasPageChunks = false;
+  let hasSectionChunks = false;
   for (let lineNo = 1; lineNo <= doc.lines; lineNo += 1) {
     const line = doc.line(lineNo);
     const match = line.text.match(/<!--\s*([^>]*)\s*-->/);
@@ -278,6 +289,9 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
       if (info.pageNumber) {
         hasPageChunks = true;
       }
+      if (info.chunkKind === "section") {
+        hasSectionChunks = true;
+      }
     } else if (info.type === "chunk-end") {
       info.chunkKind = info.chunkKind ?? "section";
     }
@@ -289,7 +303,7 @@ const buildSyncBadgeDecorations = (view: EditorView): DecorationSet => {
   if (!entries.length) {
     return Decoration.none;
   }
-  if (hasPageChunks) {
+  if (hasPageChunks && !hasSectionChunks) {
     for (const entry of entries) {
       if (entry.info.type === "chunk-end") {
         entry.info.chunkKind = "page";

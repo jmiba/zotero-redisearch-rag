@@ -4797,6 +4797,14 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!chunks.length) {
       return `<!-- zrr:sync-start doc_id=${docId} -->\n${fallbackMarkdown}\n<!-- zrr:sync-end -->`;
     }
+    const isSectionChunked = chunks.some((chunk) => {
+      const section = typeof chunk?.section === "string" ? chunk.section.trim() : "";
+      if (section) {
+        return true;
+      }
+      const chunkId = typeof chunk?.chunk_id === "string" ? chunk.chunk_id.trim() : "";
+      return Boolean(chunkId && !/^p\d+$/i.test(chunkId));
+    });
     const parts: string[] = [`<!-- zrr:sync-start doc_id=${docId} -->`];
     for (const chunk of chunks) {
       const chunkId = typeof chunk?.chunk_id === "string" ? chunk.chunk_id.trim() : "";
@@ -4806,11 +4814,24 @@ export default class ZoteroRagPlugin extends Plugin {
       const pageStart = Number.isFinite(chunk?.page_start ?? NaN) ? Number(chunk.page_start) : null;
       const excluded = Boolean(chunk?.excluded || chunk?.exclude);
       const text = typeof chunk?.text === "string" ? chunk.text.trim() : "";
-      const pageAttr = pageStart !== null ? ` page=${pageStart}` : "";
-      const attrs = ` id=${chunkId}${pageAttr}${excluded ? " exclude" : ""}`;
+      let displayText = text;
+      if (isSectionChunked) {
+        const sectionTitle = typeof chunk?.section === "string" ? chunk.section.trim() : "";
+        const headingLine = sectionTitle ? `## ${sectionTitle}` : "";
+        if (headingLine && !displayText.startsWith("#")) {
+          displayText = displayText
+            ? `${headingLine}\n\n${displayText}`
+            : headingLine;
+        }
+      }
+      const pageAttr = pageStart !== null
+        ? (isSectionChunked ? ` (${pageStart})` : ` page=${pageStart}`)
+        : "";
+      const sectionAttr = isSectionChunked ? " section" : "";
+      const attrs = ` id=${chunkId}${sectionAttr}${pageAttr}${excluded ? " exclude" : ""}`;
       parts.push(`<!-- zrr:chunk${attrs} -->`);
-      if (text) {
-        parts.push(text);
+      if (displayText) {
+        parts.push(displayText);
       }
       parts.push("<!-- zrr:chunk end -->");
       parts.push("");

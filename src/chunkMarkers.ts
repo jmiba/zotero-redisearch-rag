@@ -51,17 +51,21 @@ export const parseZrrBadgeInfo = (data: string): ZrrBadgeInfo | null => {
   const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
   const chunkId = idMatch ? idMatch[2] : "";
   const pageAttrMatch = attrs.match(/\bpage(?:_start)?=(["']?)(\d+)\1/i);
-  const pageAttr = pageAttrMatch ? Number.parseInt(pageAttrMatch[2], 10) : undefined;
+  const parenMatch = !pageAttrMatch ? attrs.match(/\(\s*(\d+)\s*\)/) : null;
+  const pageAttr = pageAttrMatch
+    ? Number.parseInt(pageAttrMatch[2], 10)
+    : (parenMatch ? Number.parseInt(parenMatch[1], 10) : undefined);
   const pageMatch = chunkId.match(/^p(\d+)$/i);
   const pageFromId = pageMatch ? Number.parseInt(pageMatch[1], 10) : undefined;
   const pageNumber = Number.isFinite(pageAttr ?? NaN) ? pageAttr : pageFromId;
   const excluded = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
+  const isSection = /\bsection\b/i.test(attrs);
   return {
     type: "chunk-start",
     chunkId: chunkId || undefined,
     excluded,
     pageNumber: Number.isFinite(pageNumber ?? NaN) ? pageNumber : undefined,
-    chunkKind: pageNumber ? "page" : "section",
+    chunkKind: isSection ? "section" : (pageNumber ? "page" : "section"),
   };
 };
 
@@ -77,7 +81,10 @@ export const parseChunkMarkerLine = (line: string): ChunkMarkerInfo | null => {
   const idMatch = attrs.match(/\bid=(["']?)([^"'\s]+)\1/i);
   const chunkId = idMatch ? idMatch[2].trim() : undefined;
   const pageAttrMatch = attrs.match(/\bpage(?:_start)?=(["']?)(\d+)\1/i);
-  const pageAttr = pageAttrMatch ? Number.parseInt(pageAttrMatch[2], 10) : undefined;
+  const parenMatch = !pageAttrMatch ? attrs.match(/\(\s*(\d+)\s*\)/) : null;
+  const pageAttr = pageAttrMatch
+    ? Number.parseInt(pageAttrMatch[2], 10)
+    : (parenMatch ? Number.parseInt(parenMatch[1], 10) : undefined);
   const pageFromId = chunkId ? extractPageNumberFromChunkId(chunkId) ?? undefined : undefined;
   const pageNumber = Number.isFinite(pageAttr ?? NaN) ? pageAttr : pageFromId;
   return {
