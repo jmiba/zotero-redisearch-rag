@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.8
+
+- Section chunk markers now label sections explicitly and show the estimated page in parentheses.
+- Section chunk badges display the section label with the estimated page number.
+- Section chunk notes now include the section heading for readability.
+
 ## 0.4.7
 
 - Better BibTeX citekeys: recognize pinned keys in Extra (bibtex/biblatex) and fall back to CSL `citation-key` when needed.
