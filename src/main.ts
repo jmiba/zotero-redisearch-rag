@@ -30,6 +30,8 @@ import {
   DEFAULT_SETTINGS,
   ITEM_CACHE_DIR,
   METADATA_SNAPSHOT_PATH,
+  ANNOTATION_SNAPSHOT_PATH,
+  AnnotationColorMap,
   OcrEngineAvailability,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
@@ -37,6 +39,7 @@ import {
 import { PdfSidebarController } from "./pdfSidebar";
 import { ICON_ASSETS } from "./iconAssets";
 import {
+  AnnotationConflictBatchModal,
   ChunkTagModal,
   ChunkTextPreviewModal,
   ConfirmDeleteNoteModal,
@@ -105,6 +108,9 @@ const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
 const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
 const MAX_CITATION_TITLE_LENGTH = 80;
+const ANNOTATION_SYNC_GRACE_MS = 120000;
+const ZRR_ANNOTATIONS_START_RE = /<!--\s*zrr:annotations-start\b[^>]*-->/i;
+const ZRR_ANNOTATIONS_END_RE = /<!--\s*zrr:annotations-end\s*-->/i;
 
 const ZOTERO_FRONTMATTER_BASE_KEYS = [
   "doc_id",
@@ -154,10 +160,49 @@ type ParsedChunkBlock = {
   excludeFlag: boolean;
 };
 
+type AnnotationEntry = {
+  key: string;
+  attachmentKey: string;
+  pageLabel: string;
+  pageIndex: number | null;
+  colorKey: string;
+  callout: string;
+  heading: string;
+  annotationType: string;
+  text: string;
+  comment: string;
+  tags: string[];
+  sortIndex: number;
+  rawValues: ZoteroItemValues;
+};
+
+type ParsedAnnotationNote = {
+  key: string;
+  attachmentKey: string;
+  pageLabel: string;
+  pageIndex: number | null;
+  callout: string;
+  text: string;
+  comment: string;
+  tags: string[];
+};
+
+type AnnotationSnapshotEntry = {
+  text: string;
+  comment: string;
+  tags: string[];
+};
+
+type AnnotationSnapshotCacheEntry = {
+  attachment_key?: string;
+  annotations: Record<string, AnnotationSnapshotEntry>;
+};
+
 export default class ZoteroRagPlugin extends Plugin {
   settings!: ZoteroRagSettings;
   private docIndex: Record<string, DocIndexEntry> | null = null;
   private metadataSnapshotCache: Record<string, Partial<NoteMetadataFields>> | null = null;
+  private annotationSnapshotCache: Record<string, AnnotationSnapshotCacheEntry> | null = null;
   private statusBarEl?: HTMLElement;
   private statusLabelEl?: HTMLElement;
   private statusBarInnerEl?: HTMLElement;
@@ -174,6 +219,11 @@ export default class ZoteroRagPlugin extends Plugin {
   private noteMetadataSyncInFlight = new Set<string>();
   private noteMetadataSyncPending = new Set<string>();
   private noteMetadataSyncSuppressed = new Set<string>();
+  private noteAnnotationSyncTimers = new Map<string, number>();
+  private noteAnnotationSyncInFlight = new Set<string>();
+  private noteAnnotationSyncPending = new Set<string>();
+  private noteAnnotationSyncSuppressed = new Set<string>();
+  private annotationNoteEditTimes = new Map<string, number>();
   private missingDocIdWarned = new Set<string>();
   private collectionTitleCache = new Map<string, string>();
   private recreateMissingNotesActive = false;
@@ -681,7 +731,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       const doclingMd = await this.app.vault.adapter.read(notePath);
       const chunkPayload = await this.readChunkPayload(chunkPath);
-      const doclingContent = this.buildSyncedDoclingContent(docId, chunkPayload, doclingMd);
+    const doclingContent = this.buildSyncedDoclingContent(docId, chunkPayload, doclingMd);
       const noteContent = await this.buildNoteMarkdown(
         values,
         item.meta ?? {},
@@ -692,6 +742,10 @@ export default class ZoteroRagPlugin extends Plugin {
         doclingContent
       );
       await this.writeNoteWithSyncSuppressed(notePath, noteContent);
+      const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+      if (noteFile instanceof TFile) {
+        this.scheduleNoteAnnotationSync(noteFile, 2000, "save");
+      }
     } catch (error) {
       new Notice("Failed to finalize note markdown.");
       console.error(error);
@@ -3625,10 +3679,12 @@ export default class ZoteroRagPlugin extends Plugin {
         if (this.noteSyncSuppressed.has(file.path)) {
           this.scheduleNoteSync(file, 2500);
           this.scheduleNoteMetadataSync(file, 2500, "save");
+          this.scheduleNoteAnnotationSync(file, 2500, "save");
           return;
         }
         this.scheduleNoteSync(file);
         this.scheduleNoteMetadataSync(file, 1200, "save");
+        this.scheduleNoteAnnotationSync(file, 1200, "save");
       })
     );
   }
@@ -3642,6 +3698,7 @@ export default class ZoteroRagPlugin extends Plugin {
         void this.pdfSidebar.syncPdfSidebarForFile(file);
         this.pdfSidebar.updatePreviewScrollHandler();
         this.scheduleNoteMetadataSync(file, 600, "open");
+        this.scheduleNoteAnnotationSync(file, 800, "open");
         void this.normalizeZoteroFrontmatterKeysInFile(file);
       })
     );
@@ -4237,6 +4294,34 @@ export default class ZoteroRagPlugin extends Plugin {
     this.noteMetadataSyncTimers.set(file.path, handle);
   }
 
+  private scheduleNoteAnnotationSync(
+    file: TFile,
+    delayMs = 1200,
+    reason: "open" | "save" = "save"
+  ): void {
+    const existing = this.noteAnnotationSyncTimers.get(file.path);
+    if (existing !== undefined) {
+      window.clearTimeout(existing);
+    }
+    const handle = window.setTimeout(() => {
+      this.noteAnnotationSyncTimers.delete(file.path);
+      void this.syncNoteAnnotationsWithZotero(file, reason);
+    }, delayMs);
+    this.noteAnnotationSyncTimers.set(file.path, handle);
+  }
+
+  private getAnnotationGraceRemaining(notePath: string): number {
+    const lastEdit = this.annotationNoteEditTimes.get(notePath);
+    if (!lastEdit) {
+      return 0;
+    }
+    const elapsed = Date.now() - lastEdit;
+    if (elapsed >= ANNOTATION_SYNC_GRACE_MS) {
+      return 0;
+    }
+    return ANNOTATION_SYNC_GRACE_MS - elapsed;
+  }
+
   private escapeRegExp(text: string): string {
     return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
@@ -4316,6 +4401,9 @@ export default class ZoteroRagPlugin extends Plugin {
       const chunks = Array.isArray(chunkPayload.chunks) ? chunkPayload.chunks : [];
       const chunkMap = new Map<string, Record<string, any>>();
       for (const chunk of chunks) {
+        if (this.isAnnotationChunk(chunk)) {
+          continue;
+        }
         const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
         if (id) {
           chunkMap.set(id, chunk);
@@ -4582,6 +4670,201 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async syncNoteAnnotationsWithZotero(
+    file: TFile,
+    reason: "open" | "save"
+  ): Promise<void> {
+    if (this.noteAnnotationSyncInFlight.has(file.path)) {
+      this.noteAnnotationSyncPending.add(file.path);
+      return;
+    }
+    if (this.noteAnnotationSyncSuppressed.has(file.path)) {
+      this.scheduleNoteAnnotationSync(file, 2000, reason);
+      return;
+    }
+    this.noteAnnotationSyncInFlight.add(file.path);
+    try {
+      const content = await this.app.vault.read(file);
+      const blockRange = this.findAnnotationBlockRange(content);
+      if (!blockRange) {
+        return;
+      }
+      const markerInfo = this.parseAnnotationBlockMarker(blockRange.startMarker);
+      let docId = await this.resolveDocIdForNote(file, content);
+      if (!docId && markerInfo.docId) {
+        docId = markerInfo.docId;
+        const updated = this.ensureDocIdInNoteContent(content, docId);
+        if (updated !== content) {
+          await this.writeNoteWithSyncSuppressed(file.path, updated);
+        }
+      }
+      if (!docId) {
+        return;
+      }
+      const frontmatter =
+        this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+      let attachmentKey = markerInfo.attachmentKey ?? "";
+      if (!attachmentKey) {
+        attachmentKey = await this.resolveAttachmentKeyForDocId(docId, frontmatter);
+      }
+      if (!attachmentKey) {
+        return;
+      }
+      if (
+        markerInfo.attachmentKey
+        && (!markerInfo.docId || markerInfo.docId === docId)
+        && markerInfo.attachmentKey === attachmentKey
+      ) {
+        await this.updateDocIndex({ doc_id: docId, attachment_key: attachmentKey });
+      }
+
+      const zoteroAnnotations = await this.fetchZoteroAnnotations(attachmentKey);
+      const noteAnnotations = this.parseAnnotationBlock(blockRange.block, attachmentKey);
+      const noteMap = new Map<string, ParsedAnnotationNote>();
+      for (const noteEntry of noteAnnotations) {
+        if (noteEntry.key) {
+          noteMap.set(noteEntry.key, noteEntry);
+        }
+      }
+      const zoteroMap = new Map<string, AnnotationEntry>();
+      for (const annotation of zoteroAnnotations) {
+        zoteroMap.set(annotation.key, annotation);
+      }
+
+      const snapshot = await this.getAnnotationSnapshot(docId);
+      const snapshotMap = snapshot?.annotations ?? {};
+      const decisions: Record<string, MetadataDecision> = {};
+      const conflicts: Array<{
+        key: string;
+        title: string;
+        noteValue: string;
+        zoteroValue: string;
+      }> = [];
+      let noteEditsDetected = false;
+      let needsNoteRefresh = false;
+      let forceNoteRefresh = false;
+
+      for (const [key, zoteroEntry] of zoteroMap.entries()) {
+        const noteEntry = noteMap.get(key);
+        if (!noteEntry) {
+          needsNoteRefresh = true;
+          continue;
+        }
+        const snapshotEntry = snapshotMap[key];
+        const noteSnapshot = this.annotationSnapshotFromEntry(
+          noteEntry,
+          zoteroEntry.annotationType
+        );
+        const zotSnapshot = this.annotationSnapshotFromEntry(
+          zoteroEntry,
+          zoteroEntry.annotationType
+        );
+
+        if (!snapshotEntry) {
+          if (!this.annotationSnapshotsEqual(noteSnapshot, zotSnapshot)) {
+            decisions[key] = "note";
+            noteEditsDetected = true;
+          }
+          continue;
+        }
+
+        const noteChanged = !this.annotationSnapshotsEqual(noteSnapshot, snapshotEntry);
+        const zoteroChanged = !this.annotationSnapshotsEqual(zotSnapshot, snapshotEntry);
+        if (noteChanged && !zoteroChanged) {
+          decisions[key] = "note";
+          noteEditsDetected = true;
+          continue;
+        }
+        if (!noteChanged && zoteroChanged) {
+          decisions[key] = "zotero";
+          needsNoteRefresh = true;
+          continue;
+        }
+        if (noteChanged && zoteroChanged) {
+          conflicts.push({
+            key,
+            title: this.formatAnnotationConflictTitle(zoteroEntry),
+            noteValue: this.formatAnnotationConflictValue(noteSnapshot, noteEntry.tags),
+            zoteroValue: this.formatAnnotationConflictValue(zotSnapshot, zoteroEntry.tags),
+          });
+        }
+      }
+
+      if (conflicts.length > 0) {
+        const conflictDecisions = await this.promptAnnotationBatchDecision(conflicts);
+        for (const conflict of conflicts) {
+          const decision = conflictDecisions[conflict.key] ?? "skip";
+          decisions[conflict.key] = decision;
+          if (decision === "note") {
+            noteEditsDetected = true;
+          } else if (decision === "zotero") {
+            needsNoteRefresh = true;
+            forceNoteRefresh = true;
+          }
+        }
+      }
+
+      const updatesToZotero: Array<{
+        entry: AnnotationEntry;
+        note: ParsedAnnotationNote;
+      }> = [];
+      for (const [key, decision] of Object.entries(decisions)) {
+        if (decision !== "note") {
+          continue;
+        }
+        const noteEntry = noteMap.get(key);
+        const zoteroEntry = zoteroMap.get(key);
+        if (!noteEntry || !zoteroEntry) {
+          continue;
+        }
+        updatesToZotero.push({ entry: zoteroEntry, note: noteEntry });
+      }
+
+      if (updatesToZotero.length > 0) {
+        await this.applyZoteroAnnotationUpdates(updatesToZotero);
+      }
+
+      if (noteEditsDetected) {
+        this.annotationNoteEditTimes.set(file.path, Date.now());
+      }
+
+      const graceRemaining = this.getAnnotationGraceRemaining(file.path);
+      if (needsNoteRefresh && graceRemaining > 0 && noteEditsDetected && !forceNoteRefresh) {
+        this.scheduleNoteAnnotationSync(file, graceRemaining + 250, reason);
+        needsNoteRefresh = false;
+      }
+
+      if (needsNoteRefresh) {
+        const updatedBlock = this.buildAnnotationBlock(docId, attachmentKey, zoteroAnnotations);
+        const nextContent = this.replaceAnnotationBlock(content, updatedBlock);
+        if (nextContent && nextContent !== content) {
+          this.noteSyncSuppressed.add(file.path);
+          this.noteAnnotationSyncSuppressed.add(file.path);
+          this.noteMetadataSyncSuppressed.add(file.path);
+          try {
+            await this.app.vault.adapter.write(file.path, nextContent);
+          } finally {
+            window.setTimeout(() => {
+              this.noteSyncSuppressed.delete(file.path);
+              this.noteAnnotationSyncSuppressed.delete(file.path);
+              this.noteMetadataSyncSuppressed.delete(file.path);
+            }, 1500);
+          }
+        }
+      }
+
+      await this.updateAnnotationSnapshot(docId, attachmentKey, zoteroAnnotations);
+      await this.updateAnnotationChunks(docId, attachmentKey, zoteroAnnotations);
+    } catch (error) {
+      console.warn("Failed to sync note annotations with Zotero", error);
+    } finally {
+      this.noteAnnotationSyncInFlight.delete(file.path);
+      if (this.noteAnnotationSyncPending.delete(file.path)) {
+        this.scheduleNoteAnnotationSync(file, 500, reason);
+      }
+    }
+  }
+
   private resolveZoteroItemKey(frontmatter: Record<string, any>, docId: string): string {
     const candidates = [
       this.getFrontmatterValue(frontmatter, "zotero_key"),
@@ -4594,6 +4877,54 @@ export default class ZoteroRagPlugin extends Plugin {
       if (resolved) {
         return resolved;
       }
+    }
+    return "";
+  }
+
+  private async resolveAttachmentKeyForDocId(
+    docId: string,
+    frontmatter: Record<string, any>
+  ): Promise<string> {
+    if (!docId) {
+      return "";
+    }
+    let entry = await this.getDocIndexEntry(docId);
+    if (!entry) {
+      entry = await this.hydrateDocIndexFromCache(docId);
+    }
+    if (entry?.attachment_key) {
+      return entry.attachment_key;
+    }
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    try {
+      const adapter = this.app.vault.adapter;
+      if (await adapter.exists(chunkPath)) {
+        const payload = await this.readChunkPayload(chunkPath);
+        const meta = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : null;
+        const cachedKey = meta?.attachment_key;
+        if (typeof cachedKey === "string" && cachedKey.trim()) {
+          await this.updateDocIndex({ doc_id: docId, attachment_key: cachedKey.trim() });
+          return cachedKey.trim();
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const itemKey = this.resolveZoteroItemKey(frontmatter, docId);
+    if (!itemKey) {
+      return "";
+    }
+    const zoteroItem = await this.fetchZoteroItem(itemKey);
+    const values = zoteroItem?.data ?? zoteroItem;
+    if (!values || typeof values !== "object") {
+      return "";
+    }
+    const attachment = await resolvePdfAttachment(values, docId, {
+      fetchZoteroChildren: this.fetchZoteroChildren.bind(this),
+    });
+    if (attachment?.key) {
+      await this.updateDocIndex({ doc_id: docId, attachment_key: attachment.key });
+      return attachment.key;
     }
     return "";
   }
@@ -4695,6 +5026,100 @@ export default class ZoteroRagPlugin extends Plugin {
     };
   }
 
+  private extractAnnotationPageInfo(values: ZoteroItemValues): { pageLabel: string; pageIndex: number | null } {
+    const labelRaw = coerceString(values.annotationPageLabel ?? values.annotationPage);
+    const pageLabel = labelRaw.trim();
+    let pageIndex: number | null = null;
+    const pageRaw = values.annotationPage;
+    if (typeof pageRaw === "number" && Number.isFinite(pageRaw)) {
+      pageIndex = pageRaw;
+    } else if (typeof pageRaw === "string" && pageRaw.trim()) {
+      const parsed = Number(pageRaw);
+      if (Number.isFinite(parsed)) {
+        pageIndex = parsed;
+      }
+    }
+    if (pageIndex === null && typeof values.annotationPosition === "string") {
+      try {
+        const parsed = JSON.parse(values.annotationPosition);
+        const idx = parsed?.pageIndex;
+        if (typeof idx === "number" && Number.isFinite(idx)) {
+          pageIndex = idx + 1;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return { pageLabel, pageIndex };
+  }
+
+  private parseZoteroAnnotationItem(
+    item: ZoteroLocalItem,
+    attachmentKey: string
+  ): AnnotationEntry | null {
+    const data: ZoteroItemValues = item?.data ?? item ?? {};
+    const key = coerceString(item?.key ?? data?.key);
+    if (!key) {
+      return null;
+    }
+    const annotationType = coerceString(data.annotationType);
+    const text = this.normalizeAnnotationText(data.annotationText);
+    const comment = this.normalizeAnnotationText(data.annotationComment);
+    const colorRaw = coerceString(data.annotationColor);
+    const colorKey = this.normalizeAnnotationColorKey(colorRaw);
+    const { heading, callout } = this.resolveAnnotationColorMeta(colorKey);
+    const { pageLabel, pageIndex } = this.extractAnnotationPageInfo(data);
+    const sortRaw = data.annotationSortIndex ?? data.annotationSort;
+    const sortIndex = Number.isFinite(Number(sortRaw)) ? Number(sortRaw) : 0;
+    const tags = Array.isArray(data.tags)
+      ? data.tags
+          .map((tag: any) => (typeof tag === "string" ? tag : tag?.tag))
+          .filter((tag: any) => typeof tag === "string")
+      : [];
+    return {
+      key: key.trim(),
+      attachmentKey,
+      pageLabel,
+      pageIndex,
+      colorKey,
+      callout,
+      heading,
+      annotationType,
+      text,
+      comment,
+      tags: this.normalizeAnnotationTags(tags),
+      sortIndex,
+      rawValues: data,
+    };
+  }
+
+  private async fetchZoteroAnnotations(
+    attachmentKey: string
+  ): Promise<AnnotationEntry[]> {
+    if (!attachmentKey) {
+      return [];
+    }
+    let children: any[] = [];
+    try {
+      children = await this.fetchZoteroChildren(attachmentKey);
+    } catch (error) {
+      console.warn("Failed to fetch Zotero annotation items", error);
+      return [];
+    }
+    const annotations: AnnotationEntry[] = [];
+    for (const child of children) {
+      const data = child?.data ?? child ?? {};
+      if (coerceString(data.itemType) !== "annotation") {
+        continue;
+      }
+      const parsed = this.parseZoteroAnnotationItem(child as ZoteroLocalItem, attachmentKey);
+      if (parsed) {
+        annotations.push(parsed);
+      }
+    }
+    return annotations;
+  }
+
   private normalizeMetadataString(value: unknown): string {
     if (typeof value === "string") {
       return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
@@ -4787,6 +5212,123 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.normalizeMetadataString(value);
   }
 
+  private normalizeAnnotationText(value: unknown): string {
+    if (typeof value === "string") {
+      return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+    return "";
+  }
+
+  private normalizeAnnotationTags(tags: string[]): string[] {
+    const sanitized = this.sanitizeObsidianTags(tags);
+    const unique = Array.from(new Set(sanitized));
+    unique.sort();
+    return unique;
+  }
+
+  private getAnnotationColorMap(): AnnotationColorMap {
+    const map = this.settings.annotationColorMap;
+    if (map && typeof map === "object") {
+      return map;
+    }
+    return DEFAULT_SETTINGS.annotationColorMap;
+  }
+
+  private normalizeAnnotationColorKey(raw: string): string {
+    const map = this.getAnnotationColorMap();
+    let normalized = String(raw || "").trim().toLowerCase();
+    if (!normalized) {
+      return Object.keys(map)[0] ?? "gray";
+    }
+    if (normalized === "grey") {
+      normalized = "gray";
+    }
+    if (map[normalized]) {
+      return normalized;
+    }
+    if (normalized.startsWith("#")) {
+      const inferred = this.inferAnnotationColorFromHex(normalized);
+      if (inferred && map[inferred]) {
+        return inferred;
+      }
+    }
+    return map["gray"] ? "gray" : (Object.keys(map)[0] ?? "gray");
+  }
+
+  private inferAnnotationColorFromHex(hex: string): string | null {
+    const normalized = hex.replace("#", "").trim();
+    if (![3, 6].includes(normalized.length)) {
+      return null;
+    }
+    const expand = (value: string): string =>
+      value.length === 1 ? `${value}${value}` : value;
+    const rHex = normalized.length === 3 ? expand(normalized[0]) : normalized.slice(0, 2);
+    const gHex = normalized.length === 3 ? expand(normalized[1]) : normalized.slice(2, 4);
+    const bHex = normalized.length === 3 ? expand(normalized[2]) : normalized.slice(4, 6);
+    const r = parseInt(rHex, 16) / 255;
+    const g = parseInt(gHex, 16) / 255;
+    const b = parseInt(bHex, 16) / 255;
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+      return null;
+    }
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+    const lightness = (max + min) / 2;
+    if (delta < 0.08 || lightness < 0.12) {
+      return "gray";
+    }
+    let hue = 0;
+    if (delta === 0) {
+      hue = 0;
+    } else if (max === r) {
+      hue = ((g - b) / delta) % 6;
+    } else if (max === g) {
+      hue = (b - r) / delta + 2;
+    } else {
+      hue = (r - g) / delta + 4;
+    }
+    hue = Math.round(hue * 60);
+    if (hue < 0) {
+      hue += 360;
+    }
+    if (hue < 20 || hue >= 340) {
+      return "red";
+    }
+    if (hue < 45) {
+      return "orange";
+    }
+    if (hue < 70) {
+      return "yellow";
+    }
+    if (hue < 160) {
+      return "green";
+    }
+    if (hue < 250) {
+      return "blue";
+    }
+    if (hue < 290) {
+      return "purple";
+    }
+    if (hue < 330) {
+      return "magenta";
+    }
+    return "red";
+  }
+
+  private resolveAnnotationColorMeta(colorKey: string): { heading: string; callout: string } {
+    const map = this.getAnnotationColorMap();
+    const entry = map[colorKey];
+    if (entry && entry.heading && entry.callout) {
+      return entry;
+    }
+    const fallback = map.gray || map.yellow || { heading: "Annotations", callout: "note" };
+    return fallback;
+  }
+
   private getMetadataDecisionLabels(
     field: keyof NoteMetadataFields,
     noteValue: string | string[],
@@ -4872,19 +5414,68 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
-  private normalizeSnapshotValue(
-    field: keyof NoteMetadataFields,
-    value: unknown
-  ): string | string[] {
-    if (Array.isArray(value)) {
-      const list = this.normalizeMetadataList(value);
-      if (field === "tags") {
-        return [...list].sort();
-      }
-      return list;
+  private formatAnnotationConflictTitle(entry: AnnotationEntry): string {
+    const label = this.settings.annotationPageLabel || "Page";
+    const pageLabel = entry.pageLabel || (entry.pageIndex ? String(entry.pageIndex) : "?");
+    return `${label} ${pageLabel} (${entry.key})`;
+  }
+
+  private formatAnnotationConflictValue(
+    snapshot: AnnotationSnapshotEntry,
+    tags: string[]
+  ): string {
+    const lines: string[] = [];
+    if (snapshot.text) {
+      lines.push("Highlight:", snapshot.text);
     }
-    const str = this.normalizeMetadataString(value);
-    return str;
+    if (snapshot.comment) {
+      if (lines.length) {
+        lines.push("");
+      }
+      lines.push("Comment:", snapshot.comment);
+    }
+    const normalizedTags = this.normalizeAnnotationTags(tags);
+    if (normalizedTags.length) {
+      if (lines.length) {
+        lines.push("");
+      }
+      lines.push(`Tags: ${normalizedTags.map((tag) => `#${tag}`).join(" ")}`);
+    }
+    return lines.join("\n").trim();
+  }
+
+  private async promptAnnotationBatchDecision(
+    conflicts: Array<{ key: string; title: string; noteValue: string; zoteroValue: string }>
+  ): Promise<Record<string, MetadataDecision>> {
+    return new Promise((resolve) => {
+      new AnnotationConflictBatchModal(
+        this.app,
+        conflicts,
+        (decisions) => resolve(decisions)
+      ).open();
+    });
+  }
+
+  private normalizeSnapshotValue<K extends keyof NoteMetadataFields>(
+    field: K,
+    value: unknown
+  ): NoteMetadataFields[K] {
+    if (field === "tags") {
+      const list = this.normalizeMetadataList(value);
+      return [...list].sort() as NoteMetadataFields[K];
+    }
+    if (field === "authors" || field === "editors") {
+      return this.normalizeMetadataList(value) as NoteMetadataFields[K];
+    }
+    return this.normalizeMetadataString(value) as NoteMetadataFields[K];
+  }
+
+  private setMetadataSnapshotValue<K extends keyof NoteMetadataFields>(
+    snapshot: Partial<NoteMetadataFields>,
+    field: K,
+    value: NoteMetadataFields[K]
+  ): void {
+    snapshot[field] = value;
   }
 
   private getMetadataSnapshotCachePath(): string {
@@ -4925,7 +5516,11 @@ export default class ZoteroRagPlugin extends Plugin {
     ];
     for (const field of fieldOrder) {
       if (Object.prototype.hasOwnProperty.call(parsed, field)) {
-        snapshot[field] = this.normalizeSnapshotValue(field, parsed[field]);
+        this.setMetadataSnapshotValue(
+          snapshot,
+          field,
+          this.normalizeSnapshotValue(field, parsed[field])
+        );
       }
     }
     return Object.keys(snapshot).length > 0 ? snapshot : null;
@@ -5073,14 +5668,26 @@ export default class ZoteroRagPlugin extends Plugin {
       const noteValue = noteFields[field];
       const zoteroValue = zoteroFields[field];
       if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
-        nextSnapshot[field] = this.normalizeSnapshotValue(field, noteValue);
+        this.setMetadataSnapshotValue(
+          nextSnapshot,
+          field,
+          this.normalizeSnapshotValue(field, noteValue)
+        );
         continue;
       }
       const decision = decisions[field];
       if (decision === "note") {
-        nextSnapshot[field] = this.normalizeSnapshotValue(field, noteValue);
+        this.setMetadataSnapshotValue(
+          nextSnapshot,
+          field,
+          this.normalizeSnapshotValue(field, noteValue)
+        );
       } else if (decision === "zotero") {
-        nextSnapshot[field] = this.normalizeSnapshotValue(field, zoteroValue);
+        this.setMetadataSnapshotValue(
+          nextSnapshot,
+          field,
+          this.normalizeSnapshotValue(field, zoteroValue)
+        );
       }
     }
     const serialized = this.serializeMetadataSnapshot(nextSnapshot, fieldOrder);
@@ -5117,6 +5724,117 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.saveMetadataSnapshotCache(cache);
     } catch (error) {
       console.warn("Failed to remove metadata snapshot", error);
+    }
+  }
+
+  private getAnnotationSnapshotCachePath(): string {
+    return normalizePath(ANNOTATION_SNAPSHOT_PATH);
+  }
+
+  private async loadAnnotationSnapshotCache(): Promise<Record<string, AnnotationSnapshotCacheEntry>> {
+    const adapter = this.app.vault.adapter;
+    const cachePath = this.getAnnotationSnapshotCachePath();
+    if (!(await adapter.exists(cachePath))) {
+      return {};
+    }
+    try {
+      const raw = await adapter.read(cachePath);
+      const payload = JSON.parse(raw);
+      const entries = payload?.entries ?? payload;
+      if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+        return {};
+      }
+      return entries as Record<string, AnnotationSnapshotCacheEntry>;
+    } catch (error) {
+      console.error("Failed to read annotation snapshot cache", error);
+      return {};
+    }
+  }
+
+  private async getAnnotationSnapshotCache(): Promise<Record<string, AnnotationSnapshotCacheEntry>> {
+    if (this.annotationSnapshotCache) {
+      return this.annotationSnapshotCache;
+    }
+    this.annotationSnapshotCache = await this.loadAnnotationSnapshotCache();
+    return this.annotationSnapshotCache;
+  }
+
+  private async saveAnnotationSnapshotCache(
+    cache: Record<string, AnnotationSnapshotCacheEntry>
+  ): Promise<void> {
+    await this.ensureFolder(CACHE_ROOT);
+    const adapter = this.app.vault.adapter;
+    const cachePath = this.getAnnotationSnapshotCachePath();
+    const payload = { version: 1, entries: cache };
+    await adapter.write(cachePath, JSON.stringify(payload, null, 2));
+    this.annotationSnapshotCache = cache;
+  }
+
+  private annotationSnapshotFromEntry(
+    entry: { text: string; comment: string; tags: string[] },
+    annotationType?: string
+  ): AnnotationSnapshotEntry {
+    const normalizedText = this.normalizeAnnotationText(entry.text);
+    const normalizedComment = this.normalizeAnnotationText(entry.comment);
+    const normalizedTags = this.normalizeAnnotationTags(entry.tags ?? []);
+    if (annotationType === "note" && !normalizedComment && normalizedText) {
+      return { text: "", comment: normalizedText, tags: normalizedTags };
+    }
+    return { text: normalizedText, comment: normalizedComment, tags: normalizedTags };
+  }
+
+  private annotationSnapshotsEqual(
+    left: AnnotationSnapshotEntry,
+    right: AnnotationSnapshotEntry
+  ): boolean {
+    if (left.text !== right.text || left.comment !== right.comment) {
+      return false;
+    }
+    if (left.tags.length !== right.tags.length) {
+      return false;
+    }
+    for (let i = 0; i < left.tags.length; i += 1) {
+      if (left.tags[i] !== right.tags[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async getAnnotationSnapshot(
+    docId: string
+  ): Promise<AnnotationSnapshotCacheEntry | null> {
+    if (!docId) {
+      return null;
+    }
+    const cache = await this.getAnnotationSnapshotCache();
+    return cache[docId] ?? null;
+  }
+
+  private async updateAnnotationSnapshot(
+    docId: string,
+    attachmentKey: string,
+    annotations: AnnotationEntry[]
+  ): Promise<void> {
+    if (!docId) {
+      return;
+    }
+    const cache = await this.getAnnotationSnapshotCache();
+    const snapshot: AnnotationSnapshotCacheEntry = {
+      attachment_key: attachmentKey,
+      annotations: {},
+    };
+    for (const annotation of annotations) {
+      snapshot.annotations[annotation.key] = this.annotationSnapshotFromEntry(
+        annotation,
+        annotation.annotationType
+      );
+    }
+    cache[docId] = snapshot;
+    try {
+      await this.saveAnnotationSnapshotCache(cache);
+    } catch (error) {
+      console.warn("Failed to update annotation snapshot cache", error);
     }
   }
 
@@ -5248,6 +5966,34 @@ export default class ZoteroRagPlugin extends Plugin {
       );
     }
     await this.updateZoteroItemFields(itemKey, values, payload);
+  }
+
+  private async applyZoteroAnnotationUpdates(
+    updates: Array<{ entry: AnnotationEntry; note: ParsedAnnotationNote }>
+  ): Promise<void> {
+    for (const update of updates) {
+      const { entry, note } = update;
+      const values = entry.rawValues ?? {};
+      let noteText = this.normalizeAnnotationText(note.text);
+      let noteComment = this.normalizeAnnotationText(note.comment);
+      if (entry.annotationType === "note" && !noteComment && noteText) {
+        noteComment = noteText;
+        noteText = "";
+      }
+      const payload: Partial<ZoteroItemValues> = {
+        annotationText: noteText,
+        annotationComment: noteComment,
+        tags: this.buildZoteroTags(note.tags, values?.tags),
+      };
+      try {
+        await this.updateZoteroItemFields(entry.key, values, payload);
+        entry.text = noteText;
+        entry.comment = noteComment;
+        entry.tags = this.normalizeAnnotationTags(note.tags);
+      } catch (error) {
+        console.warn(`Failed to update Zotero annotation ${entry.key}`, error);
+      }
+    }
   }
 
   private buildZoteroTags(noteTags: string[], existingTags: unknown): Array<Record<string, any>> {
@@ -5414,6 +6160,13 @@ export default class ZoteroRagPlugin extends Plugin {
       .trim();
   }
 
+  private isAnnotationChunk(chunk: Record<string, any> | null | undefined): boolean {
+    if (!chunk || typeof chunk !== "object") {
+      return false;
+    }
+    return Boolean(chunk.is_annotation || chunk.annotation || chunk.annotation_key);
+  }
+
 
 
   private buildSyncedDoclingContent(
@@ -5421,7 +6174,8 @@ export default class ZoteroRagPlugin extends Plugin {
     chunkPayload: Record<string, any> | null,
     fallbackMarkdown: string
   ): string {
-    const chunks = Array.isArray(chunkPayload?.chunks) ? chunkPayload?.chunks : [];
+    const chunks = (Array.isArray(chunkPayload?.chunks) ? chunkPayload?.chunks : [])
+      .filter((chunk) => !this.isAnnotationChunk(chunk));
     if (!chunks.length) {
       return `<!-- zrr:sync-start doc_id=${docId} -->\n${fallbackMarkdown}\n<!-- zrr:sync-end -->`;
     }
@@ -5478,6 +6232,123 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       console.warn("Failed to read cached chunks JSON", error);
       return null;
+    }
+  }
+
+  private buildAnnotationChunk(annotation: AnnotationEntry): Record<string, any> {
+    const parts: string[] = [];
+    if (annotation.text) {
+      parts.push(annotation.text);
+    }
+    if (annotation.comment) {
+      parts.push(annotation.comment);
+    }
+    if (annotation.tags.length) {
+      parts.push(`Tags: ${annotation.tags.map((tag) => `#${tag}`).join(" ")}`);
+    }
+    const text = parts.join("\n\n").trim();
+    const page = annotation.pageIndex ?? 0;
+    return {
+      chunk_id: annotation.key,
+      text,
+      page_start: page,
+      page_end: page,
+      section: annotation.heading,
+      chunk_tags: annotation.tags,
+      is_annotation: true,
+      annotation_key: annotation.key,
+      annotation_color: annotation.colorKey,
+      annotation_text: annotation.text,
+      annotation_comment: annotation.comment,
+    };
+  }
+
+  private annotationChunkSignature(chunk: Record<string, any>): string {
+    return JSON.stringify({
+      text: chunk.text ?? "",
+      page_start: chunk.page_start ?? "",
+      page_end: chunk.page_end ?? "",
+      section: chunk.section ?? "",
+      chunk_tags: Array.isArray(chunk.chunk_tags) ? chunk.chunk_tags : chunk.chunk_tags ?? "",
+      annotation_color: chunk.annotation_color ?? "",
+      annotation_text: chunk.annotation_text ?? "",
+      annotation_comment: chunk.annotation_comment ?? "",
+    });
+  }
+
+  private async updateAnnotationChunks(
+    docId: string,
+    attachmentKey: string,
+    annotations: AnnotationEntry[]
+  ): Promise<void> {
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(chunkPath))) {
+      return;
+    }
+    const payload = await this.readChunkPayload(chunkPath);
+    if (!payload) {
+      return;
+    }
+    const existing = Array.isArray(payload.chunks) ? payload.chunks : [];
+    const baseChunks: Record<string, any>[] = [];
+    const existingAnnotations = new Map<string, Record<string, any>>();
+    for (const chunk of existing) {
+      const chunkId = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+      if (chunkId && this.isAnnotationChunk(chunk)) {
+        existingAnnotations.set(chunkId, chunk);
+      } else {
+        baseChunks.push(chunk);
+      }
+    }
+
+    const annotationChunks: Record<string, any>[] = [];
+    const updatedIds: string[] = [];
+    const seen = new Set<string>();
+
+    for (const annotation of annotations) {
+      const chunk = this.buildAnnotationChunk(annotation);
+      const chunkId = String(chunk.chunk_id || "");
+      if (!chunkId) {
+        continue;
+      }
+      seen.add(chunkId);
+      annotationChunks.push(chunk);
+      const existingChunk = existingAnnotations.get(chunkId);
+      if (!existingChunk) {
+        updatedIds.push(chunkId);
+        continue;
+      }
+      if (this.annotationChunkSignature(existingChunk) !== this.annotationChunkSignature(chunk)) {
+        updatedIds.push(chunkId);
+      }
+    }
+
+    const deleteIds: string[] = [];
+    for (const chunkId of existingAnnotations.keys()) {
+      if (!seen.has(chunkId)) {
+        deleteIds.push(chunkId);
+      }
+    }
+
+    payload.chunks = [...baseChunks, ...annotationChunks];
+    await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+
+    if (updatedIds.length || deleteIds.length) {
+      await this.reindexChunkUpdates(docId, chunkPath, updatedIds, deleteIds);
+    }
+
+    if (attachmentKey) {
+      try {
+        const metadata = payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+        if (metadata.attachment_key !== attachmentKey) {
+          metadata.attachment_key = attachmentKey;
+          payload.metadata = metadata;
+          await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+        }
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -7040,6 +7911,10 @@ export default class ZoteroRagPlugin extends Plugin {
         doclingContent
       );
       await this.writeNoteWithSyncSuppressed(notePath, noteContent);
+      const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+      if (noteFile instanceof TFile) {
+        this.scheduleNoteAnnotationSync(noteFile, 2000, "save");
+      }
     } catch (error) {
       if (showNotices) {
         new Notice("Failed to finalize note markdown.");
@@ -7377,6 +8252,13 @@ export default class ZoteroRagPlugin extends Plugin {
     vars["pdf_block"] = pdfBlock;
     vars["pdf_line"] = pdfLine;
     vars["docling_markdown"] = doclingMarkdown;
+    const bodyTemplate = (this.settings.noteBodyTemplate || "").trim();
+    const wantsAnnotationBlock = /{{\s*annotation_block\s*}}/i.test(bodyTemplate);
+    if (wantsAnnotationBlock && attachmentKey) {
+      vars["annotation_block"] = await this.buildAnnotationBlockForAttachment(docId, attachmentKey);
+    } else {
+      vars["annotation_block"] = "";
+    }
     const frontmatter = this.ensureDocIdInFrontmatter(
       await this.renderFrontmatter(
         values,
@@ -7390,12 +8272,277 @@ export default class ZoteroRagPlugin extends Plugin {
     );
     const frontmatterBlock = frontmatter ? `---\n${frontmatter}\n---\n\n` : "";
 
-    const bodyTemplate = (this.settings.noteBodyTemplate || "").trim();
     const defaultBody = `${pdfBlock}${doclingMarkdown}`;
     const body = bodyTemplate
       ? this.renderTemplate(bodyTemplate, vars, defaultBody, { appendDocling: true })
       : defaultBody;
     return `${frontmatterBlock}${body}`;
+  }
+
+  private async buildAnnotationBlockForAttachment(
+    docId: string,
+    attachmentKey: string
+  ): Promise<string> {
+    const annotations = await this.fetchZoteroAnnotations(attachmentKey);
+    return this.buildAnnotationBlock(docId, attachmentKey, annotations);
+  }
+
+  private buildAnnotationBlock(
+    docId: string,
+    attachmentKey: string,
+    annotations: AnnotationEntry[]
+  ): string {
+    const start = `<!-- zrr:annotations-start doc_id=${docId} attachment_key=${attachmentKey} -->`;
+    const end = "<!-- zrr:annotations-end -->";
+    if (!annotations.length) {
+      return `${start}\n${end}`;
+    }
+    const colorMap = this.getAnnotationColorMap();
+    const colorOrder = Object.keys(colorMap);
+    const grouped = new Map<string, AnnotationEntry[]>();
+    for (const annotation of annotations) {
+      const key = annotation.colorKey || this.normalizeAnnotationColorKey(annotation.colorKey);
+      const list = grouped.get(key) ?? [];
+      list.push(annotation);
+      grouped.set(key, list);
+    }
+    const lines: string[] = [start];
+    const seen = new Set<string>();
+    const sortedKeys = [
+      ...colorOrder,
+      ...Array.from(grouped.keys()).filter((key) => !colorOrder.includes(key)),
+    ];
+    for (const colorKey of sortedKeys) {
+      const entries = grouped.get(colorKey);
+      if (!entries || !entries.length) {
+        continue;
+      }
+      seen.add(colorKey);
+      const { heading } = this.resolveAnnotationColorMeta(colorKey);
+      lines.push("", `## ${heading}`);
+      entries.sort((left, right) => {
+        const leftPage = left.pageIndex ?? 0;
+        const rightPage = right.pageIndex ?? 0;
+        if (leftPage !== rightPage) {
+          return leftPage - rightPage;
+        }
+        if (left.sortIndex !== right.sortIndex) {
+          return left.sortIndex - right.sortIndex;
+        }
+        return left.key.localeCompare(right.key);
+      });
+      for (const entry of entries) {
+        lines.push(...this.formatAnnotationCallout(entry, attachmentKey, docId));
+      }
+    }
+    lines.push("", end);
+    return lines.join("\n").trim();
+  }
+
+  private formatAnnotationCallout(
+    entry: AnnotationEntry,
+    attachmentKey: string,
+    docId: string
+  ): string[] {
+    const label = this.settings.annotationPageLabel || "Page";
+    const pageLabel = entry.pageLabel || (entry.pageIndex ? String(entry.pageIndex) : "?");
+    const pageParam = entry.pageIndex ? String(entry.pageIndex) : "";
+    const zoteroLink = this.buildZoteroDeepLink(docId, attachmentKey, pageParam, entry.key);
+    const header = `> [!${entry.callout}] ${label} [${pageLabel}](${zoteroLink})`;
+    const lines: string[] = [header];
+
+    const pushLines = (text: string): void => {
+      if (!text) {
+        return;
+      }
+      for (const line of text.split(/\r?\n/)) {
+        lines.push(line.trim() ? `> ${line}` : ">");
+      }
+    };
+
+    pushLines(entry.text);
+
+    if (entry.comment) {
+      lines.push(">", "> ---");
+      pushLines(entry.comment);
+    }
+
+    if (entry.tags.length) {
+      lines.push(`> **Tags:** ${entry.tags.map((tag) => `#${tag}`).join(" ")}`);
+    }
+
+    const pageToken = entry.pageIndex ? String(entry.pageIndex) : "0";
+    lines.push(`> ^${entry.key}a${attachmentKey}p${pageToken}`);
+    lines.push("");
+    return lines;
+  }
+
+  private findAnnotationBlockRange(content: string): { start: number; end: number; block: string; startMarker: string } | null {
+    const startMatch = ZRR_ANNOTATIONS_START_RE.exec(content);
+    if (!startMatch) {
+      return null;
+    }
+    const afterStart = content.slice(startMatch.index + startMatch[0].length);
+    const endMatch = ZRR_ANNOTATIONS_END_RE.exec(afterStart);
+    if (!endMatch) {
+      return null;
+    }
+    const start = startMatch.index;
+    const end = startMatch.index + startMatch[0].length + endMatch.index + endMatch[0].length;
+    const block = afterStart.slice(0, endMatch.index);
+    return {
+      start,
+      end,
+      block,
+      startMarker: startMatch[0],
+    };
+  }
+
+  private parseAnnotationBlockMarker(marker: string): { docId?: string; attachmentKey?: string } {
+    const docMatch = marker.match(/doc_id=([\"']?)([^\"'\s]+)\1/i);
+    const attachmentMatch = marker.match(/attachment_key=([\"']?)([^\"'\s]+)\1/i);
+    return {
+      docId: docMatch ? docMatch[2].trim() : undefined,
+      attachmentKey: attachmentMatch ? attachmentMatch[2].trim() : undefined,
+    };
+  }
+
+  private parseAnnotationBlock(
+    block: string,
+    attachmentKey: string
+  ): ParsedAnnotationNote[] {
+    const lines = block.split(/\r?\n/);
+    const notes: ParsedAnnotationNote[] = [];
+    let idx = 0;
+    while (idx < lines.length) {
+      const line = lines[idx];
+      if (!line.trim().startsWith("> [!")) {
+        idx += 1;
+        continue;
+      }
+      const calloutLines: string[] = [];
+      while (idx < lines.length && lines[idx].trim().startsWith(">")) {
+        calloutLines.push(lines[idx]);
+        idx += 1;
+      }
+      const parsed = this.parseAnnotationCallout(calloutLines, attachmentKey);
+      if (parsed) {
+        notes.push(parsed);
+      }
+    }
+    return notes;
+  }
+
+  private parseAnnotationCallout(
+    lines: string[],
+    fallbackAttachmentKey: string
+  ): ParsedAnnotationNote | null {
+    if (!lines.length) {
+      return null;
+    }
+    const header = lines[0].replace(/^>\s?/, "").trim();
+    const calloutMatch = header.match(/\[!([^\]]+)\]/);
+    const callout = calloutMatch ? calloutMatch[1].trim() : "note";
+    const linkMatch = header.match(/\((zotero:\/\/open-pdf\/library\/items\/[^)]+)\)/i);
+    let annotationKey = "";
+    let attachmentKey = fallbackAttachmentKey;
+    let pageLabel = "";
+    let pageIndex: number | null = null;
+    if (linkMatch) {
+      const link = linkMatch[1];
+      const attachmentMatch = link.match(/items\/([A-Z0-9]{8})/i);
+      if (attachmentMatch) {
+        attachmentKey = attachmentMatch[1];
+      }
+      const annotationMatch = link.match(/annotation=([A-Z0-9]{8})/i);
+      if (annotationMatch) {
+        annotationKey = annotationMatch[1];
+      }
+      const pageMatch = link.match(/page=(\d+)/i);
+      if (pageMatch) {
+        pageIndex = Number(pageMatch[1]);
+      }
+      const labelMatch = header.match(/\[([^\]]+)\]\(zotero:\/\//i);
+      if (labelMatch) {
+        pageLabel = labelMatch[1].trim();
+      }
+    }
+
+    const tagLines: string[] = [];
+    const highlightLines: string[] = [];
+    const commentLines: string[] = [];
+    let inComment = false;
+
+    for (let i = 1; i < lines.length; i += 1) {
+      const raw = lines[i].replace(/^>\s?/, "");
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        if (inComment) {
+          commentLines.push("");
+        } else {
+          highlightLines.push("");
+        }
+        continue;
+      }
+      if (trimmed.startsWith("^")) {
+        const match = trimmed.match(/^\^([A-Z0-9]{8})a([A-Z0-9]{8})p(\d+)/i);
+        if (match) {
+          annotationKey = match[1];
+          attachmentKey = match[2];
+          pageIndex = Number(match[3]);
+        }
+        continue;
+      }
+      if (/^(\*\*tags:\*\*|tags:)/i.test(trimmed)) {
+        tagLines.push(trimmed);
+        continue;
+      }
+      if (trimmed === "---") {
+        inComment = true;
+        continue;
+      }
+      if (inComment) {
+        commentLines.push(raw);
+      } else {
+        highlightLines.push(raw);
+      }
+    }
+
+    const tagText = tagLines.join(" ");
+    const tags = tagText
+      ? tagText
+          .replace(/\*\*tags:\*\*/i, "")
+          .replace(/tags:/i, "")
+          .split(/[\s,]+/)
+          .map((tag) => tag.trim().replace(/^#+/, ""))
+          .filter(Boolean)
+      : [];
+
+    if (!annotationKey) {
+      return null;
+    }
+
+    return {
+      key: annotationKey,
+      attachmentKey,
+      pageLabel,
+      pageIndex,
+      callout,
+      text: this.normalizeAnnotationText(highlightLines.join("\n")),
+      comment: this.normalizeAnnotationText(commentLines.join("\n")),
+      tags: this.normalizeAnnotationTags(tags),
+    };
+  }
+
+  private replaceAnnotationBlock(content: string, nextBlock: string): string | null {
+    const range = this.findAnnotationBlockRange(content);
+    if (!range) {
+      return null;
+    }
+    const before = content.slice(0, range.start);
+    const after = content.slice(range.end);
+    const block = nextBlock.trim() ? `${nextBlock.trim()}\n` : `${nextBlock}`;
+    return `${before}${block}${after}`.replace(/\n{4,}/g, "\n\n\n");
   }
 
   private async renderFrontmatter(

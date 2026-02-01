@@ -4,6 +4,7 @@
 
 - Doc index PDF paths now persist as vault-relative when possible.
 - Zotero item picker now shows item type icons.
+- Added a template placeholder and sync pipeline for Zotero annotations (two-way sync + Redis indexing).
 
 ## 0.4.8
 

@@ -112,6 +112,8 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str, embedding_di
         "TAG",
         "chunk_id",
         "TAG",
+        "is_annotation",
+        "TAG",
         "attachment_key",
         "TAG",
         "title",
@@ -159,6 +161,7 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str, embedding_di
 
 def ensure_schema_fields(client: redis.Redis, index_name: str) -> None:
     fields: List[Tuple[str, List[str]]] = [
+        ("is_annotation", ["TAG"]),
         ("attachment_key", ["TAG"]),
         ("title", ["TEXT"]),
         ("authors", ["TAG", "SEPARATOR", "|"]),
@@ -1090,6 +1093,7 @@ def main() -> int:
             fields: Dict[str, Any] = {
                 "doc_id": str(doc_id),
                 "chunk_id": stable_parent_id,
+                "is_annotation": "1" if bool(chunk.get("is_annotation") or chunk.get("annotation")) else "0",
                 "attachment_key": str(attachment_key or ""),
                 "title": str(item_metadata.get("title", "")),
                 "authors": str(item_metadata.get("authors", "")),

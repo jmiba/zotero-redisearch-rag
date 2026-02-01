@@ -9,6 +9,7 @@ export type OcrEngine =
   | "paddle_structure_api"
   | "paddle_vl_api";
 export type ChunkingMode = "page" | "section";
+export type AnnotationColorMap = Record<string, { heading: string; callout: string }>;
 
 export type OcrEngineAvailability = {
   tesseract: boolean;
@@ -20,6 +21,7 @@ export const CACHE_ROOT = ".zotero-redisearch-rag";
 export const ITEM_CACHE_DIR = `${CACHE_ROOT}/items`;
 export const CHUNK_CACHE_DIR = `${CACHE_ROOT}/chunks`;
 export const METADATA_SNAPSHOT_PATH = `${CACHE_ROOT}/metadata_snapshots.json`;
+export const ANNOTATION_SNAPSHOT_PATH = `${CACHE_ROOT}/annotation_snapshots.json`;
 
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
@@ -35,6 +37,8 @@ export interface ZoteroRagSettings {
   copyPdfToVault: boolean;
   frontmatterTemplate: string;
   noteBodyTemplate: string;
+  annotationPageLabel: string;
+  annotationColorMap: AnnotationColorMap;
   llmProviderProfiles: LlmProviderProfile[];
   embedProviderProfileId: string;
   chatProviderProfileId: string;
@@ -160,6 +164,17 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "item_json: {{item_json_yaml}}",
   tagSanitizeMode: "kebab",
   noteBodyTemplate: "{{pdf_block}}{{docling_markdown}}",
+  annotationPageLabel: "Seite",
+  annotationColorMap: {
+    yellow: { heading: "Fragen", callout: "question" },
+    red: { heading: "Kritikwürdiges", callout: "bug" },
+    green: { heading: "Hauptgedanken", callout: "idea" },
+    blue: { heading: "Fakten", callout: "fact" },
+    purple: { heading: "Argumente/Lösungen", callout: "argument" },
+    magenta: { heading: "Meinungen", callout: "opinion" },
+    orange: { heading: "Weiterverfolgen", callout: "pursue" },
+    gray: { heading: "Zitierbare Stellen", callout: "cite" },
+  },
 
   // LLM Provider Profiles
   llmProviderProfiles: [
@@ -649,7 +664,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       new Setting(tabEl)
         .setName("Note body template")
         .setDesc(
-          "Template for the note body after frontmatter. Use {{pdf_block}} and {{docling_markdown}} placeholders."
+          "Template for the note body after frontmatter. Use {{pdf_block}}, {{annotation_block}}, and {{docling_markdown}} placeholders."
         )
         .addTextArea((text) => {
           text

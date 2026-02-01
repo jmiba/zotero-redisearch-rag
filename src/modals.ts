@@ -977,6 +977,118 @@ export class MetadataConflictBatchModal extends Modal {
   }
 }
 
+type AnnotationConflictItem = {
+  key: string;
+  title: string;
+  noteValue: string;
+  zoteroValue: string;
+};
+
+export class AnnotationConflictBatchModal extends Modal {
+  private conflicts: AnnotationConflictItem[];
+  private onResolve: (decisions: Record<string, MetadataDecision>) => void;
+  private resolved = false;
+  private selects = new Map<string, HTMLSelectElement>();
+
+  constructor(
+    app: App,
+    conflicts: AnnotationConflictItem[],
+    onResolve: (decisions: Record<string, MetadataDecision>) => void
+  ) {
+    super(app);
+    this.conflicts = conflicts;
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Resolve annotation conflicts" });
+    contentEl.createEl("p", { text: "Choose which version to keep for each annotation." });
+
+    const table = contentEl.createEl("div");
+    table.style.display = "grid";
+    table.style.gap = "0.75rem";
+
+    for (const conflict of this.conflicts) {
+      const row = table.createEl("div");
+      row.style.display = "grid";
+      row.style.gap = "0.4rem";
+      row.style.border = "1px solid var(--background-modifier-border)";
+      row.style.borderRadius = "6px";
+      row.style.padding = "0.6rem";
+
+      row.createEl("div", { text: conflict.title }).style.fontWeight = "600";
+
+      const values = row.createEl("div");
+      values.style.display = "grid";
+      values.style.gridTemplateColumns = "1fr 1fr";
+      values.style.gap = "0.5rem";
+
+      const noteBox = values.createEl("textarea", { attr: { readonly: "true", rows: "4" } });
+      noteBox.style.width = "100%";
+      noteBox.value = conflict.noteValue || "(empty)";
+
+      const zoteroBox = values.createEl("textarea", { attr: { readonly: "true", rows: "4" } });
+      zoteroBox.style.width = "100%";
+      zoteroBox.value = conflict.zoteroValue || "(empty)";
+
+      const selectWrap = row.createEl("div");
+      selectWrap.style.display = "flex";
+      selectWrap.style.gap = "0.5rem";
+      selectWrap.style.alignItems = "center";
+      selectWrap.createEl("span", { text: "Decision:" });
+      const select = selectWrap.createEl("select");
+      select.add(new Option("Use note", "note"));
+      select.add(new Option("Use Zotero", "zotero"));
+      select.add(new Option("Skip", "skip"));
+      select.value = "skip";
+      this.selects.set(conflict.key, select);
+    }
+
+    const actions = contentEl.createEl("div");
+    actions.style.display = "flex";
+    actions.style.flexWrap = "wrap";
+    actions.style.gap = "0.5rem";
+    actions.style.marginTop = "0.75rem";
+
+    const applyAll = (value: MetadataDecision) => {
+      for (const select of this.selects.values()) {
+        select.value = value;
+      }
+    };
+
+    const keepNoteAll = actions.createEl("button", { text: "Use note for all" });
+    const keepZoteroAll = actions.createEl("button", { text: "Use Zotero for all" });
+    const skipAll = actions.createEl("button", { text: "Skip all" });
+    const apply = actions.createEl("button", { text: "Apply" });
+
+    keepNoteAll.addEventListener("click", () => applyAll("note"));
+    keepZoteroAll.addEventListener("click", () => applyAll("zotero"));
+    skipAll.addEventListener("click", () => applyAll("skip"));
+
+    apply.addEventListener("click", () => {
+      const decisions: Record<string, MetadataDecision> = {};
+      for (const [key, select] of this.selects.entries()) {
+        decisions[key] = (select.value as MetadataDecision) || "skip";
+      }
+      this.resolved = true;
+      this.close();
+      this.onResolve(decisions);
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      const decisions: Record<string, MetadataDecision> = {};
+      for (const [key, select] of this.selects.entries()) {
+        decisions[key] = (select.value as MetadataDecision) || "skip";
+      }
+      this.onResolve(decisions);
+    }
+  }
+}
+
 export class LanguageSuggestModal extends SuggestModal<LanguageOption> {
   private resolveSelection: (value: string | null) => void;
   private resolved = false;

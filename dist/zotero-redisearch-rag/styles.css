@@ -179,7 +179,7 @@
   display: flex;
   gap: 0.75rem;
   padding: 0.75rem;
-  margin-bottom: 1.25rem;
+  margin-bottom: 2.25rem;
 }
 
 .zrr-chat-view,
@@ -206,6 +206,36 @@
 
 .zrr-chat-rename-modal .setting-item-control input {
   width: 100%;
+}
+
+.zrr-zotero-suggest-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.zrr-zotero-item-icon {
+  flex: 0 0 auto;
+  width: 1.2rem;
+  height: 1.2rem;
+  margin-top: 0.1rem;
+  color: var(--text-muted);
+}
+
+.zrr-zotero-suggest-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.zrr-zotero-suggest-title {
+  font-weight: 600;
+}
+
+.zrr-zotero-suggest-meta {
+  color: var(--text-muted);
 }
 
 .zrr-indexed-item .zrr-indexed-flag {
