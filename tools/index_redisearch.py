@@ -142,6 +142,8 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str, embedding_di
         "NUMERIC",
         "page_end",
         "NUMERIC",
+        "annotation_page_label",
+        "TEXT",
         "section",
         "TEXT",
         "text",
@@ -169,6 +171,7 @@ def ensure_schema_fields(client: redis.Redis, index_name: str) -> None:
         ("chunk_tags", ["TAG", "SEPARATOR", "|"]),
         ("year", ["NUMERIC"]),
         ("item_type", ["TAG", "SEPARATOR", "|"]),
+        ("annotation_page_label", ["TEXT"]),
     ]
     for name, spec in fields:
         try:
@@ -1104,6 +1107,7 @@ def main() -> int:
                 "source_pdf": str(payload.get("source_pdf", "")),
                 "page_start": int(chunk.get("page_start", 0)),
                 "page_end": int(chunk.get("page_end", 0)),
+                "annotation_page_label": str(chunk.get("annotation_page_label", "")),
                 "section": str(chunk.get("section", "")),
                 "text": sub_text,
                 "embedding": vector_to_bytes(embedding),

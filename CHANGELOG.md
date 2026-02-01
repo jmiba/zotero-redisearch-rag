@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 Bugfix Release
+
+- Annotation import now retries Web API lookups and warns when Web API access is missing.
+- Tag syncing now re-converts normalized Obsidian tags back to space-separated Zotero tags to avoid duplicates.
+- Retrieval now force-includes top annotation hits and marks annotation citations in chat.
+- Settings now accept `~`, `$HOME`, and `%USERPROFILE%` in Python/Docker/Redis path fields for cross-OS portability.
+
 ## 0.4.9
 
 - Doc index PDF paths now persist as vault-relative when possible.

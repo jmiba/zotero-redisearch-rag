@@ -40,6 +40,16 @@ const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElem
     }
     return badge;
   }
+  if (info.type === "annotations-start" || info.type === "annotations-end") {
+    badge.classList.add("zrr-sync-badge--annotations");
+    if (info.type === "annotations-start") {
+      const suffix = info.docId ? ` - ${info.docId}` : "";
+      badge.textContent = `Zotero annotations start${suffix}`;
+    } else {
+      badge.textContent = "Zotero annotations end";
+    }
+    return badge;
+  }
   if (info.type === "chunk-end") {
     badge.classList.add("zrr-sync-badge--chunk-end");
     badge.textContent = info.chunkKind === "page" ? "Page end" : "Section end";

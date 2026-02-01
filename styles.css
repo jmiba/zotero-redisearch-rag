@@ -167,6 +167,20 @@
 
 .zrr-chat-citation-list li {
   margin: 0.2rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.zrr-chat-citation-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
 }
 
 .zrr-chat-citations-label {
@@ -365,6 +379,10 @@
   background: var(--background-secondary-alt);
 }
 
+.zrr-sync-badge--annotations {
+  background: var(--background-primary-alt);
+}
+
 .zrr-sync-badge--sync-end {
   opacity: 0.8;
 }
@@ -408,6 +426,48 @@
 .zrr-settings-tab-panel {
   display: none;
   padding-top: 0.25rem;
+}
+
+.zrr-annotation-map {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.zrr-annotation-map-row {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.6rem;
+  display: grid;
+  gap: 0.4rem;
+  background: var(--background-secondary);
+}
+
+.zrr-annotation-map-row-header,
+.zrr-annotation-map-row-body {
+  display: grid;
+  grid-template-columns: 1.2fr 2fr 1.5fr auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.zrr-annotation-map-row-header {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.zrr-annotation-map-input {
+  width: 100%;
+}
+
+.zrr-annotation-map-delete {
+  justify-self: end;
+}
+
+.zrr-annotation-map-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .zrr-settings-tab-panel.is-active {

@@ -8,6 +8,7 @@ export type ChatCitation = {
   attachment_key?: string;
   chunk_id?: string;
   annotation_key?: string;
+  annotation_page_label?: string;
   page_start?: string;
   page_end?: string;
   pages?: string;
@@ -26,6 +27,9 @@ export type ChatMessage = {
 export type ChatRetrievedChunk = {
   doc_id?: string;
   chunk_id?: string;
+  attachment_key?: string;
+  annotation_page_label?: string;
+  is_annotation?: string | number | boolean;
   page_start?: string | number;
   page_end?: string | number;
   source_pdf?: string;
@@ -398,6 +402,9 @@ export class ZoteroChatView extends ItemView {
         event.preventDefault();
         void this.plugin.openCitationTarget(citation, display);
       });
+      if (citation.annotation_key) {
+        item.createEl("span", { text: "Annotation", cls: "zrr-chat-citation-badge" });
+      }
     }
   }
 

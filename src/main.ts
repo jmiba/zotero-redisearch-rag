@@ -88,6 +88,7 @@ import {
   extractYear,
   formatCreatorName,
   getDocIdFromValues,
+  isPdfAttachment,
 } from "./zoteroItemHelpers";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage, ChatRetrievedChunk } from "./chatView";
@@ -225,6 +226,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private noteAnnotationSyncSuppressed = new Set<string>();
   private annotationNoteEditTimes = new Map<string, number>();
   private missingDocIdWarned = new Set<string>();
+  private annotationWebApiWarned = new Set<string>();
   private collectionTitleCache = new Map<string, string>();
   private recreateMissingNotesActive = false;
   private recreateMissingNotesAbort = false;
@@ -1496,6 +1498,8 @@ export default class ZoteroRagPlugin extends Plugin {
       let pageStart = "";
       let pageEnd = "";
       let annotationKey: string | undefined;
+      let annotationPageLabel: string | undefined;
+      let attachmentKey: string | undefined;
       let chunkRef: string | undefined;
 
       if (pageMatch) {
@@ -1531,6 +1535,12 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!pageEnd && chunkMatch.page_end !== undefined) {
           pageEnd = String(chunkMatch.page_end);
         }
+        if (!attachmentKey && typeof chunkMatch.attachment_key === "string") {
+          attachmentKey = chunkMatch.attachment_key;
+        }
+        if (!annotationPageLabel && typeof chunkMatch.annotation_page_label === "string") {
+          annotationPageLabel = chunkMatch.annotation_page_label;
+        }
         if (!annotationKey && typeof chunkMatch.chunk_id === "string") {
           annotationKey = this.extractAnnotationKey(chunkMatch.chunk_id);
         }
@@ -1541,6 +1551,12 @@ export default class ZoteroRagPlugin extends Plugin {
         chunk_id: chunkMatch?.chunk_id,
         annotation_key: annotationKey,
       };
+      if (attachmentKey) {
+        inferredCitation.attachment_key = attachmentKey;
+      }
+      if (annotationPageLabel) {
+        inferredCitation.annotation_page_label = annotationPageLabel;
+      }
       if (pageStart || pageEnd) {
         inferredCitation.page_start = pageStart || pageEnd;
         inferredCitation.page_end = pageEnd || pageStart;
@@ -1565,19 +1581,45 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!citation.annotation_key && annotationKey) {
         citation = { ...citation, annotation_key: annotationKey };
       }
+      if (!citation.attachment_key && attachmentKey) {
+        citation = { ...citation, attachment_key: attachmentKey };
+      }
+      if (!citation.annotation_page_label && annotationPageLabel) {
+        citation = { ...citation, annotation_page_label: annotationPageLabel };
+      }
 
       const display = await this.resolveCitationDisplay(citation);
       const label = this.formatCitationLabel(display.noteTitle, display.pageLabel);
       const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, docId);
-      if (this.settings.preferObsidianNoteForCitations && display.notePath && chunkId) {
-        replacements.set(token, this.buildNoteChunkLink(display.notePath, chunkId, label));
-      } else {
-        if (display.zoteroUrl) {
-          replacements.set(token, `[${label}](${display.zoteroUrl})`);
-        } else {
-          const fallbackLabel = this.formatCitationLabel(docId, display.pageLabel);
-          replacements.set(token, `(${fallbackLabel})`);
+      if (this.settings.preferObsidianNoteForCitations && display.notePath) {
+        if (annotationKey) {
+          const annotationAttachment =
+            citation.attachment_key || attachmentKey || this.docIndex?.[docId]?.attachment_key || "";
+          const pageToken = citation.page_start ? String(citation.page_start) : (pageStart || pageEnd || "0");
+          const annotationLink = this.buildNoteAnnotationLink(
+            display.notePath,
+            annotationKey,
+            annotationAttachment,
+            pageToken,
+            label
+          );
+          if (annotationLink) {
+            replacements.set(token, annotationLink);
+            continue;
+          }
+          replacements.set(token, this.buildNoteLink(display.notePath, label));
+          continue;
         }
+        if (chunkId && !annotationKey) {
+          replacements.set(token, this.buildNoteChunkLink(display.notePath, chunkId, label));
+          continue;
+        }
+      }
+      if (display.zoteroUrl) {
+        replacements.set(token, `[${label}](${display.zoteroUrl})`);
+      } else {
+        const fallbackLabel = this.formatCitationLabel(docId, display.pageLabel);
+        replacements.set(token, `(${fallbackLabel})`);
       }
     }
 
@@ -1744,18 +1786,35 @@ export default class ZoteroRagPlugin extends Plugin {
   ): Promise<void> {
     const resolved = display ?? (await this.resolveCitationDisplay(citation));
     const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, citation.doc_id);
+    const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
     const preferNote = this.settings.preferObsidianNoteForCitations;
-    if (preferNote && resolved.notePath && chunkId) {
-      const opened = await this.openNoteAtChunk(resolved.notePath, chunkId);
-      if (opened) {
-        return;
-      }
-    }
     if (preferNote && resolved.notePath) {
+      if (annotationKey) {
+        const attachmentKey =
+          citation.attachment_key || this.docIndex?.[citation.doc_id || ""]?.attachment_key || "";
+        const pageToken = citation.page_start
+          ? String(citation.page_start)
+          : (citation.page_end ? String(citation.page_end) : "0");
+        const opened = await this.openNoteAtAnnotation(
+          resolved.notePath,
+          annotationKey,
+          attachmentKey,
+          pageToken
+        );
+        if (opened) {
+          return;
+        }
+      }
+      if (chunkId && !annotationKey) {
+        const opened = await this.openNoteAtChunk(resolved.notePath, chunkId);
+        if (opened) {
+          return;
+        }
+      }
       await this.openNoteInMain(resolved.notePath);
       return;
     }
-    if (!preferNote && resolved.zoteroUrl) {
+    if (resolved.zoteroUrl) {
       this.openExternalUrl(resolved.zoteroUrl);
       return;
     }
@@ -2768,6 +2827,19 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
     return undefined;
+  }
+
+  private hasFrontmatterKey(frontmatter: Record<string, any> | null | undefined, baseKey: string): boolean {
+    if (!frontmatter) {
+      return false;
+    }
+    const variants = this.getZoteroFrontmatterKeyVariants(baseKey);
+    for (const key of variants) {
+      if (Object.prototype.hasOwnProperty.call(frontmatter, key)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private normalizeZoteroFrontmatterKeys(frontmatter: Record<string, any>): boolean {
@@ -4327,6 +4399,10 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private formatCitationPageLabel(citation: ChatCitation): string {
+    const annotationLabel = (citation.annotation_page_label || "").trim();
+    if (annotationLabel) {
+      return annotationLabel;
+    }
     const start = citation.page_start ? String(citation.page_start) : "";
     const end = citation.page_end ? String(citation.page_end) : "";
     if (start && (!end || start === end)) {
@@ -4540,8 +4616,10 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!docId) {
         return;
       }
-      const frontmatter =
-        this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+      if (!frontmatter) {
+        return;
+      }
       const itemKey = this.resolveZoteroItemKey(frontmatter, docId);
       if (!itemKey) {
         return;
@@ -4584,6 +4662,28 @@ export default class ZoteroRagPlugin extends Plugin {
         "authors",
         "editors",
       ];
+      const frontmatterKeys: Record<keyof NoteMetadataFields, string> = {
+        title: "title",
+        short_title: "short_title",
+        date: "date",
+        abstract: "abstract",
+        doi: "doi",
+        publisher: "publisher",
+        place: "place",
+        issue: "issue",
+        volume: "volume",
+        pages: "pages",
+        item_type: "item_type",
+        tags: "tags",
+        authors: "authors",
+        editors: "editors",
+      };
+      const activeFields = fieldOrder.filter((field) =>
+        this.hasFrontmatterKey(frontmatter, frontmatterKeys[field])
+      );
+      if (!activeFields.length) {
+        return;
+      }
 
       const fieldLabels: Record<keyof NoteMetadataFields, string> = {
         title: "Title",
@@ -4602,7 +4702,7 @@ export default class ZoteroRagPlugin extends Plugin {
         editors: "Editors",
       };
 
-      for (const field of fieldOrder) {
+      for (const field of activeFields) {
         const noteValue = noteFields[field];
         const zoteroValue = zoteroFields[field];
         if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
@@ -4659,7 +4759,7 @@ export default class ZoteroRagPlugin extends Plugin {
           zoteroUpdates
         );
       }
-      await this.updateMetadataSnapshot(file, docId, noteFields, zoteroFields, snapshot, decisions, fieldOrder);
+      await this.updateMetadataSnapshot(file, docId, noteFields, zoteroFields, snapshot, decisions, activeFields);
     } catch (error) {
       console.warn("Failed to sync note metadata with Zotero", error);
     } finally {
@@ -4718,7 +4818,13 @@ export default class ZoteroRagPlugin extends Plugin {
         await this.updateDocIndex({ doc_id: docId, attachment_key: attachmentKey });
       }
 
-      const zoteroAnnotations = await this.fetchZoteroAnnotations(attachmentKey);
+      const originalAttachmentKey = attachmentKey;
+      const resolved = await this.fetchZoteroAnnotationsForDoc(docId, attachmentKey);
+      let zoteroAnnotations = resolved.annotations;
+      attachmentKey = resolved.attachmentKey;
+      if (attachmentKey && attachmentKey !== originalAttachmentKey) {
+        await this.updateDocIndex({ doc_id: docId, attachment_key: attachmentKey });
+      }
       const noteAnnotations = this.parseAnnotationBlock(blockRange.block, attachmentKey);
       const noteMap = new Map<string, ParsedAnnotationNote>();
       for (const noteEntry of noteAnnotations) {
@@ -4743,6 +4849,10 @@ export default class ZoteroRagPlugin extends Plugin {
       let noteEditsDetected = false;
       let needsNoteRefresh = false;
       let forceNoteRefresh = false;
+      if (attachmentKey && attachmentKey !== originalAttachmentKey && zoteroAnnotations.length > 0) {
+        needsNoteRefresh = true;
+        forceNoteRefresh = true;
+      }
 
       for (const [key, zoteroEntry] of zoteroMap.entries()) {
         const noteEntry = noteMap.get(key);
@@ -5099,25 +5209,96 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!attachmentKey) {
       return [];
     }
+    const canUseWebApi = this.canUseWebApi() || (await this.ensureWebApiLibraryId());
+    const parseAnnotations = (children: any[]): AnnotationEntry[] => {
+      const annotations: AnnotationEntry[] = [];
+      for (const child of children) {
+        const data = child?.data ?? child ?? {};
+        if (coerceString(data.itemType) !== "annotation") {
+          continue;
+        }
+        const parsed = this.parseZoteroAnnotationItem(child as ZoteroLocalItem, attachmentKey);
+        if (parsed) {
+          annotations.push(parsed);
+        }
+      }
+      return annotations;
+    };
     let children: any[] = [];
     try {
-      children = await this.fetchZoteroChildren(attachmentKey);
+      children = await this.fetchZoteroChildrenLocal(attachmentKey);
     } catch (error) {
-      console.warn("Failed to fetch Zotero annotation items", error);
-      return [];
+      console.warn("Failed to fetch Zotero annotation items from local API", error);
     }
-    const annotations: AnnotationEntry[] = [];
-    for (const child of children) {
-      const data = child?.data ?? child ?? {};
-      if (coerceString(data.itemType) !== "annotation") {
-        continue;
-      }
-      const parsed = this.parseZoteroAnnotationItem(child as ZoteroLocalItem, attachmentKey);
-      if (parsed) {
-        annotations.push(parsed);
+    let annotations = parseAnnotations(children);
+    if (!annotations.length && canUseWebApi) {
+      try {
+        const webChildren = await this.fetchZoteroChildrenWeb(attachmentKey);
+        const webAnnotations = parseAnnotations(webChildren);
+        if (webAnnotations.length) {
+          annotations = webAnnotations;
+        }
+      } catch (error) {
+        console.warn("Failed to fetch Zotero annotation items from Web API", error);
       }
     }
     return annotations;
+  }
+
+  private async fetchZoteroAnnotationsForDoc(
+    docId: string,
+    attachmentKey: string
+  ): Promise<{ attachmentKey: string; annotations: AnnotationEntry[] }> {
+    const primaryKey = attachmentKey;
+    const primary = await this.fetchZoteroAnnotations(primaryKey);
+    if (primary.length || !docId) {
+      if (!primary.length) {
+        this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
+      }
+      return { attachmentKey: primaryKey, annotations: primary };
+    }
+    let children: any[] = [];
+    try {
+      children = await this.fetchZoteroChildren(docId);
+    } catch (error) {
+      console.warn("Failed to fetch Zotero attachments for annotations", error);
+      this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
+      return { attachmentKey: primaryKey, annotations: primary };
+    }
+    const candidates: string[] = [];
+    const seen = new Set<string>(primaryKey ? [primaryKey] : []);
+    for (const child of children) {
+      if (!isPdfAttachment(child)) {
+        continue;
+      }
+      const key = coerceString(child?.key ?? child?.data?.key ?? child?.attachmentKey);
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      candidates.push(key);
+    }
+    for (const candidate of candidates) {
+      const annotations = await this.fetchZoteroAnnotations(candidate);
+      if (annotations.length) {
+        return { attachmentKey: candidate, annotations };
+      }
+    }
+    this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
+    return { attachmentKey: primaryKey, annotations: primary };
+  }
+
+  private maybeWarnMissingAnnotationApi(docId: string, attachmentKey: string): void {
+    if (this.canUseWebApi()) {
+      console.info("No Zotero annotations returned for attachment", { docId, attachmentKey });
+      return;
+    }
+    const key = docId || attachmentKey;
+    if (!key || this.annotationWebApiWarned.has(key)) {
+      return;
+    }
+    this.annotationWebApiWarned.add(key);
+    new Notice("Zotero annotations require Web API access. Configure the Web API library ID and key to import annotations.");
   }
 
   private normalizeMetadataString(value: unknown): string {
@@ -5951,7 +6132,15 @@ export default class ZoteroRagPlugin extends Plugin {
       payload.pages = updates.pages ?? "";
     }
     if ("item_type" in updates) {
-      payload.itemType = updates.item_type ?? "";
+      const nextItemType = this.normalizeMetadataString(updates.item_type);
+      if (nextItemType) {
+        const isValid = /^[A-Za-z][A-Za-z0-9]*$/.test(nextItemType);
+        if (isValid) {
+          payload.itemType = nextItemType;
+        } else {
+          console.warn("Skipping invalid item_type update", { itemKey, itemType: nextItemType });
+        }
+      }
     }
     if ("tags" in updates) {
       payload.tags = this.buildZoteroTags(noteFields.tags, values?.tags);
@@ -5997,16 +6186,17 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private buildZoteroTags(noteTags: string[], existingTags: unknown): Array<Record<string, any>> {
-    const sanitized = this.sanitizeObsidianTags(noteTags);
-    const unique = Array.from(new Set(sanitized));
-    const manual = unique.map((tag) => ({ tag, type: 0 }));
-    const manualSet = new Set(unique);
+    const normalized = this.normalizeZoteroTags(noteTags);
+    const manual = normalized.map((tag) => ({ tag, type: 0 }));
+    const manualSet = new Set(normalized.map((tag) => tag.toLowerCase()));
     const preserved = Array.isArray(existingTags)
       ? existingTags
           .filter((tag) => tag && typeof tag === "object" && Number(tag.type) === 1)
           .filter((tag) => typeof tag.tag === "string")
       : [];
-    const preservedUnique = preserved.filter((tag: any) => !manualSet.has(String(tag.tag)));
+    const preservedUnique = preserved.filter(
+      (tag: any) => !manualSet.has(String(tag.tag).toLowerCase())
+    );
     return [...manual, ...preservedUnique];
   }
 
@@ -6248,11 +6438,13 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const text = parts.join("\n\n").trim();
     const page = annotation.pageIndex ?? 0;
+    const pageLabel = annotation.pageLabel || (annotation.pageIndex ? String(annotation.pageIndex) : "");
     return {
       chunk_id: annotation.key,
       text,
       page_start: page,
       page_end: page,
+      annotation_page_label: pageLabel,
       section: annotation.heading,
       chunk_tags: annotation.tags,
       is_annotation: true,
@@ -6271,6 +6463,7 @@ export default class ZoteroRagPlugin extends Plugin {
       section: chunk.section ?? "",
       chunk_tags: Array.isArray(chunk.chunk_tags) ? chunk.chunk_tags : chunk.chunk_tags ?? "",
       annotation_color: chunk.annotation_color ?? "",
+      annotation_page_label: chunk.annotation_page_label ?? "",
       annotation_text: chunk.annotation_text ?? "",
       annotation_comment: chunk.annotation_comment ?? "",
     });
@@ -6701,19 +6894,33 @@ export default class ZoteroRagPlugin extends Plugin {
     return Boolean(attachment);
   }
 
-  private async fetchZoteroChildren(itemKey: string): Promise<any[]> {
+  private async fetchZoteroChildrenLocal(itemKey: string): Promise<any[]> {
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children`);
+    const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
+    return JSON.parse(payload.toString("utf8"));
+  }
+
+  private async fetchZoteroChildrenWeb(itemKey: string): Promise<any[]> {
+    if (!this.canUseWebApi()) {
+      const resolved = await this.ensureWebApiLibraryId();
+      if (!resolved || !this.canUseWebApi()) {
+        throw new Error("Zotero Web API is not configured.");
+      }
+    }
+    const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children`);
+    const payload = await this.requestWebApi(webUrl, `Zotero Web API children request failed for ${webUrl}`);
+    return JSON.parse(payload.toString("utf8"));
+  }
+
+  private async fetchZoteroChildren(itemKey: string): Promise<any[]> {
     try {
-      const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
-      return JSON.parse(payload.toString("utf8"));
+      return await this.fetchZoteroChildrenLocal(itemKey);
     } catch (error) {
       console.warn("Failed to fetch Zotero children from local API", error);
       if (!this.canUseWebApi()) {
         throw error;
       }
-      const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children`);
-      const payload = await this.requestWebApi(webUrl, `Zotero Web API children request failed for ${webUrl}`);
-      return JSON.parse(payload.toString("utf8"));
+      return this.fetchZoteroChildrenWeb(itemKey);
     }
   }
 
@@ -6725,6 +6932,30 @@ export default class ZoteroRagPlugin extends Plugin {
   private canUseWebApi(): boolean {
     const base = (this.settings.webApiBaseUrl || "").trim();
     return Boolean(base && this.settings.webApiKey && this.settings.webApiLibraryId);
+  }
+
+  private async ensureWebApiLibraryId(): Promise<boolean> {
+    const base = (this.settings.webApiBaseUrl || "").trim();
+    const apiKey = (this.settings.webApiKey || "").trim();
+    if (!base || !apiKey || (this.settings.webApiLibraryId || "").trim()) {
+      return Boolean((this.settings.webApiLibraryId || "").trim());
+    }
+    const url = this.buildWebApiUrl("/keys/current");
+    try {
+      const payload = await this.requestWebApi(url, `Zotero Web API key lookup failed for ${url}`);
+      const parsed = JSON.parse(payload.toString("utf8"));
+      const userId = parsed?.userID ?? parsed?.userId ?? parsed?.data?.userID ?? parsed?.data?.userId;
+      if (!userId) {
+        return false;
+      }
+      this.settings.webApiLibraryId = String(userId);
+      await this.saveSettings();
+      console.info("Resolved Zotero Web API user ID from key", { userId });
+      return true;
+    } catch (error) {
+      console.warn("Failed to resolve Zotero Web API user ID", error);
+      return false;
+    }
   }
 
   private getWebApiLibraryPath(): string {
@@ -7182,6 +7413,21 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
+  private findAnnotationLineInText(text: string, blockId: string): number | null {
+    if (!text || !blockId) {
+      return null;
+    }
+    const escapedId = this.escapeRegExp(blockId);
+    const markerRe = new RegExp(`^\\s*>?\\s*\\^${escapedId}\\b`, "i");
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      if (markerRe.test(lines[i])) {
+        return i;
+      }
+    }
+    return null;
+  }
+
   private async openNoteAtChunk(notePath: string, chunkId: string): Promise<boolean> {
     if (!notePath || !chunkId) {
       return false;
@@ -7197,6 +7443,36 @@ export default class ZoteroRagPlugin extends Plugin {
     const line = this.findChunkLineInText(editor.getValue(), normalizedChunkId);
     if (line === null) {
       new Notice(`Chunk ${normalizedChunkId} not found in note.`);
+      return false;
+    }
+    editor.setCursor({ line, ch: 0 });
+    editor.scrollIntoView(
+      { from: { line, ch: 0 }, to: { line, ch: 0 } },
+      true
+    );
+    return true;
+  }
+
+  private async openNoteAtAnnotation(
+    notePath: string,
+    annotationKey: string,
+    attachmentKey: string,
+    pageToken: string
+  ): Promise<boolean> {
+    const blockId = this.buildAnnotationBlockId(annotationKey, attachmentKey, pageToken);
+    if (!notePath || !blockId) {
+      return false;
+    }
+    await this.openNoteInMain(notePath);
+    const leaf = this.getMainLeaf();
+    const view = leaf.view;
+    if (!(view instanceof MarkdownView)) {
+      return false;
+    }
+    const editor = view.editor;
+    const line = this.findAnnotationLineInText(editor.getValue(), blockId);
+    if (line === null) {
+      new Notice(`Annotation ${annotationKey} not found in note.`);
       return false;
     }
     editor.setCursor({ line, ch: 0 });
@@ -7326,8 +7602,24 @@ export default class ZoteroRagPlugin extends Plugin {
     const noteTitle = this.resolveCitationTitle(entry, entry?.note_path ?? null, citation.doc_id);
     const fullLabel = this.formatCitationLabel(noteTitle, pageLabel);
     const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, citation.doc_id);
-    if (this.settings.preferObsidianNoteForCitations && chunkId && entry?.note_path) {
-      return `- ${this.buildNoteChunkLink(entry.note_path, chunkId, fullLabel)}`;
+    if (this.settings.preferObsidianNoteForCitations && entry?.note_path) {
+      if (annotationKey) {
+        const pageToken = pageStart || (citation.page_end ? String(citation.page_end) : "0");
+        const annotationLink = this.buildNoteAnnotationLink(
+          entry.note_path,
+          annotationKey,
+          attachmentKey || "",
+          pageToken,
+          fullLabel
+        );
+        if (annotationLink) {
+          return `- ${annotationLink}`;
+        }
+        return `- ${this.buildNoteLink(entry.note_path, fullLabel)}`;
+      }
+      if (chunkId && !annotationKey) {
+        return `- ${this.buildNoteChunkLink(entry.note_path, chunkId, fullLabel)}`;
+      }
     }
     if (attachmentKey) {
       const zoteroUrl = this.buildZoteroDeepLink(docId, attachmentKey, pageStart, annotationKey);
@@ -7341,6 +7633,42 @@ export default class ZoteroRagPlugin extends Plugin {
     const anchor = `zrr-chunk:${chunkId}`;
     const safeLabel = this.escapeWikiLabel(label);
     return `[[${target}#${anchor}\\|${safeLabel}]]`;
+  }
+
+  private buildNoteLink(notePath: string, label: string): string {
+    const target = normalizePath(notePath).replace(/\.md$/i, "");
+    const safeLabel = this.escapeWikiLabel(label);
+    return `[[${target}\\|${safeLabel}]]`;
+  }
+
+  private buildNoteAnnotationLink(
+    notePath: string,
+    annotationKey: string,
+    attachmentKey: string,
+    pageToken: string,
+    label: string
+  ): string | null {
+    const blockId = this.buildAnnotationBlockId(annotationKey, attachmentKey, pageToken);
+    if (!blockId) {
+      return null;
+    }
+    const target = normalizePath(notePath).replace(/\.md$/i, "");
+    const safeLabel = this.escapeWikiLabel(label);
+    return `[[${target}#^${blockId}\\|${safeLabel}]]`;
+  }
+
+  private buildAnnotationBlockId(
+    annotationKey: string,
+    attachmentKey: string,
+    pageToken: string
+  ): string | null {
+    const key = (annotationKey || "").trim().toUpperCase();
+    const attachment = (attachmentKey || "").trim().toUpperCase();
+    if (!key || !attachment) {
+      return null;
+    }
+    const page = (pageToken || "").trim() || "0";
+    return `${key}a${attachment}p${page}`;
   }
 
   private escapeWikiLabel(label: string): string {
@@ -8283,8 +8611,11 @@ export default class ZoteroRagPlugin extends Plugin {
     docId: string,
     attachmentKey: string
   ): Promise<string> {
-    const annotations = await this.fetchZoteroAnnotations(attachmentKey);
-    return this.buildAnnotationBlock(docId, attachmentKey, annotations);
+    const resolved = await this.fetchZoteroAnnotationsForDoc(docId, attachmentKey);
+    if (resolved.attachmentKey && resolved.attachmentKey !== attachmentKey) {
+      await this.updateDocIndex({ doc_id: docId, attachment_key: resolved.attachmentKey });
+    }
+    return this.buildAnnotationBlock(docId, resolved.attachmentKey, resolved.annotations);
   }
 
   private buildAnnotationBlock(
@@ -8865,6 +9196,52 @@ export default class ZoteroRagPlugin extends Plugin {
     return normalized && hasNonDigit(normalized) ? normalized : "";
   }
 
+  private normalizeZoteroTags(tags: string[]): string[] {
+    const normalized = new Map<string, string>();
+    for (const tag of tags) {
+      const value = this.normalizeZoteroTag(tag);
+      if (!value) {
+        continue;
+      }
+      const key = value.toLowerCase();
+      if (!normalized.has(key)) {
+        normalized.set(key, value);
+      }
+    }
+    return Array.from(normalized.values());
+  }
+
+  private normalizeZoteroTag(tag: string): string {
+    const raw = String(tag || "").trim();
+    if (!raw) {
+      return "";
+    }
+    const cleaned = raw.replace(/^#+/, "").trim();
+    if (!cleaned) {
+      return "";
+    }
+    const segments = cleaned
+      .split("/")
+      .map((segment) => {
+        let value = segment.trim();
+        if (!value) {
+          return "";
+        }
+        value = value.replace(/[_-]+/g, " ");
+        value = value.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
+        value = value.replace(/([a-z\\d])([A-Z])/g, "$1 $2");
+        value = value.replace(/([a-zA-Z])(\\d)/g, "$1 $2");
+        value = value.replace(/(\\d)([a-zA-Z])/g, "$1 $2");
+        value = value.replace(/\s+/g, " ").trim();
+        return value;
+      })
+      .filter(Boolean);
+    if (!segments.length) {
+      return "";
+    }
+    return segments.join("/");
+  }
+
   private toObsidianLinks(items: string[]): string[] {
     return items
       .map((item) => String(item || "").trim())
@@ -8882,6 +9259,33 @@ export default class ZoteroRagPlugin extends Plugin {
       return fallback;
     }
     throw new Error("Vault base path is unavailable.");
+  }
+
+  private expandPathValue(value: string): string {
+    const raw = (value || "").trim();
+    if (!raw) {
+      return raw;
+    }
+    let expanded = raw;
+    if (expanded === "~") {
+      expanded = os.homedir();
+    } else if (expanded.startsWith("~/") || expanded.startsWith("~\\")) {
+      expanded = path.join(os.homedir(), expanded.slice(2));
+    }
+    expanded = expanded.replace(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([^}]+)\}/g, (match, name1, name2) => {
+      const key = name1 || name2;
+      const value = key ? process.env[key] : undefined;
+      return value !== undefined ? value : match;
+    });
+    expanded = expanded.replace(/%([^%]+)%/g, (match, name) => {
+      const value = process.env[name];
+      return value !== undefined ? value : match;
+    });
+    return expanded;
+  }
+
+  private resolvePythonPath(): string {
+    return this.expandPathValue(this.settings.pythonPath || "");
   }
 
   private getPluginDir(): string {
@@ -9182,11 +9586,11 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private getRedisDataDir(): string {
-    const envOverride = (process.env.ZRR_DATA_DIR || "").trim();
+    const envOverride = this.expandPathValue(process.env.ZRR_DATA_DIR || "");
     if (envOverride) {
       return envOverride;
     }
-    const override = (this.settings.redisDataDirOverride || "").trim();
+    const override = this.expandPathValue(this.settings.redisDataDirOverride || "");
     if (!this.settings.autoAssignRedisPort && override) {
       return path.isAbsolute(override)
         ? override
@@ -9201,7 +9605,8 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async resolveDockerPath(): Promise<string> {
-    const configured = this.settings.dockerPath?.trim();
+    const configuredRaw = this.settings.dockerPath?.trim();
+    const configured = configuredRaw ? this.expandPathValue(configuredRaw) : "";
     const dockerCandidates = [
       "/opt/homebrew/bin/docker",
       "/usr/local/bin/docker",
@@ -9402,14 +9807,15 @@ export default class ZoteroRagPlugin extends Plugin {
       );
       return;
     }
-    const configured = this.settings.dockerPath?.trim() || "docker";
+    const configuredRaw = this.settings.dockerPath?.trim() || "docker";
+    const configured = this.expandPathValue(configuredRaw);
     const configuredAvailable = await this.isContainerCliAvailable(configured);
     const shouldAutoSet =
       !configuredAvailable ||
-      configured === "docker" ||
-      configured === "podman" ||
-      configured === "podman-compose";
-    if (shouldAutoSet && resolved && resolved !== configured) {
+      configuredRaw === "docker" ||
+      configuredRaw === "podman" ||
+      configuredRaw === "podman-compose";
+    if (shouldAutoSet && resolved && resolved !== configuredRaw) {
       this.settings.dockerPath = resolved;
       await this.saveSettings();
     }
@@ -9902,7 +10308,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   async detectOcrEngines(): Promise<OcrEngineAvailability> {
     const tesseractAvailable = await this.canRunCommand("tesseract", []);
-    let pythonCommand = (this.settings.pythonPath || "").trim();
+    let pythonCommand = this.resolvePythonPath();
     let pythonArgs: string[] = [];
     if (!pythonCommand) {
       try {
@@ -10014,7 +10420,8 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async resolveBootstrapPython(): Promise<{ command: string; args: string[] }> {
-    const configured = (this.settings.pythonPath || "").trim();
+    const configuredRaw = (this.settings.pythonPath || "").trim();
+    const configured = this.expandPathValue(configuredRaw);
     if (configured && (await this.canRunCommand(configured, []))) {
       const version = await this.getPythonVersion(configured, []);
       if (version && this.isUnsupportedPythonVersion(version)) {
@@ -10122,7 +10529,8 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private runPython(scriptPath: string, args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
+      const pythonPath = this.resolvePythonPath();
+      const child = spawn(pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
         env: this.buildPythonEnv(),
       });
@@ -10193,7 +10601,8 @@ export default class ZoteroRagPlugin extends Plugin {
     onSpawn?: (child: ChildProcess) => void
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
+      const pythonPath = this.resolvePythonPath();
+      const child = spawn(pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
         env: this.buildPythonEnv(),
       });
@@ -10519,7 +10928,8 @@ export default class ZoteroRagPlugin extends Plugin {
     stderrLogLabel = "docling_extract"
   ): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.settings.pythonPath, [scriptPath, ...args], {
+      const pythonPath = this.resolvePythonPath();
+      const child = spawn(pythonPath, [scriptPath, ...args], {
         cwd: path.dirname(scriptPath),
         env: this.buildPythonEnv(),
       });

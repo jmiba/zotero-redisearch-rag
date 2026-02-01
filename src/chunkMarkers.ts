@@ -11,12 +11,13 @@ export type ChunkStartLine = {
 };
 
 export type ZrrBadgeInfo = {
-  type: "sync-start" | "sync-end" | "chunk-start" | "chunk-end";
+  type: "sync-start" | "sync-end" | "chunk-start" | "chunk-end" | "annotations-start" | "annotations-end";
   docId?: string;
   chunkId?: string;
   excluded?: boolean;
   pageNumber?: number;
   chunkKind?: "page" | "section";
+  attachmentKey?: string;
 };
 
 export const ZRR_SYNC_START_RE = /<!--\s*zrr:sync-start[^>]*-->/i;
@@ -39,6 +40,18 @@ export const parseZrrBadgeInfo = (data: string): ZrrBadgeInfo | null => {
   }
   if (/^zrr:sync-end\b/i.test(trimmed)) {
     return { type: "sync-end" };
+  }
+  if (/^zrr:annotations-start\b/i.test(trimmed)) {
+    const docMatch = trimmed.match(/\bdoc_id=(["']?)([^"'\s]+)\1/i);
+    const attachmentMatch = trimmed.match(/\battachment_key=(["']?)([^"'\s]+)\1/i);
+    return {
+      type: "annotations-start",
+      docId: docMatch ? docMatch[2] : undefined,
+      attachmentKey: attachmentMatch ? attachmentMatch[2] : undefined,
+    };
+  }
+  if (/^zrr:annotations-end\b/i.test(trimmed)) {
+    return { type: "annotations-end" };
   }
   if (/^zrr:chunk\s+end\b/i.test(trimmed)) {
     return { type: "chunk-end" };

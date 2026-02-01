@@ -480,11 +480,16 @@ def search_redis_knn(
     index: str,
     vec: bytes,
     k: int,
+    filter_query: str = "*",
 ) -> List[Dict[str, Any]]:
+    if filter_query and filter_query != "*":
+        query = f"({filter_query})=>[KNN {k} @embedding $vec AS score]"
+    else:
+        query = f"*=>[KNN {k} @embedding $vec AS score]"
     raw = client.execute_command(
         "FT.SEARCH",
         index,
-        f"*=>[KNN {k} @embedding $vec AS score]",
+        query,
         "PARAMS",
         "2",
         "vec",
@@ -492,13 +497,15 @@ def search_redis_knn(
         "SORTBY",
         "score",
         "RETURN",
-        "11",
+        "13",
         "doc_id",
         "chunk_id",
+        "is_annotation",
         "attachment_key",
         "source_pdf",
         "page_start",
         "page_end",
+        "annotation_page_label",
         "section",
         "text",
         "tags",
@@ -536,6 +543,7 @@ _MIN_NARRATIVE_RATIO = 0.5
 _MIN_CONTENT_FOR_RATIO = 4
 _RERANK_MAX_CHARS_DEFAULT = 2000
 _RRF_K = 60
+_ANNOTATION_K_DEFAULT = 3
 
 
 def retrieve_chunks(
@@ -548,6 +556,7 @@ def retrieve_chunks(
     rrf_k: int = _RRF_K,
     rrf_log_top: int = 0,
     max_per_doc: int = 0,
+    annotation_k: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     vector_results = search_redis_knn(client, index, vec, k)
     retrieved = vector_results
@@ -602,6 +611,9 @@ def retrieve_chunks(
         log_rrf_top(ordered, rrf_scores, rrf_log_top)
     ordered = apply_tag_boosting(ordered, keywords)
     ordered = apply_doc_cap(ordered, max_per_doc)
+    if annotation_k > 0:
+        annotations = retrieve_annotation_chunks(client, index, vec, annotation_k, keywords)
+        ordered = merge_annotation_chunks(ordered, annotations, annotation_k)
     return ordered, metrics
 
 
@@ -610,6 +622,7 @@ def run_lexical_search(
     index: str,
     keywords: List[str],
     limit: int,
+    filter_query: str = "",
 ) -> List[Dict[str, Any]]:
     if not keywords or limit <= 0:
         return []
@@ -651,6 +664,8 @@ def run_lexical_search(
     if not parts:
         return []
     query = "(" + " OR ".join(clause for _name, clause in parts) + ")"
+    if filter_query:
+        query = f"({filter_query}) {query}"
 
     def run_search(query_text: str) -> Tuple[List[Dict[str, Any]], int]:
         raw = client.execute_command(
@@ -661,13 +676,15 @@ def run_lexical_search(
             "0",
             str(limit),
             "RETURN",
-            "11",
+            "13",
             "doc_id",
             "chunk_id",
+            "is_annotation",
             "attachment_key",
             "source_pdf",
             "page_start",
             "page_end",
+            "annotation_page_label",
             "section",
             "text",
             "tags",
@@ -740,6 +757,15 @@ def is_content_chunk(chunk: Dict[str, Any]) -> bool:
 
     return True
 
+def is_annotation_chunk(chunk: Dict[str, Any]) -> bool:
+    value = chunk.get("is_annotation")
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    value = str(value).strip().lower()
+    return value in ("1", "true", "yes", "y")
+
 def looks_narrative(text: str) -> bool:
     if not text:
         return False
@@ -781,6 +807,59 @@ def compute_retrieval_metrics(
         "filtered_chars": sum(len(str(chunk.get("text", ""))) for chunk in filtered),
         "best_score": min(scores) if scores else None,
     }
+
+
+def retrieve_annotation_chunks(
+    client: redis.Redis,
+    index: str,
+    vec: bytes,
+    k: int,
+    keywords: List[str],
+) -> List[Dict[str, Any]]:
+    if k <= 0:
+        return []
+    try:
+        vector_results = search_redis_knn(
+            client,
+            index,
+            vec,
+            max(1, k),
+            filter_query="@is_annotation:{1}",
+        )
+    except Exception:
+        vector_results = []
+    lexical_results = run_lexical_search(
+        client,
+        index,
+        keywords,
+        max(k, 5),
+        filter_query="@is_annotation:{1}",
+    )
+    combined = vector_results + lexical_results
+    combined = dedupe_by_chunk_id(combined)
+    return combined[:k]
+
+
+def merge_annotation_chunks(
+    results: List[Dict[str, Any]],
+    annotations: List[Dict[str, Any]],
+    k: int,
+) -> List[Dict[str, Any]]:
+    if not annotations or k <= 0:
+        return results
+    seen = {chunk_key(item) for item in results if chunk_key(item)}
+    picked: List[Dict[str, Any]] = []
+    for item in annotations:
+        key = chunk_key(item)
+        if not key or key in seen:
+            continue
+        picked.append(item)
+        seen.add(key)
+        if len(picked) >= k:
+            break
+    if not picked:
+        return results
+    return picked + results
 
 def is_short_query(query: str) -> bool:
     tokens = re.findall(r"[\\w]+", query, flags=re.UNICODE)
@@ -892,6 +971,7 @@ def retrieve_with_broadening(
     rrf_k: int = _RRF_K,
     rrf_log_top: int = 0,
     max_per_doc: int = 0,
+    annotation_k: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     retrieved, metrics = retrieve_chunks(
         client,
@@ -903,6 +983,7 @@ def retrieve_with_broadening(
         rrf_k=rrf_k,
         rrf_log_top=rrf_log_top,
         max_per_doc=max_per_doc,
+        annotation_k=annotation_k,
     )
     broaden, _ = should_broaden_retrieval(metrics, k)
     if broaden:
@@ -918,6 +999,7 @@ def retrieve_with_broadening(
                 rrf_k=rrf_k,
                 rrf_log_top=rrf_log_top,
                 max_per_doc=max_per_doc,
+                annotation_k=annotation_k,
             )
         except Exception as exc:
             eprint(f"Fallback retrieval failed: {exc}")
@@ -932,11 +1014,12 @@ def build_context(retrieved: List[Dict[str, Any]]) -> str:
         page_start = chunk.get("page_start", "")
         page_end = chunk.get("page_end", "")
         score = chunk.get("score", "")
+        annotation_flag = "true" if is_annotation_chunk(chunk) else "false"
         text = chunk.get("text", "")
         pages = f"{page_start}-{page_end}"
         block = (
             f"<Document source='{source_pdf}' pages='{pages}' doc_id='{doc_id}' "
-            f"chunk_id='{chunk_id}' score='{score}'>\n{text}\n</Document>"
+            f"chunk_id='{chunk_id}' score='{score}' annotation='{annotation_flag}'>\n{text}\n</Document>"
         )
         blocks.append(block)
     return "\n\n".join(blocks)
@@ -992,20 +1075,25 @@ def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         attachment_key = chunk.get("attachment_key", "")
         page_start = chunk.get("page_start", "")
         page_end = chunk.get("page_end", "")
+        annotation_page_label = chunk.get("annotation_page_label", "")
         source_pdf = chunk.get("source_pdf", "")
         key = (doc_id, attachment_key, page_start, page_end, source_pdf)
         if key in seen:
             continue
         seen.add(key)
         annotation_key = extract_annotation_key(str(chunk_id))
+        pages = f"{page_start}-{page_end}"
+        if annotation_page_label:
+            pages = str(annotation_page_label)
         citations.append({
             "doc_id": doc_id,
             "chunk_id": chunk_id,
             "attachment_key": attachment_key,
             "annotation_key": annotation_key or None,
+            "annotation_page_label": annotation_page_label or None,
             "page_start": page_start,
             "page_end": page_end,
-            "pages": f"{page_start}-{page_end}",
+            "pages": pages,
             "source_pdf": source_pdf,
         })
     return citations
@@ -1035,6 +1123,7 @@ def main() -> int:
     parser.add_argument("--rrf-k", type=int, default=_RRF_K)
     parser.add_argument("--rrf-log-top", type=int, default=0)
     parser.add_argument("--max-per-doc", type=int, default=0)
+    parser.add_argument("--annotation-k", type=int, default=_ANNOTATION_K_DEFAULT)
     args = parser.parse_args()
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
@@ -1046,6 +1135,7 @@ def main() -> int:
     rrf_k = max(1, int(args.rrf_k or _RRF_K))
     rrf_log_top = max(0, int(args.rrf_log_top or 0))
     max_per_doc = max(0, int(args.max_per_doc or 0))
+    annotation_k = max(0, int(args.annotation_k or 0))
 
     def embed_query(query_text: str) -> bytes:
         nonlocal client, index_dim_cache
@@ -1089,6 +1179,7 @@ def main() -> int:
                     rrf_k=rrf_k,
                     rrf_log_top=rrf_log_top,
                     max_per_doc=0,
+                    annotation_k=0,
                 )
                 for item in retrieved_variant:
                     key = chunk_key(item)
@@ -1120,6 +1211,20 @@ def main() -> int:
         else:
             ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
             retrieved = apply_doc_cap(ordered, max_per_doc)[:base_k]
+        if annotation_k > 0:
+            try:
+                vec = embed_query(raw_query)
+                keywords = extract_keywords(raw_query)
+                annotations = retrieve_annotation_chunks(
+                    client,
+                    args.index,
+                    vec,
+                    annotation_k,
+                    keywords,
+                )
+                retrieved = merge_annotation_chunks(retrieved, annotations, annotation_k)
+            except Exception as exc:
+                eprint(f"Annotation retrieval failed: {exc}")
     else:
         try:
             vec = embed_query(raw_query)
@@ -1140,10 +1245,23 @@ def main() -> int:
                 rrf_k=rrf_k,
                 rrf_log_top=rrf_log_top,
                 max_per_doc=max_per_doc,
+                annotation_k=0,
             )
         except Exception as exc:
             eprint(f"RedisSearch query failed: {exc}")
             return 2
+        if annotation_k > 0:
+            try:
+                annotations = retrieve_annotation_chunks(
+                    client,
+                    args.index,
+                    vec,
+                    annotation_k,
+                    keywords,
+                )
+                retrieved = merge_annotation_chunks(retrieved, annotations, annotation_k)
+            except Exception as exc:
+                eprint(f"Annotation retrieval failed: {exc}")
 
     context = build_context(retrieved)
 

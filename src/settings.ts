@@ -1,4 +1,4 @@
-import { App, DropdownComponent, PluginSettingTab, Setting, TextComponent } from "obsidian";
+import { App, DropdownComponent, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
 
 export type OcrMode = "auto" | "force_low_quality" | "force";
 export type OcrEngine =
@@ -104,7 +104,7 @@ export type LlmProviderProfile = {
   apiKey: string;
 };
 
-type SettingsTabId = "prerequisites" | "zotero-import" | "ocr" | "llms" | "maintenance";
+type SettingsTabId = "prerequisites" | "zotero-import" | "annotations" | "ocr" | "llms" | "maintenance";
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   // Prerequisites
@@ -340,7 +340,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Python path")
         .setDesc(
           "Optional path to the Python interpreter used to create or run the plugin env. " +
-            "Leave blank to auto-detect (python3.13/3.12/3.11/3.10/python3/python, or py on Windows)."
+            "Leave blank to auto-detect (python3.13/3.12/3.11/3.10/python3/python, or py on Windows). " +
+            "Supports ~, $HOME, and %USERPROFILE%."
         )
         .addText((text) =>
           text
@@ -390,7 +391,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Docker/Podman path")
-        .setDesc("CLI path for Docker or Podman (used to start Redis Stack).")
+        .setDesc("CLI path for Docker or Podman (used to start Redis Stack). Supports ~, $HOME, and %USERPROFILE%.")
         .addText((text) =>
           text
             .setPlaceholder("docker")
@@ -416,12 +417,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       new Setting(tabEl)
         .setName("Redis data directory override")
         .setDesc(
-          "Optional absolute path to store Redis persistence when auto-assign is off. " +
-            "Env var ZRR_DATA_DIR overrides this setting."
+          "Optional path to store Redis persistence when auto-assign is off. " +
+            "Env var ZRR_DATA_DIR overrides this setting. Supports ~, $HOME, and %USERPROFILE%."
         )
         .addText((text) =>
           text
-            .setPlaceholder("/Users/you/Redis/zrr-data")
+            .setPlaceholder("~/Redis/zrr-data")
             .setValue(this.plugin.settings.redisDataDirOverride)
             .onChange(async (value) => {
               this.plugin.settings.redisDataDirOverride = value.trim();
@@ -736,6 +737,144 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
         );
+    };
+
+    const renderAnnotations = (tabEl: HTMLElement) => {
+      tabEl.createEl("h2", { text: "Annotations" });
+
+      new Setting(tabEl)
+        .setName("Annotation page label")
+        .setDesc("Label shown before the page link in annotation callouts.")
+        .addText((text) =>
+          text
+            .setPlaceholder("Page")
+            .setValue(this.plugin.settings.annotationPageLabel)
+            .onChange(async (value) => {
+              this.plugin.settings.annotationPageLabel = value.trim() || "Page";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      tabEl.createEl("h3", { text: "Annotation color map" });
+      tabEl.createEl("p", {
+        text: "Map Zotero highlight colors to section headings and callout types.",
+      });
+
+      const mapContainer = tabEl.createDiv({ cls: "zrr-annotation-map" });
+
+      const saveMap = async (map: AnnotationColorMap) => {
+        this.plugin.settings.annotationColorMap = map;
+        await this.plugin.saveSettings();
+      };
+
+      const renderMap = () => {
+        mapContainer.empty();
+        const map = this.plugin.settings.annotationColorMap || {};
+        const entries = Object.entries(map);
+        if (!entries.length) {
+          mapContainer.createEl("p", { text: "No color mappings configured." });
+        }
+
+        if (entries.length) {
+          const header = mapContainer.createDiv({ cls: "zrr-annotation-map-row-header" });
+          header.createEl("span", { text: "Color" });
+          header.createEl("span", { text: "Heading" });
+          header.createEl("span", { text: "Callout" });
+          header.createEl("span");
+        }
+
+        for (const [colorKey, value] of entries) {
+          const row = mapContainer.createDiv({ cls: "zrr-annotation-map-row" });
+          const body = row.createDiv({ cls: "zrr-annotation-map-row-body" });
+          const colorInput = body.createEl("input", {
+            type: "text",
+            value: colorKey,
+            cls: "zrr-annotation-map-input",
+          });
+          const headingInput = body.createEl("input", {
+            type: "text",
+            value: value.heading ?? "",
+            cls: "zrr-annotation-map-input",
+          });
+          const calloutInput = body.createEl("input", {
+            type: "text",
+            value: value.callout ?? "",
+            cls: "zrr-annotation-map-input",
+          });
+          const deleteButton = body.createEl("button", {
+            text: "Delete",
+            cls: "zrr-annotation-map-delete",
+          });
+          deleteButton.type = "button";
+
+          colorInput.addEventListener("change", async () => {
+            const nextKey = colorInput.value.trim().toLowerCase();
+            if (!nextKey) {
+              colorInput.value = colorKey;
+              return;
+            }
+            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+            if (nextKey !== colorKey && current[nextKey]) {
+              new Notice(`Annotation color '${nextKey}' already exists.`);
+              colorInput.value = colorKey;
+              return;
+            }
+            const entry = current[colorKey];
+            delete current[colorKey];
+            current[nextKey] = entry ?? { heading: "", callout: "" };
+            await saveMap(current);
+            renderMap();
+          });
+
+          headingInput.addEventListener("change", async () => {
+            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+            const entry = current[colorKey] ?? { heading: "", callout: "" };
+            entry.heading = headingInput.value.trim();
+            current[colorKey] = entry;
+            await saveMap(current);
+          });
+
+          calloutInput.addEventListener("change", async () => {
+            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+            const entry = current[colorKey] ?? { heading: "", callout: "" };
+            entry.callout = calloutInput.value.trim();
+            current[colorKey] = entry;
+            await saveMap(current);
+          });
+
+          deleteButton.addEventListener("click", async () => {
+            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+            delete current[colorKey];
+            await saveMap(current);
+            renderMap();
+          });
+        }
+
+        const actions = mapContainer.createDiv({ cls: "zrr-annotation-map-actions" });
+        const addButton = actions.createEl("button", { text: "Add mapping" });
+        addButton.type = "button";
+        addButton.addEventListener("click", async () => {
+          const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+          let key = "new-color";
+          let idx = 1;
+          while (current[key]) {
+            key = `new-color-${idx}`;
+            idx += 1;
+          }
+          current[key] = { heading: "", callout: "" };
+          await saveMap(current);
+          renderMap();
+        });
+
+        const resetButton = actions.createEl("button", { text: "Reset to defaults" });
+        resetButton.type = "button";
+        resetButton.addEventListener("click", async () => {
+          await saveMap({ ...DEFAULT_SETTINGS.annotationColorMap });
+          renderMap();
+        });
+      };
+
+      renderMap();
     };
 
     const renderOcr = (tabEl: HTMLElement) => {
@@ -1810,6 +1949,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     }> = [
       { id: "prerequisites", label: "Prerequisites", render: renderPrerequisites },
       { id: "zotero-import", label: "Zotero import", render: renderZoteroImport },
+      { id: "annotations", label: "Annotations", render: renderAnnotations },
       { id: "ocr", label: "OCR", render: renderOcr },
       { id: "llms", label: "LLMs", render: renderLlms },
       { id: "maintenance", label: "Maintenance", render: renderMaintenance },
