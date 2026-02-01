@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.9
+
+- Doc index PDF paths now persist as vault-relative when possible.
+- Zotero item picker now shows item type icons.
+
 ## 0.4.8
 
 - Section chunk markers now label sections explicitly and show the estimated page in parentheses.
@@ -8,6 +13,7 @@
 - Metadata sync now includes DOI, publisher, place, issue, volume, pages, and item type.
 - Zotero frontmatter keys now normalize to space-separated names (legacy underscore/hyphen/camel variants remain readable).
 - Metadata sync now uses a single conflict modal and tracks a last-sync snapshot to reduce repeated prompts.
+- Metadata sync snapshot is now stored in the cache instead of frontmatter.
 
 ## 0.4.7
 

@@ -6,7 +6,7 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
-import { App, Modal, Notice, SuggestModal } from "obsidian";
+import { App, Modal, Notice, SuggestModal, setIcon } from "obsidian";
 import type { MetadataDecision, ZoteroLocalItem } from "./types";
 import {
   extractYearFromItem,
@@ -35,6 +35,44 @@ export type OutputModalOptions = {
 type LanguageOption = {
   label: string;
   value: string;
+};
+
+const ZOTERO_ITEM_TYPE_ICON_MAP: Record<string, string> = {
+  artwork: "image",
+  audioRecording: "music",
+  bill: "file-text",
+  blogPost: "globe",
+  book: "book",
+  bookSection: "book-open",
+  case: "scale",
+  computerProgram: "code",
+  conferencePaper: "file-text",
+  dataset: "database",
+  dictionaryEntry: "book",
+  document: "file-text",
+  email: "mail",
+  encyclopediaArticle: "book",
+  film: "film",
+  forumPost: "message-circle",
+  hearing: "file-text",
+  interview: "mic",
+  journalArticle: "file-text",
+  letter: "mail",
+  magazineArticle: "file-text",
+  manuscript: "file-text",
+  map: "map",
+  newspaperArticle: "file-text",
+  patent: "award",
+  podcast: "mic",
+  preprint: "file-text",
+  presentation: "file-text",
+  radioBroadcast: "music",
+  report: "file-text",
+  statute: "scale",
+  thesis: "graduation-cap",
+  tvBroadcast: "film",
+  videoRecording: "film",
+  webpage: "globe",
 };
 
 const LANGUAGE_OPTIONS: LanguageOption[] = [
@@ -1036,14 +1074,21 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     const docId = getDocIdFromItem(item);
     const isIndexed = docId ? this.indexedDocIds?.has(docId) : false;
     const pdfStatus = getPdfStatusFromItem(item);
+    const itemType = String(item.data?.itemType ?? "").trim();
     if (isIndexed) {
       el.addClass("zrr-indexed-item");
     }
     if (pdfStatus === "no") {
       el.addClass("zrr-no-pdf-item");
     }
-    el.createEl("div", { text: title });
-    const metaEl = el.createEl("small");
+
+    const row = el.createDiv({ cls: "zrr-zotero-suggest-row" });
+    const iconEl = row.createSpan({ cls: "zrr-zotero-item-icon" });
+    const iconName = ZOTERO_ITEM_TYPE_ICON_MAP[itemType] ?? "file-text";
+    setIcon(iconEl, iconName);
+    const textWrap = row.createDiv({ cls: "zrr-zotero-suggest-text" });
+    textWrap.createEl("div", { text: title, cls: "zrr-zotero-suggest-title" });
+    const metaEl = textWrap.createEl("small", { cls: "zrr-zotero-suggest-meta" });
     let hasMeta = false;
     const addSeparator = (): void => {
       if (hasMeta) {

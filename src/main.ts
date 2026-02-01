@@ -1842,6 +1842,9 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!next.note_title && next.note_path) {
           next.note_title = path.basename(next.note_path, ".md");
         }
+        if (typeof next.pdf_path === "string") {
+          next.pdf_path = this.normalizeDocIndexPdfPath(next.pdf_path);
+        }
         index[docId] = next;
       }
 
@@ -6044,6 +6047,10 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!sourcePdf) {
       return "";
     }
+    if (!path.isAbsolute(sourcePdf) && !/^[A-Za-z]+:\/\//.test(sourcePdf)) {
+      const relative = normalizePath(sourcePdf);
+      return `[[${relative}]]`;
+    }
     const vaultBase = path.normalize(this.getVaultBasePath());
     const normalizedSource = path.normalize(sourcePdf);
     const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
@@ -6058,6 +6065,9 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!sourcePath) {
       return "";
     }
+    if (!path.isAbsolute(sourcePath) && !/^[A-Za-z]+:\/\//.test(sourcePath)) {
+      return normalizePath(sourcePath);
+    }
     const vaultBase = path.normalize(this.getVaultBasePath());
     const normalizedSource = path.normalize(sourcePath);
     const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
@@ -6065,6 +6075,14 @@ export default class ZoteroRagPlugin extends Plugin {
       return "";
     }
     return normalizePath(path.relative(vaultBase, normalizedSource));
+  }
+
+  private normalizeDocIndexPdfPath(pdfPath: string): string {
+    if (!pdfPath) {
+      return pdfPath;
+    }
+    const relative = this.toVaultRelativePath(pdfPath);
+    return relative || pdfPath;
   }
 
   private async isFileAccessible(filePath: string): Promise<boolean> {
@@ -6357,6 +6375,12 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!sourcePdf) {
       return false;
     }
+    if (!path.isAbsolute(sourcePdf) && !/^[A-Za-z]+:\/\//.test(sourcePdf)) {
+      const relative = normalizePath(sourcePdf);
+      const pageSuffix = pageStart ? `#page=${pageStart}` : "";
+      await this.app.workspace.openLinkText(`${relative}${pageSuffix}`, "", "tab");
+      return true;
+    }
     const vaultBase = path.normalize(this.getVaultBasePath());
     const normalizedSource = path.normalize(sourcePdf);
     const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
@@ -6492,10 +6516,37 @@ export default class ZoteroRagPlugin extends Plugin {
               map[String(entry.doc_id)] = entry;
             }
           }
+          let changed = false;
+          for (const entry of Object.values(map)) {
+            if (entry && typeof entry.pdf_path === "string") {
+              const normalized = this.normalizeDocIndexPdfPath(entry.pdf_path);
+              if (normalized !== entry.pdf_path) {
+                entry.pdf_path = normalized;
+                changed = true;
+              }
+            }
+          }
+          if (changed) {
+            await this.saveDocIndex(map);
+          }
           return map;
         }
         if (entries && typeof entries === "object") {
-          return entries as Record<string, DocIndexEntry>;
+          const map = entries as Record<string, DocIndexEntry>;
+          let changed = false;
+          for (const entry of Object.values(map)) {
+            if (entry && typeof entry.pdf_path === "string") {
+              const normalized = this.normalizeDocIndexPdfPath(entry.pdf_path);
+              if (normalized !== entry.pdf_path) {
+                entry.pdf_path = normalized;
+                changed = true;
+              }
+            }
+          }
+          if (changed) {
+            await this.saveDocIndex(map);
+          }
+          return map;
         }
       }
     } catch (error) {
@@ -6590,6 +6641,10 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     if (entry.attachment_key === undefined && existing.attachment_key) {
       next.attachment_key = existing.attachment_key;
+    }
+
+    if (typeof next.pdf_path === "string") {
+      next.pdf_path = this.normalizeDocIndexPdfPath(next.pdf_path);
     }
 
     index[entry.doc_id] = next;
