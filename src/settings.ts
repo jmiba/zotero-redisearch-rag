@@ -392,7 +392,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       new Setting(tabEl)
         .setName("Docker/Podman path")
         .setDesc(
-          "CLI path for Docker or Podman (used to start Redis Stack). Supports ~, $HOME, and %USERPROFILE%. " +
+          "CLI path for Docker or Podman (used to start Redis Stack). Leave as 'docker'/'podman' to auto-detect via PATH " +
+            "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~, $HOME, and %USERPROFILE%. " +
             "Relative paths with separators resolve from your home dir."
         )
         .addText((text) =>

@@ -9826,11 +9826,11 @@ export default class ZoteroRagPlugin extends Plugin {
     const configuredRaw = this.settings.dockerPath?.trim() || "docker";
     const configured = this.expandPathValue(configuredRaw);
     const configuredAvailable = await this.isContainerCliAvailable(configured);
-    const shouldAutoSet =
-      !configuredAvailable ||
+    const isGeneric =
       configuredRaw === "docker" ||
       configuredRaw === "podman" ||
       configuredRaw === "podman-compose";
+    const shouldAutoSet = !configuredAvailable && !isGeneric;
     if (shouldAutoSet && resolved && resolved !== configuredRaw) {
       this.settings.dockerPath = resolved;
       await this.saveSettings();

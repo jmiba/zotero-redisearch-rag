@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- Docker path autodetect no longer overwrites generic `docker`/`podman` settings with OS-specific absolute paths.
+
 ## 0.5.1
 
 - Additionally to `~`, `$HOME`, and `%USERPROFILE%` in Python/Docker/Redis path fields, relative paths with separators now resolve from the user home (use `./` for vault-relative Redis paths).
