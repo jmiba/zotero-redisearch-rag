@@ -1578,8 +1578,9 @@ export default class ZoteroRagPlugin extends Plugin {
         citations.find((item) => item.doc_id === docId) ||
         inferredCitation;
 
-      if (!citation.annotation_key && annotationKey) {
-        citation = { ...citation, annotation_key: annotationKey };
+      const effectiveAnnotationKey = citation.annotation_key || annotationKey;
+      if (!citation.annotation_key && effectiveAnnotationKey) {
+        citation = { ...citation, annotation_key: effectiveAnnotationKey };
       }
       if (!citation.attachment_key && attachmentKey) {
         citation = { ...citation, attachment_key: attachmentKey };
@@ -1592,13 +1593,13 @@ export default class ZoteroRagPlugin extends Plugin {
       const label = this.formatCitationLabel(display.noteTitle, display.pageLabel);
       const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, docId);
       if (this.settings.preferObsidianNoteForCitations && display.notePath) {
-        if (annotationKey) {
+        if (effectiveAnnotationKey) {
           const annotationAttachment =
             citation.attachment_key || attachmentKey || this.docIndex?.[docId]?.attachment_key || "";
           const pageToken = citation.page_start ? String(citation.page_start) : (pageStart || pageEnd || "0");
           const annotationLink = this.buildNoteAnnotationLink(
             display.notePath,
-            annotationKey,
+            effectiveAnnotationKey,
             annotationAttachment,
             pageToken,
             label
@@ -1610,7 +1611,7 @@ export default class ZoteroRagPlugin extends Plugin {
           replacements.set(token, this.buildNoteLink(display.notePath, label));
           continue;
         }
-        if (chunkId && !annotationKey) {
+        if (chunkId && !effectiveAnnotationKey) {
           replacements.set(token, this.buildNoteChunkLink(display.notePath, chunkId, label));
           continue;
         }

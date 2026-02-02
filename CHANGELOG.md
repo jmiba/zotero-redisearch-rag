@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+
+- Inline annotation citations now resolve to annotation blocks instead of missing `zrr-chunk` anchors.
+
 ## 0.5.2
 
 - Docker path autodetect no longer overwrites generic `docker`/`podman` settings with OS-specific absolute paths.
