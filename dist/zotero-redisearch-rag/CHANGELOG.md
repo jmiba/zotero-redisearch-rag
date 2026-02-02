@@ -3,6 +3,7 @@
 ## 0.5.3
 
 - Inline annotation citations now resolve to annotation blocks instead of missing `zrr-chunk` anchors.
+- Docker autodetect no longer overwrites generic `docker`/`podman` values when starting Redis, keeping settings portable across OSes.
 
 ## 0.5.2
 

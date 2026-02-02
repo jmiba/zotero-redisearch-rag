@@ -10089,14 +10089,15 @@ export default class ZoteroRagPlugin extends Plugin {
       const dataDir = this.getRedisDataDir();
       await fs.mkdir(dataDir, { recursive: true });
       const dockerPath = await this.resolveDockerPath();
-      const configuredDockerPath = this.settings.dockerPath?.trim() || "docker";
-      const shouldAutoSet =
-        !(await this.isContainerCliAvailable(configuredDockerPath)) ||
-        !configuredDockerPath ||
-        configuredDockerPath === "docker" ||
-        configuredDockerPath === "podman" ||
-        configuredDockerPath === "podman-compose";
-      if (shouldAutoSet && dockerPath && dockerPath !== configuredDockerPath) {
+      const configuredRaw = this.settings.dockerPath?.trim() || "docker";
+      const configured = this.resolveUserPath(configuredRaw);
+      const isGeneric =
+        configuredRaw === "docker" ||
+        configuredRaw === "podman" ||
+        configuredRaw === "podman-compose";
+      const configuredAvailable = await this.isContainerCliAvailable(configured);
+      const shouldAutoSet = !configuredAvailable && !isGeneric;
+      if (shouldAutoSet && dockerPath && dockerPath !== configuredRaw) {
         this.settings.dockerPath = dockerPath;
         await this.saveSettings();
         if (!silent) {
