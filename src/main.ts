@@ -9285,7 +9285,25 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private resolvePythonPath(): string {
-    return this.expandPathValue(this.settings.pythonPath || "");
+    return this.resolveUserPath(this.settings.pythonPath || "");
+  }
+
+  private resolveUserPath(value: string, baseDir?: string): string {
+    const expanded = this.expandPathValue(value);
+    if (!expanded) {
+      return expanded;
+    }
+    const hasSeparator = expanded.includes("/") || expanded.includes("\\");
+    if (!hasSeparator) {
+      return expanded;
+    }
+    if (path.isAbsolute(expanded)) {
+      return expanded;
+    }
+    if (baseDir && (expanded.startsWith("./") || expanded.startsWith(".\\"))) {
+      return path.join(baseDir, expanded.slice(2));
+    }
+    return path.join(os.homedir(), expanded);
   }
 
   private getPluginDir(): string {
@@ -9586,15 +9604,13 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private getRedisDataDir(): string {
-    const envOverride = this.expandPathValue(process.env.ZRR_DATA_DIR || "");
+    const envOverride = this.resolveUserPath(process.env.ZRR_DATA_DIR || "");
     if (envOverride) {
       return envOverride;
     }
-    const override = this.expandPathValue(this.settings.redisDataDirOverride || "");
+    const override = this.resolveUserPath(this.settings.redisDataDirOverride || "", this.getVaultBasePath());
     if (!this.settings.autoAssignRedisPort && override) {
-      return path.isAbsolute(override)
-        ? override
-        : path.join(this.getVaultBasePath(), override);
+      return override;
     }
     return path.join(this.getVaultBasePath(), CACHE_ROOT, "redis-data");
   }
@@ -9606,7 +9622,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async resolveDockerPath(): Promise<string> {
     const configuredRaw = this.settings.dockerPath?.trim();
-    const configured = configuredRaw ? this.expandPathValue(configuredRaw) : "";
+    const configured = configuredRaw ? this.resolveUserPath(configuredRaw) : "";
     const dockerCandidates = [
       "/opt/homebrew/bin/docker",
       "/usr/local/bin/docker",

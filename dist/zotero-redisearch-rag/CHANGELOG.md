@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Additioanlly to `~`, `$HOME`, and `%USERPROFILE%` in Python/Docker/Redis path fields, relative paths with separators now resolve from the user home (use `./` for vault-relative Redis paths).
+
 ## 0.5.0 Bugfix Release
 
 - Annotation import now retries Web API lookups and warns when Web API access is missing.

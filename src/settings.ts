@@ -341,7 +341,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setDesc(
           "Optional path to the Python interpreter used to create or run the plugin env. " +
             "Leave blank to auto-detect (python3.13/3.12/3.11/3.10/python3/python, or py on Windows). " +
-            "Supports ~, $HOME, and %USERPROFILE%."
+            "Supports ~, $HOME, and %USERPROFILE%. Relative paths with separators resolve from your home dir."
         )
         .addText((text) =>
           text
@@ -391,7 +391,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Docker/Podman path")
-        .setDesc("CLI path for Docker or Podman (used to start Redis Stack). Supports ~, $HOME, and %USERPROFILE%.")
+        .setDesc(
+          "CLI path for Docker or Podman (used to start Redis Stack). Supports ~, $HOME, and %USERPROFILE%. " +
+            "Relative paths with separators resolve from your home dir."
+        )
         .addText((text) =>
           text
             .setPlaceholder("docker")
@@ -418,7 +421,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Redis data directory override")
         .setDesc(
           "Optional path to store Redis persistence when auto-assign is off. " +
-            "Env var ZRR_DATA_DIR overrides this setting. Supports ~, $HOME, and %USERPROFILE%."
+            "Env var ZRR_DATA_DIR overrides this setting. Supports ~, $HOME, and %USERPROFILE%. " +
+            "Relative paths with separators resolve from your home dir; use ./ to keep it vault-relative."
         )
         .addText((text) =>
           text
