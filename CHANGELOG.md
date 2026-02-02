@@ -2,7 +2,7 @@
 
 ## 0.5.1
 
-- Additioanlly to `~`, `$HOME`, and `%USERPROFILE%` in Python/Docker/Redis path fields, relative paths with separators now resolve from the user home (use `./` for vault-relative Redis paths).
+- Additionally to `~`, `$HOME`, and `%USERPROFILE%` in Python/Docker/Redis path fields, relative paths with separators now resolve from the user home (use `./` for vault-relative Redis paths).
 
 ## 0.5.0 Bugfix Release
 

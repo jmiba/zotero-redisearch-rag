@@ -3,7 +3,7 @@
   "name": "Zotero Redis RAG",
   "version": "0.5.1",
   "minAppVersion": "1.5.0",
-  "description": "Zotero -> Docling -> Redis Stack RAG orchestrator",
+  "description": "Zotero import, Docling extraction, and Redis Stack indexing for RAG in Obsidian",
   "author": "Jens Mittelbach",
   "authorUrl": "https://www.jensmittelbach.de"
 }
