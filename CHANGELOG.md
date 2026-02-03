@@ -2,6 +2,13 @@
 
 ## 0.5.3
 
+- Image/rect annotations now embed as images in annotation callouts when available.
+- Annotation fetch now requests `annotationImage` from Zotero and falls back if the API rejects the include.
+- Annotation sync no longer sends `annotationText` for non-highlight/underline types to avoid Web API 400s.
+- Added Zotero companion integration (settings + cached-only fetch) for image/ink annotations.
+- Zotero companion settings now include install helpers and a status check button.
+- Zotero companion add-on now ships with an update URL and `updates.json` manifest.
+- Zotero companion settings can generate a token, verify the bundled XPI, and open Zotero Add-ons.
 - Inline annotation citations now resolve to annotation blocks instead of missing `zrr-chunk` anchors.
 - Docker autodetect no longer overwrites generic `docker`/`podman` values when starting Redis, keeping settings portable across OSes.
 

@@ -260,6 +260,12 @@ The local API is read-only. For write-back (language field) and for fallback rea
 
 If you want Web API file downloads, your Zotero library must be synced and the API key must allow file access.
 
+## Zotero companion (annotation images)
+
+Area/drawing annotation images are cached locally by Zotero and are not exposed via the HTTP API.
+If you want those images embedded in Obsidian callouts, install the companion plugin in `zotero-companion/`
+and enable it in the Obsidian plugin settings (Annotations -> Zotero companion).
+
 ## Reindexing and cache
 
 - Command palette -> "Reindex Redis from cached chunks"

@@ -1,4 +1,7 @@
 import { App, DropdownComponent, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
+import { randomBytes } from "crypto";
+import { promises as fs } from "fs";
+import path from "path";
 
 export type OcrMode = "auto" | "force_low_quality" | "force";
 export type OcrEngine =
@@ -39,6 +42,10 @@ export interface ZoteroRagSettings {
   noteBodyTemplate: string;
   annotationPageLabel: string;
   annotationColorMap: AnnotationColorMap;
+  includeAnnotationImages: boolean;
+  zoteroCompanionEnabled: boolean;
+  zoteroCompanionBaseUrl: string;
+  zoteroCompanionToken: string;
   llmProviderProfiles: LlmProviderProfile[];
   embedProviderProfileId: string;
   chatProviderProfileId: string;
@@ -175,6 +182,10 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     orange: { heading: "Weiterverfolgen", callout: "pursue" },
     gray: { heading: "Zitierbare Stellen", callout: "cite" },
   },
+  includeAnnotationImages: true,
+  zoteroCompanionEnabled: false,
+  zoteroCompanionBaseUrl: "http://127.0.0.1:23120",
+  zoteroCompanionToken: "",
 
   // LLM Provider Profiles
   llmProviderProfiles: [
@@ -287,6 +298,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     deleteChatSession?: (sessionId: string) => Promise<void>;
     openLogFile?: () => Promise<void>;
     clearLogFile?: () => Promise<void>;
+    checkZoteroCompanionHealth: () => Promise<void>;
+    openZoteroAddons: () => Promise<void>;
+    manifest: { dir?: string };
   };
   private activeTab: SettingsTabId = "prerequisites";
 
@@ -307,6 +321,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       cancelRecreateMissingNotesFromCache: () => void;
       openLogFile: () => Promise<void>;
       clearLogFile: () => Promise<void>;
+      checkZoteroCompanionHealth: () => Promise<void>;
+      openZoteroAddons: () => Promise<void>;
+      manifest: { dir?: string };
     }
   ) {
     super(app, plugin as any);
@@ -757,6 +774,155 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             .onChange(async (value) => {
               this.plugin.settings.annotationPageLabel = value.trim() || "Page";
               await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Include annotation images")
+        .setDesc("Embed image/rect annotations as images in callouts when available.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.includeAnnotationImages).onChange(async (value) => {
+            this.plugin.settings.includeAnnotationImages = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      tabEl.createEl("h3", { text: "Zotero companion" });
+      tabEl.createEl("p", {
+        text: "Install the Zotero companion add-on to enable cached image/rect annotations. " +
+          "Steps: 1) Copy the XPI path below, 2) In Zotero, open Tools → Add-ons, " +
+          "3) Install from file and select the XPI, 4) Restart Zotero.",
+      });
+
+      new Setting(tabEl)
+        .setName("Use Zotero companion for annotation images")
+        .setDesc("Fetch cached annotation images from a local Zotero companion plugin.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.zoteroCompanionEnabled).onChange(async (value) => {
+            this.plugin.settings.zoteroCompanionEnabled = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(tabEl)
+        .setName("Zotero companion base URL")
+        .setDesc("Local URL for the Zotero companion plugin (loopback only).")
+        .addText((text) =>
+          text
+            .setPlaceholder("http://127.0.0.1:23120")
+            .setValue(this.plugin.settings.zoteroCompanionBaseUrl)
+            .onChange(async (value) => {
+              this.plugin.settings.zoteroCompanionBaseUrl = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
+      let companionTokenInput: TextComponent | null = null;
+
+      new Setting(tabEl)
+        .setName("Zotero companion token")
+        .setDesc("Optional shared token for the companion endpoint.")
+        .addText((text) => {
+          maskApiKeyInput(text);
+          companionTokenInput = text;
+          text
+            .setPlaceholder("optional-token")
+            .setValue(this.plugin.settings.zoteroCompanionToken)
+            .onChange(async (value) => {
+              this.plugin.settings.zoteroCompanionToken = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+
+      tabEl.createEl("h4", { text: "Companion maintenance" });
+
+      new Setting(tabEl)
+        .setName("Install companion add-on")
+        .setDesc("Copy the bundled XPI path for quick installation in Zotero.")
+        .addButton((button) =>
+          button
+            .setButtonText("Copy XPI path")
+            .setCta()
+            .onClick(async () => {
+              const xpiPath = this.getCompanionXpiPath();
+              if (!xpiPath) {
+                new Notice("Unable to resolve the companion XPI path for this vault.");
+                return;
+              }
+              const exists = await this.companionXpiExists(xpiPath);
+              if (!exists) {
+                new Notice(`Companion XPI not found: ${xpiPath}`);
+                return;
+              }
+              try {
+                await navigator.clipboard.writeText(xpiPath);
+                new Notice(`Copied companion XPI path: ${xpiPath}`);
+              } catch (error) {
+                new Notice("Failed to copy XPI path to clipboard.");
+                console.warn("Failed to copy companion XPI path", error);
+              }
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Verify companion XPI")
+        .setDesc("Checks whether the bundled XPI exists in this plugin install.")
+        .addButton((button) =>
+          button
+            .setButtonText("Verify XPI")
+            .onClick(async () => {
+              const xpiPath = this.getCompanionXpiPath();
+              if (!xpiPath) {
+                new Notice("Unable to resolve the companion XPI path for this vault.");
+                return;
+              }
+              const exists = await this.companionXpiExists(xpiPath);
+              new Notice(exists ? `Companion XPI found: ${xpiPath}` : `Companion XPI not found: ${xpiPath}`);
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Open Zotero Add-ons")
+        .setDesc("Launch Zotero and open the Add-ons window (Tools → Add-ons).")
+        .addButton((button) =>
+          button
+            .setButtonText("Open Add-ons")
+            .onClick(async () => {
+              await this.plugin.openZoteroAddons();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Check companion status")
+        .setDesc("Ping the companion /health endpoint.")
+        .addButton((button) =>
+          button
+            .setButtonText("Check status")
+            .onClick(async () => {
+              await this.plugin.checkZoteroCompanionHealth();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Generate companion token")
+        .setDesc("Creates a secure token and copies it to your clipboard.")
+        .addButton((button) =>
+          button
+            .setButtonText("Generate token")
+            .onClick(async () => {
+              const token = randomBytes(32).toString("base64url");
+              this.plugin.settings.zoteroCompanionToken = token;
+              await this.plugin.saveSettings();
+              if (companionTokenInput) {
+                companionTokenInput.setValue(token);
+              }
+              try {
+                await navigator.clipboard.writeText(token);
+                new Notice("Generated and copied companion token.");
+              } catch (error) {
+                new Notice("Generated token, but failed to copy to clipboard.");
+                console.warn("Failed to copy generated companion token", error);
+              }
             })
         );
 
@@ -2013,5 +2179,24 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       ? this.activeTab
       : tabs[0].id;
     setActiveTab(initialTab);
+  }
+
+  private getCompanionXpiPath(): string | null {
+    const adapter: any = this.app.vault.adapter;
+    const basePath = typeof adapter?.getBasePath === "function" ? adapter.getBasePath() : null;
+    const pluginDir = this.plugin?.manifest?.dir;
+    if (!basePath || !pluginDir) {
+      return null;
+    }
+    return path.join(basePath, pluginDir, "zotero-companion", "zrr-companion.xpi");
+  }
+
+  private async companionXpiExists(xpiPath: string): Promise<boolean> {
+    try {
+      await fs.access(xpiPath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

@@ -175,6 +175,8 @@ type AnnotationEntry = {
   tags: string[];
   sortIndex: number;
   rawValues: ZoteroItemValues;
+  imagePath?: string;
+  imageHash?: string;
 };
 
 type ParsedAnnotationNote = {
@@ -186,12 +188,15 @@ type ParsedAnnotationNote = {
   text: string;
   comment: string;
   tags: string[];
+  imagePath?: string;
+  imageHash?: string;
 };
 
 type AnnotationSnapshotEntry = {
   text: string;
   comment: string;
   tags: string[];
+  image_hash?: string;
 };
 
 type AnnotationSnapshotCacheEntry = {
@@ -380,6 +385,18 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "redis-diagnostics",
       name: "Show Redis diagnostics",
       callback: () => this.showRedisDiagnostics(),
+    });
+
+    this.addCommand({
+      id: "zotero-companion-health",
+      name: "Check Zotero companion status",
+      callback: () => this.checkZoteroCompanionHealth(),
+    });
+
+    this.addCommand({
+      id: "zotero-open-addons",
+      name: "Open Zotero Add-ons",
+      callback: () => this.openZoteroAddons(),
     });
 
     this.addCommand({
@@ -740,6 +757,7 @@ export default class ZoteroRagPlugin extends Plugin {
         docId,
         pdfLink,
         attachment.key,
+        notePath,
         itemPath,
         doclingContent
       );
@@ -4827,6 +4845,16 @@ export default class ZoteroRagPlugin extends Plugin {
         await this.updateDocIndex({ doc_id: docId, attachment_key: attachmentKey });
       }
       const noteAnnotations = this.parseAnnotationBlock(blockRange.block, attachmentKey);
+      const existingImages = new Map<string, { path: string; hash: string }>();
+      for (const noteEntry of noteAnnotations) {
+        if (noteEntry.key && noteEntry.imagePath) {
+          existingImages.set(noteEntry.key, {
+            path: noteEntry.imagePath,
+            hash: noteEntry.imageHash || this.extractAnnotationImageHashFromPath(noteEntry.imagePath),
+          });
+        }
+      }
+      await this.attachAnnotationImages(docId, attachmentKey, zoteroAnnotations, file.path, existingImages);
       const noteMap = new Map<string, ParsedAnnotationNote>();
       for (const noteEntry of noteAnnotations) {
         if (noteEntry.key) {
@@ -4870,34 +4898,40 @@ export default class ZoteroRagPlugin extends Plugin {
           zoteroEntry,
           zoteroEntry.annotationType
         );
+        const imageChanged = (noteSnapshot.image_hash || "") !== (zotSnapshot.image_hash || "");
 
         if (!snapshotEntry) {
-          if (!this.annotationSnapshotsEqual(noteSnapshot, zotSnapshot)) {
+          if (!this.annotationSnapshotsEqualIgnoringImage(noteSnapshot, zotSnapshot)) {
             decisions[key] = "note";
             noteEditsDetected = true;
+          } else if (imageChanged) {
+            needsNoteRefresh = true;
+            forceNoteRefresh = true;
           }
           continue;
         }
 
         const noteChanged = !this.annotationSnapshotsEqual(noteSnapshot, snapshotEntry);
         const zoteroChanged = !this.annotationSnapshotsEqual(zotSnapshot, snapshotEntry);
-        if (noteChanged && !zoteroChanged) {
+        const noteChangedNoImage = !this.annotationSnapshotsEqualIgnoringImage(noteSnapshot, snapshotEntry);
+        const zoteroChangedNoImage = !this.annotationSnapshotsEqualIgnoringImage(zotSnapshot, snapshotEntry);
+        if (noteChangedNoImage && !zoteroChangedNoImage) {
           decisions[key] = "note";
           noteEditsDetected = true;
-          continue;
-        }
-        if (!noteChanged && zoteroChanged) {
+        } else if (!noteChangedNoImage && zoteroChangedNoImage) {
           decisions[key] = "zotero";
           needsNoteRefresh = true;
-          continue;
-        }
-        if (noteChanged && zoteroChanged) {
+        } else if (noteChangedNoImage && zoteroChangedNoImage) {
           conflicts.push({
             key,
             title: this.formatAnnotationConflictTitle(zoteroEntry),
             noteValue: this.formatAnnotationConflictValue(noteSnapshot, noteEntry.tags),
             zoteroValue: this.formatAnnotationConflictValue(zotSnapshot, zoteroEntry.tags),
           });
+        }
+        if (imageChanged && (noteChanged || zoteroChanged)) {
+          needsNoteRefresh = true;
+          forceNoteRefresh = true;
         }
       }
 
@@ -5164,6 +5198,62 @@ export default class ZoteroRagPlugin extends Plugin {
     return { pageLabel, pageIndex };
   }
 
+  private extractAnnotationImagePayload(
+    values: ZoteroItemValues
+  ): { buffer: Buffer; mime: string; ext: string } | null {
+    const raw =
+      values.annotationImage
+      ?? values.annotationImageData
+      ?? values.annotationImageBase64;
+    if (!raw) {
+      return null;
+    }
+    let buffer: Buffer | null = null;
+    let mime = "";
+
+    if (Buffer.isBuffer(raw)) {
+      buffer = raw;
+    } else if (ArrayBuffer.isView(raw)) {
+      buffer = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+    } else if (raw instanceof ArrayBuffer) {
+      buffer = Buffer.from(raw);
+    } else if (typeof raw === "string") {
+      let text = raw.trim();
+      if (!text) {
+        return null;
+      }
+      const dataUrlMatch = text.match(/^data:([^;]+);base64,(.*)$/i);
+      if (dataUrlMatch) {
+        mime = this.normalizeAnnotationImageMime(dataUrlMatch[1]);
+        text = dataUrlMatch[2];
+      }
+      if (/^(https?|file|zotero):/i.test(text)) {
+        return null;
+      }
+      text = text.replace(/^base64,/, "").replace(/\s+/g, "");
+      if (!text) {
+        return null;
+      }
+      buffer = Buffer.from(text, "base64");
+    }
+
+    if (!buffer || !buffer.length) {
+      return null;
+    }
+
+    if (!mime) {
+      const hint = this.normalizeAnnotationImageMime(
+        values.annotationImageMimeType ?? values.annotationImageType ?? values.annotationImageFormat
+      );
+      mime = hint || this.guessAnnotationImageMime(buffer) || "image/png";
+    }
+    const ext =
+      this.annotationImageExtensionFromMime(mime)
+      || this.annotationImageExtensionFromMime(this.guessAnnotationImageMime(buffer))
+      || "png";
+    return { buffer, mime, ext };
+  }
+
   private parseZoteroAnnotationItem(
     item: ZoteroLocalItem,
     attachmentKey: string
@@ -5227,14 +5317,23 @@ export default class ZoteroRagPlugin extends Plugin {
     };
     let children: any[] = [];
     try {
-      children = await this.fetchZoteroChildrenLocal(attachmentKey);
+      children = await this.fetchZoteroChildrenLocal(attachmentKey, { includeAnnotationImage: true });
     } catch (error) {
-      console.warn("Failed to fetch Zotero annotation items from local API", error);
+      try {
+        children = await this.fetchZoteroChildrenLocal(attachmentKey);
+      } catch (fallbackError) {
+        console.warn("Failed to fetch Zotero annotation items from local API", fallbackError);
+      }
     }
     let annotations = parseAnnotations(children);
     if (!annotations.length && canUseWebApi) {
       try {
-        const webChildren = await this.fetchZoteroChildrenWeb(attachmentKey);
+        let webChildren: any[] = [];
+        try {
+          webChildren = await this.fetchZoteroChildrenWeb(attachmentKey, { includeAnnotationImage: true });
+        } catch (error) {
+          webChildren = await this.fetchZoteroChildrenWeb(attachmentKey);
+        }
         const webAnnotations = parseAnnotations(webChildren);
         if (webAnnotations.length) {
           annotations = webAnnotations;
@@ -5287,6 +5386,191 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
     return { attachmentKey: primaryKey, annotations: primary };
+  }
+
+  private async attachAnnotationImages(
+    docId: string,
+    attachmentKey: string,
+    annotations: AnnotationEntry[],
+    notePath?: string,
+    existingImages?: Map<string, { path: string; hash: string }>
+  ): Promise<void> {
+    if (!this.settings.includeAnnotationImages || !annotations.length) {
+      return;
+    }
+    const outputDir = await this.resolveAnnotationImageOutputDir(notePath);
+    if (!outputDir) {
+      return;
+    }
+    const docFolder = this.sanitizeFileName(docId || attachmentKey) || "annotations";
+    const relDir = normalizePath(path.join(outputDir.relative || "", docFolder));
+    const absDir = path.normalize(path.join(outputDir.absolute, docFolder));
+    if (relDir) {
+      await this.ensureFolder(relDir);
+    } else {
+      await fs.mkdir(absDir, { recursive: true });
+    }
+    const adapter = this.app.vault.adapter;
+    const desiredPaths = new Map<string, string>();
+    for (const annotation of annotations) {
+      const annotationType = String(annotation.annotationType || "").trim().toLowerCase();
+      const wantsImage = annotationType === "image" || annotationType === "ink";
+      let payload = this.extractAnnotationImagePayload(annotation.rawValues ?? {});
+      if (!payload && wantsImage && this.settings.zoteroCompanionEnabled) {
+        payload = await this.fetchCompanionAnnotationImage(annotation.key);
+      }
+      if (!payload) {
+        const existing = existingImages?.get(annotation.key);
+        if (existing?.path && await adapter.exists(existing.path)) {
+          annotation.imagePath = existing.path;
+          annotation.imageHash = existing.hash;
+          desiredPaths.set(annotation.key, existing.path);
+        }
+        continue;
+      }
+      const hash = createHash("sha1").update(payload.buffer).digest("hex").slice(0, 12);
+      const filename = `zrr-annotation-${annotation.key}-${hash}.${payload.ext}`;
+      const relativePath = normalizePath(path.join(relDir, filename));
+      try {
+        if (!(await adapter.exists(relativePath))) {
+          await adapter.writeBinary(relativePath, this.bufferToArrayBuffer(payload.buffer));
+        }
+        annotation.imagePath = relativePath;
+        annotation.imageHash = hash;
+        desiredPaths.set(annotation.key, relativePath);
+      } catch (error) {
+        console.warn("Failed to write annotation image", { annotationKey: annotation.key, error });
+      }
+    }
+
+    if (relDir && (await adapter.exists(relDir))) {
+      try {
+        const listing = await adapter.list(relDir);
+        for (const file of listing.files) {
+          const base = path.basename(file);
+          const match = base.match(/^zrr-annotation-([A-Z0-9]{8})-[a-f0-9]{12}\./i);
+          if (!match) {
+            continue;
+          }
+          const key = match[1].toUpperCase();
+          const keepPath = desiredPaths.get(key);
+          if (!keepPath || normalizePath(keepPath) !== normalizePath(file)) {
+            await adapter.remove(file);
+          }
+        }
+      } catch (error) {
+        console.warn("Failed to clean up annotation images", error);
+      }
+    }
+  }
+
+  private async fetchCompanionAnnotationImage(
+    annotationKey: string
+  ): Promise<{ buffer: Buffer; mime: string; ext: string } | null> {
+    const baseUrl = (this.settings.zoteroCompanionBaseUrl || "").trim();
+    if (!baseUrl) {
+      return null;
+    }
+    const url = `${baseUrl.replace(/\/$/, "")}/annotations/${encodeURIComponent(annotationKey)}/image`;
+    const headers: Record<string, string> = {};
+    const token = (this.settings.zoteroCompanionToken || "").trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    try {
+      const response = await this.requestLocalApiRaw(url, { headers, timeoutMs: 5000 });
+      if (response.statusCode === 200) {
+        const contentType = response.headers["content-type"];
+        const mime = Array.isArray(contentType) ? contentType[0] : contentType ?? "";
+        return this.buildAnnotationImagePayloadFromBuffer(response.body, mime);
+      }
+      if (response.statusCode === 204 || response.statusCode === 404) {
+        return null;
+      }
+      console.warn("Unexpected Zotero companion response", {
+        annotationKey,
+        status: response.statusCode,
+      });
+    } catch (error) {
+      console.warn("Failed to fetch annotation image from Zotero companion", error);
+    }
+    return null;
+  }
+
+  public async checkZoteroCompanionHealth(): Promise<void> {
+    const baseUrl = (this.settings.zoteroCompanionBaseUrl || "").trim();
+    if (!baseUrl) {
+      new Notice("Zotero companion base URL is not set.");
+      return;
+    }
+    const url = `${baseUrl.replace(/\/$/, "")}/health`;
+    const headers: Record<string, string> = {};
+    const token = (this.settings.zoteroCompanionToken || "").trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    try {
+      const response = await this.requestLocalApiRaw(url, { headers, timeoutMs: 3000 });
+      if (response.statusCode === 200) {
+        try {
+          const payload = JSON.parse(response.body.toString("utf8"));
+          if (payload?.ok) {
+            new Notice("Zotero companion: OK.");
+            return;
+          }
+        } catch {
+          // fall through
+        }
+        new Notice("Zotero companion responded but did not return OK.");
+        return;
+      }
+      if (response.statusCode === 401) {
+        new Notice("Zotero companion: unauthorized (check token).");
+        return;
+      }
+      new Notice(`Zotero companion: HTTP ${response.statusCode}.`);
+    } catch (error) {
+      console.warn("Zotero companion health check failed", error);
+      new Notice("Zotero companion: unreachable.");
+    }
+  }
+
+  public async openZoteroAddons(): Promise<void> {
+    try {
+      const platform = process.platform;
+      if (platform === "darwin") {
+        await this.spawnDetached(["open", "-a", "Zotero"]);
+      } else if (platform === "win32") {
+        await this.spawnDetached(["cmd", "/c", "start", "", "zotero"]);
+      } else {
+        await this.spawnDetached(["zotero"]);
+      }
+      new Notice("Opened Zotero. Go to Tools → Add-ons.");
+    } catch (error) {
+      console.warn("Failed to open Zotero add-ons", error);
+      new Notice("Unable to open Zotero automatically. Open Zotero and go to Tools → Add-ons.");
+    }
+  }
+
+  private async spawnDetached(commandArgs: string[]): Promise<void> {
+    const [command, ...args] = commandArgs;
+    if (!command) {
+      throw new Error("Missing command");
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const child = spawn(command, args, { detached: true, stdio: "ignore" });
+      child.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      });
+      child.unref();
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    });
   }
 
   private maybeWarnMissingAnnotationApi(docId: string, attachmentKey: string): void {
@@ -5402,6 +5686,98 @@ export default class ZoteroRagPlugin extends Plugin {
       return String(value);
     }
     return "";
+  }
+
+  private normalizeAnnotationImageMime(value: unknown): string {
+    const raw = coerceString(value).toLowerCase();
+    if (!raw) {
+      return "";
+    }
+    if (raw.includes("/")) {
+      return raw;
+    }
+    if (raw === "png") {
+      return "image/png";
+    }
+    if (raw === "jpg" || raw === "jpeg") {
+      return "image/jpeg";
+    }
+    if (raw === "gif") {
+      return "image/gif";
+    }
+    if (raw === "webp") {
+      return "image/webp";
+    }
+    return "";
+  }
+
+  private buildAnnotationImagePayloadFromBuffer(
+    buffer: Buffer,
+    mimeRaw?: string
+  ): { buffer: Buffer; mime: string; ext: string } | null {
+    if (!buffer || !buffer.length) {
+      return null;
+    }
+    let mime = this.normalizeAnnotationImageMime(mimeRaw);
+    if (!mime) {
+      mime = this.guessAnnotationImageMime(buffer) || "image/png";
+    }
+    const ext =
+      this.annotationImageExtensionFromMime(mime)
+      || this.annotationImageExtensionFromMime(this.guessAnnotationImageMime(buffer))
+      || "png";
+    return { buffer, mime, ext };
+  }
+
+  private guessAnnotationImageMime(buffer: Buffer): string {
+    if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+      return "image/jpeg";
+    }
+    if (
+      buffer.length >= 4
+      && buffer[0] === 0x89
+      && buffer[1] === 0x50
+      && buffer[2] === 0x4e
+      && buffer[3] === 0x47
+    ) {
+      return "image/png";
+    }
+    if (buffer.length >= 6 && buffer.slice(0, 3).toString("ascii") === "GIF") {
+      return "image/gif";
+    }
+    if (
+      buffer.length >= 12
+      && buffer.slice(0, 4).toString("ascii") === "RIFF"
+      && buffer.slice(8, 12).toString("ascii") === "WEBP"
+    ) {
+      return "image/webp";
+    }
+    return "";
+  }
+
+  private annotationImageExtensionFromMime(mime: string): string {
+    switch (mime.toLowerCase()) {
+      case "image/png":
+        return "png";
+      case "image/jpeg":
+      case "image/jpg":
+        return "jpg";
+      case "image/gif":
+        return "gif";
+      case "image/webp":
+        return "webp";
+      default:
+        return "";
+    }
+  }
+
+  private extractAnnotationImageHashFromPath(imagePath: string): string {
+    if (!imagePath) {
+      return "";
+    }
+    const base = path.basename(imagePath);
+    const match = base.match(/^zrr-annotation-[A-Z0-9]{8}-([a-f0-9]{12})\./i);
+    return match ? match[1].toLowerCase() : "";
   }
 
   private normalizeAnnotationTags(tags: string[]): string[] {
@@ -5953,19 +6329,41 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private annotationSnapshotFromEntry(
-    entry: { text: string; comment: string; tags: string[] },
+    entry: { text: string; comment: string; tags: string[]; imageHash?: string },
     annotationType?: string
   ): AnnotationSnapshotEntry {
     const normalizedText = this.normalizeAnnotationText(entry.text);
     const normalizedComment = this.normalizeAnnotationText(entry.comment);
     const normalizedTags = this.normalizeAnnotationTags(entry.tags ?? []);
+    const imageHash = entry.imageHash ? entry.imageHash.toLowerCase() : "";
     if (annotationType === "note" && !normalizedComment && normalizedText) {
-      return { text: "", comment: normalizedText, tags: normalizedTags };
+      return { text: "", comment: normalizedText, tags: normalizedTags, image_hash: imageHash };
     }
-    return { text: normalizedText, comment: normalizedComment, tags: normalizedTags };
+    return { text: normalizedText, comment: normalizedComment, tags: normalizedTags, image_hash: imageHash };
   }
 
   private annotationSnapshotsEqual(
+    left: AnnotationSnapshotEntry,
+    right: AnnotationSnapshotEntry
+  ): boolean {
+    if (left.text !== right.text || left.comment !== right.comment) {
+      return false;
+    }
+    if ((left.image_hash || "") !== (right.image_hash || "")) {
+      return false;
+    }
+    if (left.tags.length !== right.tags.length) {
+      return false;
+    }
+    for (let i = 0; i < left.tags.length; i += 1) {
+      if (left.tags[i] !== right.tags[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private annotationSnapshotsEqualIgnoringImage(
     left: AnnotationSnapshotEntry,
     right: AnnotationSnapshotEntry
   ): boolean {
@@ -6166,18 +6564,26 @@ export default class ZoteroRagPlugin extends Plugin {
       const values = entry.rawValues ?? {};
       let noteText = this.normalizeAnnotationText(note.text);
       let noteComment = this.normalizeAnnotationText(note.comment);
-      if (entry.annotationType === "note" && !noteComment && noteText) {
+      const annotationType = String(entry.annotationType || "").trim().toLowerCase();
+      const allowText = annotationType === "highlight" || annotationType === "underline";
+      if (!allowText && !noteComment && noteText) {
+        noteComment = noteText;
+        noteText = "";
+      }
+      if (annotationType === "note" && !noteComment && noteText) {
         noteComment = noteText;
         noteText = "";
       }
       const payload: Partial<ZoteroItemValues> = {
-        annotationText: noteText,
         annotationComment: noteComment,
         tags: this.buildZoteroTags(note.tags, values?.tags),
       };
+      if (allowText) {
+        payload.annotationText = noteText;
+      }
       try {
         await this.updateZoteroItemFields(entry.key, values, payload);
-        entry.text = noteText;
+        entry.text = allowText ? noteText : "";
         entry.comment = noteComment;
         entry.tags = this.normalizeAnnotationTags(note.tags);
       } catch (error) {
@@ -6895,20 +7301,36 @@ export default class ZoteroRagPlugin extends Plugin {
     return Boolean(attachment);
   }
 
-  private async fetchZoteroChildrenLocal(itemKey: string): Promise<any[]> {
-    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children`);
+  private async fetchZoteroChildrenLocal(
+    itemKey: string,
+    options: { includeAnnotationImage?: boolean } = {}
+  ): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (options.includeAnnotationImage) {
+      params.set("include", "annotationImage");
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children${suffix}`);
     const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
     return JSON.parse(payload.toString("utf8"));
   }
 
-  private async fetchZoteroChildrenWeb(itemKey: string): Promise<any[]> {
+  private async fetchZoteroChildrenWeb(
+    itemKey: string,
+    options: { includeAnnotationImage?: boolean } = {}
+  ): Promise<any[]> {
     if (!this.canUseWebApi()) {
       const resolved = await this.ensureWebApiLibraryId();
       if (!resolved || !this.canUseWebApi()) {
         throw new Error("Zotero Web API is not configured.");
       }
     }
-    const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children`);
+    const params = new URLSearchParams();
+    if (options.includeAnnotationImage) {
+      params.set("include", "annotationImage");
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children${suffix}`);
     const payload = await this.requestWebApi(webUrl, `Zotero Web API children request failed for ${webUrl}`);
     return JSON.parse(payload.toString("utf8"));
   }
@@ -6975,7 +7397,12 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private requestLocalApiRaw(
     url: string,
-    options: { method?: string; headers?: Record<string, string>; body?: Buffer | string } = {}
+    options: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: Buffer | string;
+      timeoutMs?: number;
+    } = {}
   ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
     return new Promise((resolve, reject) => {
       const parsed = new URL(url);
@@ -6986,6 +7413,8 @@ export default class ZoteroRagPlugin extends Plugin {
         ...(options.headers ?? {}),
       };
       const body = options.body;
+      const timeoutMs = Number.isFinite(options.timeoutMs ?? NaN) ? Number(options.timeoutMs) : 0;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
       if (body !== undefined && headers["Content-Length"] === undefined) {
         const length = Buffer.isBuffer(body) ? body.length : Buffer.byteLength(body);
         headers["Content-Length"] = String(length);
@@ -7002,6 +7431,9 @@ export default class ZoteroRagPlugin extends Plugin {
           const chunks: Buffer[] = [];
           response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
           response.on("end", () => {
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
             const body = Buffer.concat(chunks);
             resolve({
               statusCode: response.statusCode ?? 0,
@@ -7012,7 +7444,17 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       );
 
-      request.on("error", reject);
+      if (timeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }
+      request.on("error", (error) => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        reject(error);
+      });
       if (body !== undefined) {
         request.write(body);
       }
@@ -8236,6 +8678,7 @@ export default class ZoteroRagPlugin extends Plugin {
         docId,
         pdfLink,
         attachmentKey,
+        notePath,
         itemPath,
         doclingContent
       );
@@ -8567,6 +9010,7 @@ export default class ZoteroRagPlugin extends Plugin {
     docId: string,
     pdfLink: string,
     attachmentKey: string | undefined,
+    notePath: string,
     itemPath: string,
     doclingMarkdown: string
   ): Promise<string> {
@@ -8584,7 +9028,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const bodyTemplate = (this.settings.noteBodyTemplate || "").trim();
     const wantsAnnotationBlock = /{{\s*annotation_block\s*}}/i.test(bodyTemplate);
     if (wantsAnnotationBlock && attachmentKey) {
-      vars["annotation_block"] = await this.buildAnnotationBlockForAttachment(docId, attachmentKey);
+      vars["annotation_block"] = await this.buildAnnotationBlockForAttachment(docId, attachmentKey, notePath);
     } else {
       vars["annotation_block"] = "";
     }
@@ -8610,12 +9054,14 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async buildAnnotationBlockForAttachment(
     docId: string,
-    attachmentKey: string
+    attachmentKey: string,
+    notePath?: string
   ): Promise<string> {
     const resolved = await this.fetchZoteroAnnotationsForDoc(docId, attachmentKey);
     if (resolved.attachmentKey && resolved.attachmentKey !== attachmentKey) {
       await this.updateDocIndex({ doc_id: docId, attachment_key: resolved.attachmentKey });
     }
+    await this.attachAnnotationImages(docId, resolved.attachmentKey, resolved.annotations, notePath);
     return this.buildAnnotationBlock(docId, resolved.attachmentKey, resolved.annotations);
   }
 
@@ -8682,6 +9128,9 @@ export default class ZoteroRagPlugin extends Plugin {
     const zoteroLink = this.buildZoteroDeepLink(docId, attachmentKey, pageParam, entry.key);
     const header = `> [!${entry.callout}] ${label} [${pageLabel}](${zoteroLink})`;
     const lines: string[] = [header];
+    if (entry.imagePath) {
+      lines.push(`> ![[${entry.imagePath}]]`);
+    }
 
     const pushLines = (text: string): void => {
       if (!text) {
@@ -8765,6 +9214,39 @@ export default class ZoteroRagPlugin extends Plugin {
     return notes;
   }
 
+  private parseAnnotationImageLine(
+    line: string
+  ): { path: string; hash: string } | null {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return null;
+    }
+    let pathValue = "";
+    const wikiMatch = trimmed.match(/!\[\[([^\]]+)\]\]/);
+    if (wikiMatch) {
+      pathValue = wikiMatch[1].trim();
+    }
+    const mdMatch = !pathValue ? trimmed.match(/!\[[^\]]*\]\(([^)]+)\)/) : null;
+    if (mdMatch) {
+      pathValue = mdMatch[1].trim();
+    }
+    const htmlMatch = !pathValue ? trimmed.match(/<img[^>]+src=[\"']([^\"']+)[\"']/i) : null;
+    if (htmlMatch) {
+      pathValue = htmlMatch[1].trim();
+    }
+    if (!pathValue) {
+      return null;
+    }
+    const cleaned = pathValue.split("|")[0]?.trim() ?? "";
+    if (!cleaned) {
+      return null;
+    }
+    return {
+      path: cleaned,
+      hash: this.extractAnnotationImageHashFromPath(cleaned),
+    };
+  }
+
   private parseAnnotationCallout(
     lines: string[],
     fallbackAttachmentKey: string
@@ -8804,6 +9286,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const highlightLines: string[] = [];
     const commentLines: string[] = [];
     let inComment = false;
+    let imagePath = "";
+    let imageHash = "";
 
     for (let i = 1; i < lines.length; i += 1) {
       const raw = lines[i].replace(/^>\s?/, "");
@@ -8814,6 +9298,12 @@ export default class ZoteroRagPlugin extends Plugin {
         } else {
           highlightLines.push("");
         }
+        continue;
+      }
+      const imageInfo = this.parseAnnotationImageLine(trimmed);
+      if (imageInfo) {
+        imagePath = imageInfo.path;
+        imageHash = imageInfo.hash;
         continue;
       }
       if (trimmed.startsWith("^")) {
@@ -8863,6 +9353,8 @@ export default class ZoteroRagPlugin extends Plugin {
       text: this.normalizeAnnotationText(highlightLines.join("\n")),
       comment: this.normalizeAnnotationText(commentLines.join("\n")),
       tags: this.normalizeAnnotationTags(tags),
+      imagePath: imagePath || undefined,
+      imageHash: imageHash || undefined,
     };
   }
 
@@ -9415,6 +9907,31 @@ export default class ZoteroRagPlugin extends Plugin {
       console.warn("Failed to resolve attachment output dir", error);
       return null;
     }
+  }
+
+  private async resolveAnnotationImageOutputDir(
+    notePath?: string
+  ): Promise<{ absolute: string; relative: string } | null> {
+    let baseDir: { absolute: string; relative: string } | null = null;
+    if (notePath) {
+      baseDir = await this.resolveAttachmentOutputDir(notePath);
+    }
+    if (!baseDir) {
+      const fallback = normalizePath(this.settings.outputNoteDir || "");
+      if (!fallback) {
+        return null;
+      }
+      baseDir = {
+        absolute: this.getAbsoluteVaultPath(fallback),
+        relative: fallback,
+      };
+    }
+    const relative = normalizePath(path.join(baseDir.relative || "", "zrr-annotations"));
+    const absolute = path.normalize(path.join(baseDir.absolute, "zrr-annotations"));
+    if (relative) {
+      await this.ensureFolder(relative);
+    }
+    return { absolute, relative };
   }
 
   private async buildDoclingArgs(
