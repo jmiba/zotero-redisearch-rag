@@ -26,9 +26,6 @@ fi
 cp -R "${ROOT_DIR}/tools" "${DIST_DIR}/${PLUGIN_ID}/"
 find "${DIST_DIR}/${PLUGIN_ID}/tools" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
 find "${DIST_DIR}/${PLUGIN_ID}/tools" -type f -name "*.pyc" -delete 2>/dev/null || true
-if [ -d "${ROOT_DIR}/zotero-companion" ]; then
-  cp -R "${ROOT_DIR}/zotero-companion" "${DIST_DIR}/${PLUGIN_ID}/"
-fi
 
 (
   cd "${DIST_DIR}"

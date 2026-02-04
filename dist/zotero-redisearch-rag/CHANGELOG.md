@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2
+
+- Replace XPI verification with a download button that saves to your system Downloads folder.
+
 ## 0.6.1
 
 - Include the Zotero companion XPI in release assets to ensure the plugin can install it.

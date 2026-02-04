@@ -1,4 +1,4 @@
-import { App, DropdownComponent, Notice, PluginSettingTab, Setting, TextComponent } from "obsidian";
+import { App, DropdownComponent, Notice, PluginSettingTab, Setting, TextComponent, requestUrl } from "obsidian";
 import { randomBytes } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
@@ -25,6 +25,8 @@ export const ITEM_CACHE_DIR = `${CACHE_ROOT}/items`;
 export const CHUNK_CACHE_DIR = `${CACHE_ROOT}/chunks`;
 export const METADATA_SNAPSHOT_PATH = `${CACHE_ROOT}/metadata_snapshots.json`;
 export const ANNOTATION_SNAPSHOT_PATH = `${CACHE_ROOT}/annotation_snapshots.json`;
+const COMPANION_XPI_URL =
+  "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi";
 
 export interface ZoteroRagSettings {
   zoteroBaseUrl: string;
@@ -2018,51 +2020,28 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       tabEl.createEl("h2", { text: "Zotero Companion Plugin" });
       tabEl.createEl("p", {
-        text: "Install: copy the XPI path, then in Zotero go to Tools → Add-ons → Install from File and restart.",
+        text: "Download the XPI, then in Zotero go to Tools → Add-ons → Install from File and restart.",
       });
 
       new Setting(tabEl)
-        .setName("Install companion add-on")
-        .setDesc("Copy the bundled XPI path for quick installation in Zotero.")
+        .setName("Download companion add-on")
+        .setDesc("Downloads the companion XPI to your system Downloads folder.")
         .addButton((button) =>
           button
-            .setButtonText("Copy XPI path")
-            .setCta()
+            .setButtonText("Download XPI")
             .onClick(async () => {
-              const xpiPath = this.getCompanionXpiPath();
-              if (!xpiPath) {
-                new Notice("Unable to resolve the companion XPI path for this vault.");
+              const downloadDir = this.getDefaultDownloadDir();
+              if (!downloadDir) {
+                new Notice("Unable to resolve the system Downloads folder.");
                 return;
               }
-              const exists = await this.companionXpiExists(xpiPath);
-              if (!exists) {
-                new Notice(`Companion XPI not found: ${xpiPath}`);
+              const xpiPath = path.join(downloadDir, "zrr-companion.xpi");
+              if (await this.companionXpiExists(xpiPath)) {
+                new Notice(`Companion XPI already exists: ${xpiPath}`);
                 return;
               }
-              try {
-                await navigator.clipboard.writeText(xpiPath);
-                new Notice(`Copied companion XPI path: ${xpiPath}`);
-              } catch (error) {
-                new Notice("Failed to copy XPI path to clipboard.");
-                console.warn("Failed to copy companion XPI path", error);
-              }
-            })
-        );
-
-      new Setting(tabEl)
-        .setName("Verify companion XPI")
-        .setDesc("Checks whether the bundled XPI exists in this plugin install.")
-        .addButton((button) =>
-          button
-            .setButtonText("Verify XPI")
-            .onClick(async () => {
-              const xpiPath = this.getCompanionXpiPath();
-              if (!xpiPath) {
-                new Notice("Unable to resolve the companion XPI path for this vault.");
-                return;
-              }
-              const exists = await this.companionXpiExists(xpiPath);
-              new Notice(exists ? `Companion XPI found: ${xpiPath}` : `Companion XPI not found: ${xpiPath}`);
+              new Notice("Downloading companion XPI...");
+              await this.downloadCompanionXpi(xpiPath);
             })
         );
 
@@ -2182,14 +2161,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     setActiveTab(initialTab);
   }
 
-  private getCompanionXpiPath(): string | null {
-    const adapter: any = this.app.vault.adapter;
-    const basePath = typeof adapter?.getBasePath === "function" ? adapter.getBasePath() : null;
-    const pluginDir = this.plugin?.manifest?.dir;
-    if (!basePath || !pluginDir) {
+  private getDefaultDownloadDir(): string | null {
+    const homeDir = process.env.HOME || process.env.USERPROFILE;
+    if (!homeDir) {
       return null;
     }
-    return path.join(basePath, pluginDir, "zotero-companion", "zrr-companion.xpi");
+    return path.join(homeDir, "Downloads");
   }
 
   private async companionXpiExists(xpiPath: string): Promise<boolean> {
@@ -2198,6 +2175,26 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async downloadCompanionXpi(xpiPath: string): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(xpiPath), { recursive: true });
+      const response = await requestUrl({
+        url: COMPANION_XPI_URL,
+        method: "GET",
+      });
+      if (response.status !== 200) {
+        new Notice(`Failed to download companion XPI (HTTP ${response.status}).`);
+        return;
+      }
+      const buffer = Buffer.from(response.arrayBuffer);
+      await fs.writeFile(xpiPath, buffer);
+      new Notice(`Downloaded companion XPI: ${xpiPath}`);
+    } catch (error) {
+      new Notice("Failed to download companion XPI. See console for details.");
+      console.warn("Failed to download companion XPI", error);
     }
   }
 }

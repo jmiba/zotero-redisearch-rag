@@ -269,8 +269,9 @@ If you want Web API file downloads, your Zotero library must be synced and the A
 ## Zotero companion (annotation images)
 
 Area/drawing annotation images are cached locally by Zotero and are not exposed via the HTTP API.
-If you want those images embedded in Obsidian callouts, install the companion plugin in `zotero-companion/`
-and enable it in the Obsidian plugin settings (Annotations -> Zotero companion).
+If you want those images embedded in Obsidian callouts, download the companion XPI from
+Settings → Maintenance → Zotero companion and install it in Zotero (Tools → Add-ons → Install from File).
+Then enable it in the Obsidian plugin settings (Annotations → Zotero companion).
 When annotation images are enabled, the plugin fetches image/ink annotation images during sync and stores them
 in `zrr-annotations` next to your notes; re-sync updates images and removes stale ones.
 
