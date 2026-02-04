@@ -303,6 +303,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     manifest: { dir?: string };
   };
   private activeTab: SettingsTabId = "prerequisites";
+  private companionTokenInput: TextComponent | null = null;
 
   constructor(
     app: App,
@@ -790,8 +791,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       tabEl.createEl("h3", { text: "Zotero companion" });
       tabEl.createEl("p", {
         text: "Install the Zotero companion add-on to enable cached image/rect annotations. " +
-          "Steps: 1) Copy the XPI path below, 2) In Zotero, open Tools → Add-ons, " +
-          "3) Install from file and select the XPI, 4) Restart Zotero.",
+          "See tab Maintenance for instructions.",
       });
 
       new Setting(tabEl)
@@ -817,14 +817,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      let companionTokenInput: TextComponent | null = null;
-
       new Setting(tabEl)
         .setName("Zotero companion token")
         .setDesc("Optional shared token for the companion endpoint.")
         .addText((text) => {
           maskApiKeyInput(text);
-          companionTokenInput = text;
+          this.companionTokenInput = text;
           text
             .setPlaceholder("optional-token")
             .setValue(this.plugin.settings.zoteroCompanionToken)
@@ -834,78 +832,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      tabEl.createEl("h4", { text: "Companion maintenance" });
-
-      new Setting(tabEl)
-        .setName("Install companion add-on")
-        .setDesc("Copy the bundled XPI path for quick installation in Zotero.")
-        .addButton((button) =>
-          button
-            .setButtonText("Copy XPI path")
-            .setCta()
-            .onClick(async () => {
-              const xpiPath = this.getCompanionXpiPath();
-              if (!xpiPath) {
-                new Notice("Unable to resolve the companion XPI path for this vault.");
-                return;
-              }
-              const exists = await this.companionXpiExists(xpiPath);
-              if (!exists) {
-                new Notice(`Companion XPI not found: ${xpiPath}`);
-                return;
-              }
-              try {
-                await navigator.clipboard.writeText(xpiPath);
-                new Notice(`Copied companion XPI path: ${xpiPath}`);
-              } catch (error) {
-                new Notice("Failed to copy XPI path to clipboard.");
-                console.warn("Failed to copy companion XPI path", error);
-              }
-            })
-        );
-
-      new Setting(tabEl)
-        .setName("Verify companion XPI")
-        .setDesc("Checks whether the bundled XPI exists in this plugin install.")
-        .addButton((button) =>
-          button
-            .setButtonText("Verify XPI")
-            .onClick(async () => {
-              const xpiPath = this.getCompanionXpiPath();
-              if (!xpiPath) {
-                new Notice("Unable to resolve the companion XPI path for this vault.");
-                return;
-              }
-              const exists = await this.companionXpiExists(xpiPath);
-              new Notice(exists ? `Companion XPI found: ${xpiPath}` : `Companion XPI not found: ${xpiPath}`);
-            })
-        );
-
-      new Setting(tabEl)
-        .setName("Open Zotero Add-ons")
-        .setDesc("Launch Zotero and open the Add-ons window (Tools → Add-ons).")
-        .addButton((button) =>
-          button
-            .setButtonText("Open Add-ons")
-            .onClick(async () => {
-              await this.plugin.openZoteroAddons();
-            })
-        );
-
-      new Setting(tabEl)
-        .setName("Check companion status")
-        .setDesc("Ping the companion /health endpoint.")
-        .addButton((button) =>
-          button
-            .setButtonText("Check status")
-            .onClick(async () => {
-              await this.plugin.checkZoteroCompanionHealth();
-            })
-        );
-
       new Setting(tabEl)
         .setName("Generate companion token")
-        .setDesc("Creates a secure token and copies it to your clipboard.")
+        .setDesc("Create and paste a secure token. The generated token is copied to your clipboard. In Zotero, set your Zotero Companion Plugin token to this value.")
         .addButton((button) =>
           button
             .setButtonText("Generate token")
@@ -913,8 +842,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               const token = randomBytes(32).toString("base64url");
               this.plugin.settings.zoteroCompanionToken = token;
               await this.plugin.saveSettings();
-              if (companionTokenInput) {
-                companionTokenInput.setValue(token);
+              if (this.companionTokenInput) {
+                this.companionTokenInput.setValue(token);
               }
               try {
                 await navigator.clipboard.writeText(token);
@@ -2087,7 +2016,79 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      tabEl.createEl("h2", { text: "Maintenance" });
+      tabEl.createEl("h2", { text: "Zotero Companion Plugin" });
+      tabEl.createEl("p", {
+        text: "Install: copy the XPI path, then in Zotero go to Tools → Add-ons → Install from File and restart.",
+      });
+
+      new Setting(tabEl)
+        .setName("Install companion add-on")
+        .setDesc("Copy the bundled XPI path for quick installation in Zotero.")
+        .addButton((button) =>
+          button
+            .setButtonText("Copy XPI path")
+            .setCta()
+            .onClick(async () => {
+              const xpiPath = this.getCompanionXpiPath();
+              if (!xpiPath) {
+                new Notice("Unable to resolve the companion XPI path for this vault.");
+                return;
+              }
+              const exists = await this.companionXpiExists(xpiPath);
+              if (!exists) {
+                new Notice(`Companion XPI not found: ${xpiPath}`);
+                return;
+              }
+              try {
+                await navigator.clipboard.writeText(xpiPath);
+                new Notice(`Copied companion XPI path: ${xpiPath}`);
+              } catch (error) {
+                new Notice("Failed to copy XPI path to clipboard.");
+                console.warn("Failed to copy companion XPI path", error);
+              }
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Verify companion XPI")
+        .setDesc("Checks whether the bundled XPI exists in this plugin install.")
+        .addButton((button) =>
+          button
+            .setButtonText("Verify XPI")
+            .onClick(async () => {
+              const xpiPath = this.getCompanionXpiPath();
+              if (!xpiPath) {
+                new Notice("Unable to resolve the companion XPI path for this vault.");
+                return;
+              }
+              const exists = await this.companionXpiExists(xpiPath);
+              new Notice(exists ? `Companion XPI found: ${xpiPath}` : `Companion XPI not found: ${xpiPath}`);
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Open Zotero")
+        .setDesc("Launch Zotero and open the Add-ons window (Tools → Add-ons).")
+        .addButton((button) =>
+          button
+            .setButtonText("Open Zotero")
+            .onClick(async () => {
+              await this.plugin.openZoteroAddons();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Check companion status")
+        .setDesc("Ping the companion /health endpoint.")
+        .addButton((button) =>
+          button
+            .setButtonText("Check status")
+            .onClick(async () => {
+              await this.plugin.checkZoteroCompanionHealth();
+            })
+      );
+      
+      tabEl.createEl("h2", { text: "Redis Indexing" });
 
       new Setting(tabEl)
         .setName("Reindex Redis from cached chunks")

@@ -43,6 +43,12 @@ You can edit chunk text directly in the note. On save, the plugin updates the ca
 - Toggle exclusion via command palette: **Toggle ZRR chunk exclude at cursor**.
 - Right-click inside a chunk for the same action.
 
+## Zotero sync (metadata + annotations)
+
+The plugin syncs metadata and annotations from your Zotero library when you import or re-sync an item.
+Metadata updates (title, authors, tags, collections, etc.) refresh the note frontmatter. Annotation changes
+update the note body, and any edits you make inside a chunk are preserved unless you remove that chunk.
+
 ## Frontmatter template (editable)
 
 You can edit the note frontmatter template in Settings → Output → Frontmatter template.  
@@ -143,7 +149,7 @@ Settings related to Redis (Settings → Prerequisites):
 
 Notes:
 - Docker Desktop or Podman machine must be running (Podman uses `podman compose` or `podman-compose`).
-- Your vault folder must be shared in Docker/Podman file sharing settings.
+- Your vault folder must be accessible to Docker/Podman (see file sharing settings in Docker/Podman).
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
 - Multiple vaults:
    - Starting from the plugin creates a per‑vault Docker Compose project and data folder.
@@ -265,6 +271,8 @@ If you want Web API file downloads, your Zotero library must be synced and the A
 Area/drawing annotation images are cached locally by Zotero and are not exposed via the HTTP API.
 If you want those images embedded in Obsidian callouts, install the companion plugin in `zotero-companion/`
 and enable it in the Obsidian plugin settings (Annotations -> Zotero companion).
+When annotation images are enabled, the plugin fetches image/ink annotation images during sync and stores them
+in `zrr-annotations` next to your notes; re-sync updates images and removes stale ones.
 
 ## Reindexing and cache
 

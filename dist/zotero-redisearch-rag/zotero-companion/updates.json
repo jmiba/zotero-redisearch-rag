@@ -1,0 +1,19 @@
+{
+  "addons": {
+    "zrr-companion@zotero-redisearch-rag": {
+      "updates": [
+        {
+          "version": "0.1.2",
+          "update_link": "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi",
+          "update_hash": "sha256:c72e0f045938117b8b9cc21f338df9ae21614cb126093b5588eddf1fb286643d",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "7.0",
+              "strict_max_version": "8.*"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

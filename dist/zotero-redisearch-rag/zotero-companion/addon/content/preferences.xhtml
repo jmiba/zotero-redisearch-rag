@@ -1,0 +1,31 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      id="zrr-companion-prefs">
+  <groupbox>
+    <label><html:h2>Zotero Redis RAG Companion</html:h2></label>
+    <html:p class="zrr-hint">
+      Configure the local HTTP endpoint used by Obsidian to fetch cached annotation images.
+    </html:p>
+
+    <hbox align="center" style="margin-top: 8px;">
+      <label value="Port:" style="width: 80px;" />
+      <html:input id="zrr-companion-port"
+                  type="number"
+                  min="1"
+                  max="65535"
+                  preference="extensions.zrr_companion.port"
+                  style="width: 140px;" />
+      <label value="Default: 23120" style="margin-left: 8px; font-size: 11px; color: #666;" />
+    </hbox>
+
+    <hbox align="center" style="margin-top: 10px;">
+      <label value="Token:" style="width: 80px;" />
+      <html:input id="zrr-companion-token"
+                  type="password"
+                  autocomplete="off"
+                  preference="extensions.zrr_companion.token"
+                  style="flex: 1;" />
+    </hbox>
+    <label value="If set, clients must send Authorization: Bearer &lt;token&gt;." style="font-size: 11px; color: #666; margin-left: 88px; margin-top: 4px;" />
+  </groupbox>
+</vbox>

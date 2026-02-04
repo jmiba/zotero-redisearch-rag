@@ -197,6 +197,7 @@ type AnnotationSnapshotEntry = {
   comment: string;
   tags: string[];
   image_hash?: string;
+  color_key?: string;
 };
 
 type AnnotationSnapshotCacheEntry = {
@@ -4913,6 +4914,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
         const noteChanged = !this.annotationSnapshotsEqual(noteSnapshot, snapshotEntry);
         const zoteroChanged = !this.annotationSnapshotsEqual(zotSnapshot, snapshotEntry);
+        const colorChanged = (zotSnapshot.color_key || "") !== (snapshotEntry.color_key || "");
         const noteChangedNoImage = !this.annotationSnapshotsEqualIgnoringImage(noteSnapshot, snapshotEntry);
         const zoteroChangedNoImage = !this.annotationSnapshotsEqualIgnoringImage(zotSnapshot, snapshotEntry);
         if (noteChangedNoImage && !zoteroChangedNoImage) {
@@ -4930,6 +4932,10 @@ export default class ZoteroRagPlugin extends Plugin {
           });
         }
         if (imageChanged && (noteChanged || zoteroChanged)) {
+          needsNoteRefresh = true;
+          forceNoteRefresh = true;
+        }
+        if (colorChanged) {
           needsNoteRefresh = true;
           forceNoteRefresh = true;
         }
@@ -6329,17 +6335,18 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private annotationSnapshotFromEntry(
-    entry: { text: string; comment: string; tags: string[]; imageHash?: string },
+    entry: { text: string; comment: string; tags: string[]; imageHash?: string; colorKey?: string },
     annotationType?: string
   ): AnnotationSnapshotEntry {
     const normalizedText = this.normalizeAnnotationText(entry.text);
     const normalizedComment = this.normalizeAnnotationText(entry.comment);
     const normalizedTags = this.normalizeAnnotationTags(entry.tags ?? []);
     const imageHash = entry.imageHash ? entry.imageHash.toLowerCase() : "";
+    const colorKey = entry.colorKey ? this.normalizeAnnotationColorKey(entry.colorKey) : "";
     if (annotationType === "note" && !normalizedComment && normalizedText) {
-      return { text: "", comment: normalizedText, tags: normalizedTags, image_hash: imageHash };
+      return { text: "", comment: normalizedText, tags: normalizedTags, image_hash: imageHash, color_key: colorKey };
     }
-    return { text: normalizedText, comment: normalizedComment, tags: normalizedTags, image_hash: imageHash };
+    return { text: normalizedText, comment: normalizedComment, tags: normalizedTags, image_hash: imageHash, color_key: colorKey };
   }
 
   private annotationSnapshotsEqual(

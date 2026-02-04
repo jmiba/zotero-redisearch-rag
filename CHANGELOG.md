@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.3
+## 0.6.0
 
 - Image/rect annotations now embed as images in annotation callouts when available.
 - Annotation fetch now requests `annotationImage` from Zotero and falls back if the API rejects the include.
