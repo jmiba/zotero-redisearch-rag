@@ -172,7 +172,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
     "pdf_link: {{pdf_link_yaml}}\n" +
     "item_json: {{item_json_yaml}}",
   tagSanitizeMode: "kebab",
-  noteBodyTemplate: "{{pdf_block}}{{docling_markdown}}",
+  noteBodyTemplate: "{{annotation_block}}{{docling_markdown}}",
   annotationPageLabel: "Seite",
   annotationColorMap: {
     yellow: { heading: "Fragen", callout: "question" },

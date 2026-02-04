@@ -89,9 +89,10 @@ collections:
 You can also customize the note body after frontmatter in Settings → Output → Note body template.
 
 Available placeholders:
-- `{{pdf_block}}` (renders `PDF: ![[...]]` or `PDF: zotero://...`, including trailing blank line)
-- `{{pdf_line}}` (just the `PDF: ...` line)
-- `{{docling_markdown}}` (the full synced Docling content with chunk markers)
+- `{{pdf_block}}` (renders `PDF: ![[...]]` or `PDF: zotero://...`, including trailing blank line; not included in the template by default))
+- `{{pdf_line}}` (just the `PDF: ...` line; not included by default)
+- `{{annotation_block}}` (annotation callouts; included by default)
+- `{{docling_markdown}}` (the full synced Docling content with chunk markers; included by default)
 
 If you omit `{{docling_markdown}}`, it will be appended to avoid losing content.
 
