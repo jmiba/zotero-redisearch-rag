@@ -27,3 +27,4 @@ jobs:
             versions.json
             styles.css
             dist/*.zip
+            dist/**/zotero-companion/*.xpi

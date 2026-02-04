@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1
+
+- Include the Zotero companion XPI in release assets to ensure the plugin can install it.
+
 ## 0.6.0
 
 - Image/rect annotations now embed as images in annotation callouts when available.
