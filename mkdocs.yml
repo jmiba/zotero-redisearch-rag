@@ -7,6 +7,9 @@ site_url: https://jmiba.github.io/zotero-redisearch-rag/
 theme:
   name: material
   language: en
+  palette:
+    primary: red
+    accent: red
   features:
     - navigation.tabs
     - navigation.indexes
