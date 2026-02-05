@@ -34,3 +34,13 @@ If OCR output is noisy or incomplete:
 - Enable **OCR cleanup** with an LLM to improve low‑quality text.
 
 For scanned PDFs, installing Tesseract + Poppler improves OCR accuracy.
+
+## Redis Stack start failures (even when file sharing is OK)
+Common causes to check:
+- **Docker/Podman isn’t running**: The CLI exists, but the daemon is stopped.
+- **Wrong Docker/Podman path**: The plugin points to a non‑working binary.
+- **Compose not available**: Podman needs `podman compose` or `podman-compose`.
+- **Port conflict**: Redis port is already in use (enable Auto‑assign Redis port).
+- **Stale containers**: An old Redis container or project name is conflicting.
+- **Vault path not accessible**: Vault is on an external drive or blocked path.
+- **Data directory not writable**: `.obsidian/zotero-redisearch-rag/redis-data` can’t be created.
