@@ -21,6 +21,22 @@ When OCR is used, you can optionally create an OCR‑layered PDF. This writes a 
 - Works only when **Copy PDFs to vault** is enabled.
 - The OCR‑layered PDF replaces the vault copy so citations can open the searchable file.
 
+### Install Tesseract + Poppler
+These tools are required for creating OCR‑layered PDFs.
+
+- macOS (Homebrew):
+  ```bash
+  brew install tesseract poppler
+  ```
+- Windows (Chocolatey):
+  ```powershell
+  choco install tesseract poppler
+  ```
+- Ubuntu/Debian:
+  ```bash
+  sudo apt-get install tesseract-ocr poppler-utils
+  ```
+
 ## PDF sidebar auto‑sync and preview scroll sync
 The plugin can sync the PDF view to the chunk you’re reading in your note.
 

@@ -33,6 +33,13 @@ This page summarizes the main settings tabs and what they control.
 - **OCR quality threshold**: Minimum text quality before OCR runs.
 - **OCR cleanup**: Optional LLM cleanup for low‑quality OCR.
 
+### Paddle OCR (API)
+If you select a Paddle OCR API engine, you’ll need an API key.
+
+1. Create a free PaddleOCR account and API key at [PaddleOCR](https://aistudio.baidu.com/paddleocr).
+2. Paste the key into **OCR → Paddle OCR API key**.
+3. (Optional) Set a custom API URL if you use a non‑default endpoint.
+
 ## LLMs
 - **Provider profiles**: Store base URL + API key once.
 - **Embeddings**: Model selection, subchunking, context window, metadata inclusion.
