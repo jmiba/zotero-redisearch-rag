@@ -1,0 +1,38 @@
+site_name: Zotero Redis RAG
+site_description: Ask questions across your Zotero library inside Obsidian.
+repo_url: https://github.com/jmiba/zotero-redisearch-rag
+repo_name: jmiba/zotero-redisearch-rag
+site_url: https://jmiba.github.io/zotero-redisearch-rag/
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - How It Works: how-it-works.md
+  - Usage: usage.md
+  - Settings: settings.md
+  - Commands: commands.md
+  - PDF & Annotations: pdf-annotations.md
+  - Retrieval & Ranking: retrieval-ranking.md
+  - Troubleshooting: troubleshooting.md
+  - Advanced: advanced.md
+  - FAQ: faq.md
+  - Changelog: changelog.md
