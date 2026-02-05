@@ -8,8 +8,8 @@ theme:
   name: material
   language: en
   palette:
-    primary: red
-    accent: red
+    primary: deep-purple
+    accent: deep-purple
   features:
     - navigation.tabs
     - navigation.indexes
@@ -25,9 +25,6 @@ markdown_extensions:
   - md_in_html
   - toc:
       permalink: true
-
-extra_css:
-  - stylesheets/extra.css
 
 nav:
   - Home: index.md
