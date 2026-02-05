@@ -1,3 +1,3 @@
-# Settings
+# Advanced Usage
 
 Content coming soon.

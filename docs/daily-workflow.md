@@ -1,3 +1,3 @@
-# Usage
+# Daily Workflow
 
 Content coming soon.

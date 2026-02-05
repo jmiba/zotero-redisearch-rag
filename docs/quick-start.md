@@ -1,4 +1,4 @@
-# Getting Started
+# Quick Start
 
 This page walks you through a minimal, working setup so you can import a Zotero item and ask your first question.
 
@@ -79,4 +79,4 @@ Answers include citations that link back to the exact chunk in your note or PDF.
 
 ---
 
-If you want a deeper walkthrough, continue to **How It Works** and **Usage**.
+If you want a deeper walkthrough, continue to **How It Works** and **Daily Workflow**.

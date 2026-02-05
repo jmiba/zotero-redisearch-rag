@@ -25,14 +25,18 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
+  - Quick Start: quick-start.md
   - How It Works: how-it-works.md
-  - Usage: usage.md
-  - Settings: settings.md
-  - Commands: commands.md
-  - PDF & Annotations: pdf-annotations.md
-  - Retrieval & Ranking: retrieval-ranking.md
+  - Core Concepts: core-concepts.md
+  - Daily Workflow: daily-workflow.md
+  - Chat Panel: chat-panel.md
+  - PDF Handling: pdf-handling.md
+  - Annotations: annotations.md
+  - Retrieval and Ranking: retrieval-ranking.md
+  - Settings Reference: settings-reference.md
+  - Command Palette Reference: command-palette-reference.md
+  - Files and Data Locations: files-and-data-locations.md
   - Troubleshooting: troubleshooting.md
-  - Advanced: advanced.md
+  - Advanced Usage: advanced-usage.md
+  - Privacy and Security: privacy-and-security.md
   - FAQ: faq.md
-  - Changelog: changelog.md

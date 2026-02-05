@@ -1,3 +1,3 @@
-# PDF and Annotations
+# Settings Reference
 
 Content coming soon.
