@@ -13,6 +13,7 @@ See the script in `tools/batch_index_pyzotero.py` and the example command in the
 
 ## CLI tools and when to use them
 The plugin bundles Python tools under `tools/` for:
+
 - **Extraction and chunking** (Docling)
 - **Indexing** (Redis Search)
 - **Querying** (RAG chat and diagnostics)
