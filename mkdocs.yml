@@ -26,6 +26,12 @@ markdown_extensions:
   - toc:
       permalink: true
 
+plugins:
+  - search
+  - sitemap:
+      changefreq: weekly
+      priority: 0.5
+
 nav:
   - Home: index.md
   - Getting Started:

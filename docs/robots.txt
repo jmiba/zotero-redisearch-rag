@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://jmiba.github.io/zotero-redisearch-rag/sitemap.xml
