@@ -29,6 +29,7 @@ If model refresh fails, double‑check the base URL and API key in the provider 
 
 ## OCR quality problems and cleanup
 If OCR output is noisy or incomplete:
+
 - Switch **OCR mode** to “OCR only if text is poor” or “Always OCR.”
 - Try a different **OCR engine** (Tesseract vs. Paddle options).
 - Enable **OCR cleanup** with an LLM to improve low‑quality text.
@@ -37,6 +38,7 @@ For scanned PDFs, installing Tesseract + Poppler improves OCR accuracy.
 
 ## Redis Stack start failures (even when file sharing is OK)
 Common causes to check:
+
 - **Docker/Podman isn’t running**: The CLI exists, but the daemon is stopped.
 - **Wrong Docker/Podman path**: The plugin points to a non‑working binary.
 - **Compose not available**: Podman needs `podman compose` or `podman-compose`.
