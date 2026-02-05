@@ -25,14 +25,17 @@ When OCR is used, you can optionally create an OCR‑layered PDF. This writes a 
 These tools are required for creating OCR‑layered PDFs.
 
 - macOS (Homebrew):
+
   ```bash
   brew install tesseract poppler
   ```
 - Windows (Chocolatey):
+
   ```powershell
   choco install tesseract poppler
   ```
 - Ubuntu/Debian:
+
   ```bash
   sudo apt-get install tesseract-ocr poppler-utils
   ```

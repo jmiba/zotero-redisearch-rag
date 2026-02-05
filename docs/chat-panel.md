@@ -4,6 +4,7 @@ The chat panel lets you ask questions across your indexed library and keep conve
 
 ## Open the chat view
 Use the command palette:
+
 - **Open Zotero RAG chat panel**
 
 The panel opens in Obsidian (right sidebar by default).

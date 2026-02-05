@@ -6,6 +6,7 @@ This section covers power‑user workflows and automation options.
 The repository includes a batch indexing script for large libraries. It pulls items from Zotero (Web API), runs extraction, and indexes in Redis.
 
 Typical use cases:
+
 - Indexing a large library overnight
 - Pre‑building an index before using Obsidian
 
@@ -15,7 +16,7 @@ See the script in `tools/batch_index_pyzotero.py` and the example command in the
 The plugin bundles Python tools under `tools/` for:
 
 - **Extraction and chunking** (Docling)
-- **Indexing** (Redis Search)
+- **Indexing** (Redis Search)S
 - **Querying** (RAG chat and diagnostics)
 
 Use the CLI tools when you Sneed:

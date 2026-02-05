@@ -4,6 +4,7 @@ This section explains how the plugin finds relevant chunks and orders them befor
 
 ## Vector + lexical retrieval (and RRF fusion)
 The plugin uses two kinds of search:
+
 - **Vector search**: finds chunks with similar meaning.
 - **Lexical search**: finds chunks that share important words.
 

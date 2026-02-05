@@ -19,11 +19,13 @@ If you want a full refresh (including text extraction), re‑run the import comm
 - Do not delete chunk markers unless you intend to remove that chunk from sync.
 
 Chunk markers look like:
+
 - `<!-- zrr:chunk id=... -->`
 - `<!-- zrr:chunk end -->`
 
 ## Use the chunk toolbar (Live Preview)
 When your cursor is inside a chunk, a small toolbar appears. It lets you:
+
 - **Clean**: Run the OCR cleanup model on the chunk.
 - **Tags**: Edit chunk tags.
 - **Indexed**: Preview the text that was indexed.

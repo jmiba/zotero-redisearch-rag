@@ -12,6 +12,7 @@ The plugin imports the item metadata and uses the PDF attachment to extract text
 When you import an item, the plugin creates a normal Obsidian note. Inside that note it adds hidden markers that define the synced content.
 
 Key markers:
+
 - `<!-- zrr:sync-start doc_id=... -->`
 - `<!-- zrr:chunk id=... -->`
 - `<!-- zrr:chunk end -->`
@@ -24,6 +25,7 @@ Zotero annotations (highlights, notes) can be synced into the note as callouts. 
 
 ## Redis index and cache files
 The plugin stores two kinds of data:
+
 - **Redis index**: The searchable vector index used to retrieve relevant chunks.
 - **Local cache**: JSON files in `.zotero-redisearch-rag/` that store item metadata and chunk text.
 

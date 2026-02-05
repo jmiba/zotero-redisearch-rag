@@ -16,6 +16,7 @@ This page lists common issues and how to resolve them.
 If you change embedding models or the index schema gets out of sync, you may see errors about embedding dimensions or missing fields.
 
 Fix:
+
 1. Run **Drop & rebuild Redis index**.
 2. Then run **Reindex Redis from cached chunks**.
 

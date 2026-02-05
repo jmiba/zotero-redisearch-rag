@@ -13,6 +13,7 @@ This plugin is designed to be local‑first, but it can talk to external service
 
 ## When network calls occur
 Network calls happen only when you enable features that require them:
+
 - **Zotero Web API**: Optional fallback or write‑back.
 - **Cloud LLM providers**: If you choose OpenAI/OpenRouter or another remote provider.
 - **PaddleOCR API**: If you enable PaddleOCR API modes.
