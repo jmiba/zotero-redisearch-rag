@@ -18,7 +18,8 @@ The plugin bundles Python tools under `tools/` for:
 - **Indexing** (Redis Search)
 - **Querying** (RAG chat and diagnostics)
 
-Use the CLI tools when you need:
+Use the CLI tools when you Sneed:
+
 - Batch processing
 - Troubleshooting outside Obsidian
 - Custom pipelines or automation
