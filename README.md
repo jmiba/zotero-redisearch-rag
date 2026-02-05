@@ -4,6 +4,8 @@
 
 Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis Stack, and returns answers with citations that jump straight to the relevant chunk in your note.
 
+Documentation: [Zotero Redis RAG docs](https://jmiba.github.io/zotero-redisearch-rag/)
+
 > [!CAUTION]
 > This plugin is early and may change. Keep backups of important notes.
 
