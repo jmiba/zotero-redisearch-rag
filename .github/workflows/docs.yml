@@ -30,7 +30,7 @@ jobs:
       - name: Install MkDocs
         run: |
           python -m pip install --upgrade pip
-          python -m pip install mkdocs-material mkdocs-sitemap-plugin
+          python -m pip install mkdocs-material mkdocs-sitemap
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
