@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.4
+
+- Publish a clean follow-up patch release so the Redis image pin and troubleshooting updates are included in release artifacts.
+
 ## 0.6.3
 
 - Pin Redis Stack image to `docker.io/redis/redis-stack-server@sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a` to avoid `latest` drift.
