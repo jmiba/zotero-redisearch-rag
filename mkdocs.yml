@@ -28,9 +28,6 @@ markdown_extensions:
 
 plugins:
   - search
-  - sitemap:
-      changefreq: weekly
-      priority: 0.5
 
 nav:
   - Home: index.md
