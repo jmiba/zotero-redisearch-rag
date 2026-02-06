@@ -37,13 +37,29 @@ If OCR output is noisy or incomplete:
 
 For scanned PDFs, installing Tesseract + Poppler improves OCR accuracy.
 
-## Redis Stack start failures (even when file sharing is OK)
-Common causes to check:
+## Redis Stack start failures
 
+Docker/Podman will **pull** the image (if missing) and then create a container.
+If no Redis container appears (or it exits immediately), common causes to check:
+
+- **Missing file sharing configuration**: Docker Desktop/Podman Desktop must allow mounting your vault path (and plugin/tools path if separate). Typical errors include `Mounts denied` or `operation not permitted`.
 - **Docker/Podman isn’t running**: The CLI exists, but the daemon is stopped.
 - **Wrong Docker/Podman path**: The plugin points to a non‑working binary.
 - **Compose not available**: Podman needs `podman compose` or `podman-compose`.
+- **Image pull failed**: Network issue, registry auth/rate limit, or blocked access.
 - **Port conflict**: Redis port is already in use (enable Auto‑assign Redis port).
 - **Stale containers**: An old Redis container or project name is conflicting.
 - **Vault path not accessible**: Vault is on an external drive or blocked path.
 - **Data directory not writable**: `.obsidian/zotero-redisearch-rag/redis-data` can’t be created.
+- **Invalid bind mount/config path**: For example, `./redis-stack.conf` is missing or unreadable.
+- **Redis config/startup error**: Container is created, then exits because Redis fails to start.
+
+Quick checks:
+
+```bash
+docker compose config
+docker compose pull redis-stack
+docker compose up -d redis-stack
+docker compose ps -a
+docker compose logs redis-stack
+```

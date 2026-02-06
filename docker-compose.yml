@@ -1,6 +1,6 @@
 services:
   redis-stack:
-    image: redis/redis-stack-server:latest
+    image: docker.io/redis/redis-stack-server@sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a
     command: ["redis-stack-server", "/redis-stack.conf", "--dir", "/data"]
     environment:
       - REDIS_ARGS=

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.3
+
+- Pin Redis Stack image to `docker.io/redis/redis-stack-server@sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a` to avoid `latest` drift.
+- Clarify Redis startup troubleshooting with explicit file-sharing guidance and additional container startup diagnostics.
+
 ## 0.6.2
 
 - Replace XPI verification with a download button that saves to your system Downloads folder.
