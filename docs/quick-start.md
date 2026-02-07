@@ -57,7 +57,14 @@ Cloud options:
 - **OpenAI** or **OpenRouter** with your API key.
 
 ## 5) Set up Python for Docling
-From the plugin folder:
+Default (recommended):
+
+1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
+2. In **Python env location**, choose **Shared user cache** (recommended; keeps venv outside your vault and reduces sync churn).
+3. Click **Python environment → Create/Update**.
+4. Wait for `Python environment ready.`.
+
+Fallback (terminal):
 
 ```bash
 python3 -m venv .venv
@@ -65,7 +72,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-You can also create the environment from **Settings → Prerequisites → Python environment**.
+For full details, see [Python Setup](python-setup.md).
 
 ## 6) Configure the plugin
 Open **Settings → Community plugins → Zotero Redis RAG** and set:
