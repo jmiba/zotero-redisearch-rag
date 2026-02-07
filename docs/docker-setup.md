@@ -2,7 +2,7 @@
 
 This guide explains how to configure Docker (or Podman) so the plugin can start Redis Stack reliably.
 
-## 1) Install And Start Docker/Podman
+## 1) Install and start Docker/Podman
 
 Install one of:
 
@@ -25,13 +25,13 @@ podman version
 podman compose version
 ```
 
-## 2) Configure File Sharing
+## 2) Configure file sharing
 
 If you use Docker Desktop or Podman Desktop, ensure your vault path is shared/mountable.
 
 If file sharing is missing, Redis startup usually fails with mount errors (for example, `Mounts denied` or `operation not permitted`).
 
-## 3) Configure Plugin Prerequisites
+## 3) Configure plugin prerequisites
 
 In **Settings → Prerequisites**:
 
@@ -42,7 +42,7 @@ In **Settings → Prerequisites**:
 
 Then click **Start Redis stack now** once to validate setup.
 
-## 4) Verify Redis Container Startup
+## 4) Verify Redis container startup
 
 If needed, run:
 
@@ -54,7 +54,7 @@ docker compose ps -a
 docker compose logs redis-stack
 ```
 
-## Common Pitfalls
+## Common pitfalls
 
 - **Daemon not running**: CLI exists but Docker/Podman engine is stopped.
 - **Wrong binary path**: plugin points to a non-working executable.

@@ -14,7 +14,7 @@ python3 --version
 python3 -m pip --version
 ```
 
-## 1) Default Setup: Use The Settings Button (Recommended)
+## 1) Default setup: use the settings button (recommended)
 
 In Obsidian plugin settings:
 
@@ -33,7 +33,7 @@ Why `Shared user cache` is recommended:
 - It keeps the Python environment outside the vault, so Obsidian sync tools do not try to sync large venv files.
 - It reduces sync conflicts/churn across devices.
 
-## 2) Fallback: Create `.venv` In Terminal
+## 2) Fallback: create `.venv` in terminal
 
 Use this only if the settings-button flow fails.
 
@@ -55,7 +55,7 @@ Then set **Python path** to your venv interpreter:
 1. Run **Import Zotero item and index (Docling → RedisSearch)** on a small PDF.
 2. If extraction fails, open logs in **Maintenance → Logs**.
 
-## Common Pitfalls
+## Common pitfalls
 
 - **Unsupported Python version**: 3.10 or 3.14 may fail with dependencies.
 - **Wrong interpreter path**: points to a missing or stale virtual environment.

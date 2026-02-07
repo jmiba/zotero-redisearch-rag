@@ -15,7 +15,7 @@ Step-by-step setup guides:
 - [Python Setup](python-setup.md)
 - [Docker Setup](docker-setup.md)
 
-## Zotero Local API / Web API
+## Zotero local API / web API
 - **Local API base URL**: Usually `http://127.0.0.1:23119/api`.
 - **Web API settings**: Optional fallback or write‑back. Set library type, library ID, and API key.
 
