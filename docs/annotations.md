@@ -7,6 +7,8 @@ When you import or re‑sync an item, Zotero annotations are added to the note a
 
 Edits you make inside synced annotation blocks are preserved unless you remove the annotation markers.
 
+For full customization options, see [Custom callouts](custom-callouts.md).
+
 ## Annotation images via Zotero companion
 Area and drawing annotations are stored by Zotero as images. The Zotero companion makes those images available so the plugin can embed them in your notes.
 
