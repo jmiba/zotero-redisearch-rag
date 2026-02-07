@@ -113,6 +113,61 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 - LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
 - Python 3.11–3.13 (for Docling tools)
 
+## Security and network disclosure
+
+- This is a **desktop-only** plugin.
+
+### Telemetry and tracking
+
+- The plugin has **no built-in telemetry or analytics**.
+- It does **not** send usage events for tracking/marketing.
+
+### Network and API usage
+
+The plugin can make network/API calls only when relevant features are enabled or configured:
+
+- Zotero Local API (`http://127.0.0.1:23119`) for local Zotero access.
+- Zotero Web API (if you configure Web API fallback/write features).
+- LLM provider APIs (local or cloud), depending on your selected provider profile.
+- PaddleOCR API endpoints (if you choose Paddle API OCR engines).
+- Container registry pulls via Docker/Podman when Redis images are missing.
+
+### Third-party services
+
+Depending on your configuration, the plugin may interact with:
+
+- Zotero (local API and optionally Web API)
+- LM Studio / Ollama (local model servers)
+- OpenAI / OpenRouter (cloud model APIs)
+- Baidu PaddleOCR API
+- Docker Hub or other OCI registries (through Docker/Podman image pulls)
+
+### External binaries and runtimes
+
+The plugin depends on local tools installed on your system:
+
+- Python 3.11–3.13
+- Docker Desktop or Podman (for Redis Stack startup)
+- Optional: Tesseract and Poppler (for OCR-layered PDF workflows)
+
+### API key handling
+
+- API keys are stored in Obsidian plugin settings.
+- Keys are masked in the UI but are **not encrypted at rest** by this plugin.
+
+### Paid account requirements
+
+- The plugin itself has no paid tier and no subscription requirement.
+- Some optional integrations may require paid accounts or paid usage:
+  - Cloud LLM providers (for example OpenAI/OpenRouter)
+  - Paid OCR/API plans where applicable
+  - Docker Desktop licensing terms may apply in some commercial environments
+
+## License
+
+- Plugin code: **Apache-2.0** (see `LICENSE`)
+- Documentation (`docs/`): **CC BY 4.0** (see `LICENSE-docs`)
+
 ## Setup
 
 ### 1) Enable Zotero local API (read-only)
