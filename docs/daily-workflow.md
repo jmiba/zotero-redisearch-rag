@@ -18,10 +18,15 @@ If you want a full refresh (including text extraction), re‑run the import comm
 - You can edit text **inside** a chunk. Only the changed chunk is re‑indexed.
 - Do not delete chunk markers unless you intend to remove that chunk from sync.
 
-Chunk markers look like:
+In source mode, chunk markers look like:
 
 - `<!-- zrr:chunk id=... -->`
 - `<!-- zrr:chunk end -->`
+
+In live preview mode, they look like this:
+
+![Preview mode markers overview](assets/preview-markers-overview.svg)
+
 
 ## Use the chunk toolbar (Live Preview)
 When your cursor is inside a chunk, a small toolbar appears. It lets you:
