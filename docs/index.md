@@ -15,6 +15,8 @@ The notes it creates are normal Obsidian notes that you can edit. Sync markers a
 - [Annotations](annotations.md)
 - [Retrieval and Ranking](retrieval-ranking.md)
 - [Settings Reference](settings-reference.md)
+- [Python Setup](python-setup.md)
+- [Docker Setup](docker-setup.md)
 - [LM Studio Provider Setup](lm-studio-provider-setup.md)
 - [PaddleOCR-VL 1.5 Setup](paddleocr-vl-1.5-setup.md)
 - [Command Palette Reference](command-palette-reference.md)

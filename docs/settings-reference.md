@@ -11,6 +11,10 @@ This page summarizes the main settings tabs and what they control.
 - **Auto‑start Redis stack**: Start Redis automatically when needed.
 - **Start Redis stack now**: Manual start/restart button.
 
+Step-by-step setup guides:
+- [Python Setup](python-setup.md)
+- [Docker Setup](docker-setup.md)
+
 ## Zotero Local API / Web API
 - **Local API base URL**: Usually `http://127.0.0.1:23119/api`.
 - **Web API settings**: Optional fallback or write‑back. Set library type, library ID, and API key.
