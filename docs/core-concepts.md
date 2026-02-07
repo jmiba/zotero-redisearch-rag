@@ -20,6 +20,19 @@ Key markers:
 
 These markers create **sync boundaries** so the plugin knows which parts are managed and how to reindex changes. You can edit chunk text safely. If you delete chunk markers, the plugin can no longer track that chunk.
 
+### Preview mode marker badges
+In preview mode, these marker comments are shown as badges so you can see boundaries without reading raw HTML comments.
+
+![Preview mode markers overview](assets/preview-markers-overview.svg)
+
+Key marker mapping:
+
+- `<!-- zrr:sync-start doc_id=... -->` -> `Redis Index Sync start - <doc_id>`
+- `<!-- zrr:chunk id=... page=... -->` -> `Page <n>/<total>`
+- `<!-- zrr:chunk id=... page=... exclude -->` -> `Page <n>/<total> - excluded`
+- `<!-- zrr:chunk end -->` -> `Page end` (or `Section end` for section chunks)
+- `<!-- zrr:sync-end -->` -> `Redis Index Sync end`
+
 ## Annotations and annotation images
 Zotero annotations (highlights, notes) can be synced into the note as callouts. If you enable the Zotero companion, the plugin can also pull **annotation images** (e.g., area or drawing annotations) and place them next to those callouts.
 
