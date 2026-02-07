@@ -16,7 +16,7 @@ See the script in `tools/batch_index_pyzotero.py` and the example command in the
 The plugin bundles Python tools under `tools/` for:
 
 - **Extraction and chunking** (Docling)
-- **Indexing** (Redis Search)S
+- **Indexing** (Redis Search)
 - **Querying** (RAG chat and diagnostics)
 
 Use the CLI tools when you Sneed:
