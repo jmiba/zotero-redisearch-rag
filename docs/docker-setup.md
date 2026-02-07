@@ -6,8 +6,8 @@ This guide explains how to configure Docker (or Podman) so the plugin can start 
 
 Install one of:
 
-- Docker Desktop
-- Podman (+ Compose support)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [Podman](https://podman.io) (+ Compose support)
 
 Start the daemon/runtime before using the plugin.
 
