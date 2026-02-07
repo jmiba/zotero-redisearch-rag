@@ -29,7 +29,11 @@ In live preview mode, they look like this:
 
 
 ## Use the chunk toolbar (Live Preview)
-When your cursor is inside a chunk, a small toolbar appears. It lets you:
+When your cursor is inside a chunk, a small toolbar appears. 
+
+![Chunk toolbar](assets/toolbar.png)
+
+It lets you:
 
 - **Clean**: Run the OCR cleanup model on the chunk.
 - **Tags**: Edit chunk tags.
