@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.5
+
+- Redis startup now prepends resolved Docker/compose binary directories to subprocess `PATH` so GUI-launched Obsidian can find Docker credential helpers.
+- In settings, `Auto-assign Redis port` now appears above Redis override fields, and the override fields are disabled and greyed out when auto-assign is enabled.
+
 ## 0.6.4
 
 - Publish a clean follow-up patch release so the Redis image pin and troubleshooting updates are included in release artifacts.

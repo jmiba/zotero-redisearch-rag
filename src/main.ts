@@ -10145,6 +10145,19 @@ export default class ZoteroRagPlugin extends Plugin {
     return path.join(pluginDir, "tools", "docker-compose.yml");
   }
 
+  private prependBinaryDirToPath(env: NodeJS.ProcessEnv, binaryPath: string): void {
+    if (!binaryPath || !path.isAbsolute(binaryPath)) {
+      return;
+    }
+    const dir = path.dirname(binaryPath);
+    const existingPath = env.PATH || "";
+    const parts = existingPath ? existingPath.split(path.delimiter) : [];
+    if (parts.includes(dir)) {
+      return;
+    }
+    env.PATH = existingPath ? `${dir}${path.delimiter}${existingPath}` : dir;
+  }
+
   private async resolveDockerPath(): Promise<string> {
     const configuredRaw = this.settings.dockerPath?.trim();
     const configured = configuredRaw ? this.resolveUserPath(configuredRaw) : "";
@@ -10652,17 +10665,13 @@ export default class ZoteroRagPlugin extends Plugin {
         return;
       }
       const composeEnv: NodeJS.ProcessEnv = { ...process.env };
+      this.prependBinaryDirToPath(composeEnv, dockerPath);
+      this.prependBinaryDirToPath(composeEnv, composeCommand.command);
       if (path.basename(composeCommand.command) === "podman-compose") {
         const podmanBin = await this.resolvePodmanBin();
         if (podmanBin) {
           composeEnv.PODMAN_BIN = podmanBin;
-          if (path.isAbsolute(podmanBin)) {
-            const podmanDir = path.dirname(podmanBin);
-            const existingPath = composeEnv.PATH || "";
-            if (!existingPath.split(path.delimiter).includes(podmanDir)) {
-              composeEnv.PATH = `${podmanDir}${path.delimiter}${existingPath}`;
-            }
-          }
+          this.prependBinaryDirToPath(composeEnv, podmanBin);
         }
       }
       const project = this.getDockerProjectName();

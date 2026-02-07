@@ -473,3 +473,11 @@
 .zrr-settings-tab-panel.is-active {
   display: block;
 }
+
+.zrr-redis-override-setting.is-disabled {
+  opacity: 0.55;
+}
+
+.zrr-redis-override-setting.is-disabled .setting-item-description {
+  color: var(--text-faint);
+}

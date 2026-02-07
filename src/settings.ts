@@ -438,38 +438,17 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
-        .setName("Redis data directory override")
-        .setDesc(
-          "Optional path to store Redis persistence when auto-assign is off. " +
-            "Env var ZRR_DATA_DIR overrides this setting. Supports ~, $HOME, and %USERPROFILE%. " +
-            "Relative paths with separators resolve from your home dir; use ./ to keep it vault-relative."
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder("~/Redis/zrr-data")
-            .setValue(this.plugin.settings.redisDataDirOverride)
-            .onChange(async (value) => {
-              this.plugin.settings.redisDataDirOverride = value.trim();
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(tabEl)
-        .setName("Redis project name override")
-        .setDesc(
-          "Optional Docker/Podman Compose project name when auto-assign is off. " +
-            "Env var ZRR_PROJECT_NAME overrides this setting."
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder("zrr-shared")
-            .setValue(this.plugin.settings.redisProjectName)
-            .onChange(async (value) => {
-              this.plugin.settings.redisProjectName = value.trim();
-              await this.plugin.saveSettings();
-            })
-        );
+      let redisDataDirSetting: Setting | null = null;
+      let redisProjectSetting: Setting | null = null;
+      let redisDataDirText: TextComponent | null = null;
+      let redisProjectText: TextComponent | null = null;
+      const refreshRedisOverrideState = (): void => {
+        const disabled = this.plugin.settings.autoAssignRedisPort;
+        redisDataDirText?.setDisabled(disabled);
+        redisProjectText?.setDisabled(disabled);
+        redisDataDirSetting?.settingEl.classList.toggle("is-disabled", disabled);
+        redisProjectSetting?.settingEl.classList.toggle("is-disabled", disabled);
+      };
 
       new Setting(tabEl)
         .setName("Auto-assign Redis port")
@@ -478,8 +457,48 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           toggle.setValue(this.plugin.settings.autoAssignRedisPort).onChange(async (value) => {
             this.plugin.settings.autoAssignRedisPort = value;
             await this.plugin.saveSettings();
+            refreshRedisOverrideState();
           })
         );
+
+      redisDataDirSetting = new Setting(tabEl)
+        .setName("Redis data directory override")
+        .setDesc(
+          "Optional path to store Redis persistence when auto-assign is off. " +
+            "Env var ZRR_DATA_DIR overrides this setting. Supports ~, $HOME, and %USERPROFILE%. " +
+            "Relative paths with separators resolve from your home dir; use ./ to keep it vault-relative."
+        )
+        .addText((text) => {
+          redisDataDirText = text;
+          return text
+            .setPlaceholder("~/Redis/zrr-data")
+            .setValue(this.plugin.settings.redisDataDirOverride)
+            .onChange(async (value) => {
+              this.plugin.settings.redisDataDirOverride = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+      redisDataDirSetting.settingEl.addClass("zrr-redis-override-setting");
+
+      redisProjectSetting = new Setting(tabEl)
+        .setName("Redis project name override")
+        .setDesc(
+          "Optional Docker/Podman Compose project name when auto-assign is off. " +
+            "Env var ZRR_PROJECT_NAME overrides this setting."
+        )
+        .addText((text) => {
+          redisProjectText = text;
+          return text
+            .setPlaceholder("zrr-shared")
+            .setValue(this.plugin.settings.redisProjectName)
+            .onChange(async (value) => {
+              this.plugin.settings.redisProjectName = value.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+      redisProjectSetting.settingEl.addClass("zrr-redis-override-setting");
+
+      refreshRedisOverrideState();
 
       new Setting(tabEl)
         .setName("Auto-start Redis stack (Docker/Podman Compose)")
