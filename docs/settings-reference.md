@@ -24,6 +24,7 @@ Step-by-step setup guides:
 - **Frontmatter template**: Editable template with `{{placeholders}}`.
 - **Note body template**: Controls where annotations and Docling text appear.
 - **Tag sanitization**: Normalize Zotero tags for Obsidian.
+- **Templating details**: See [Templating reference](templating-reference.md) for the full placeholder catalog and template behavior.
 
 ## Annotations
 - **Color map**: Map Zotero highlight colors to callout types and headings.

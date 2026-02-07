@@ -82,6 +82,9 @@ Open **Settings → Community plugins → Zotero Redis RAG** and set:
 - **Embeddings** and **Chat** models
 - **Output folders** (PDFs, notes, chats)
 
+> [!TIP]
+> **Templating**: Customize note frontmatter/body with placeholders. See [Templating reference](templating-reference.md).
+
 ## 7) Import your first item
 Run:
 
