@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.6
+
+- Speed up Zotero import picker search for large libraries by reducing search payloads, adding query debouncing, and caching repeated queries.
+- Restrict import picker search to top-level Zotero items and filter out non-importable/untitled results (`note`, `annotation`, `attachment`, and blank titles).
+
 ## 0.6.5
 
 - Redis startup now prepends resolved Docker/compose binary directories to subprocess `PATH` so GUI-launched Obsidian can find Docker credential helpers.

@@ -3453,34 +3453,58 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private async searchZoteroItemsWeb(query: string): Promise<ZoteroLocalItem[]> {
-    const includeOptions = ["data,meta,children", "data,meta"];
+    const trimmedQuery = query.trim();
+    const includeOptions = ["data,meta"];
     for (const include of includeOptions) {
       const params = new URLSearchParams();
       params.set("itemType", "-attachment");
       params.set("limit", "25");
       params.set("include", include);
-      if (query.trim()) {
-        params.set("q", query.trim());
+      if (trimmedQuery) {
+        params.set("q", trimmedQuery);
+      } else {
+        params.set("sort", "dateAdded");
+        params.set("direction", "desc");
       }
-      const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items?${params.toString()}`);
+      const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/top?${params.toString()}`);
       try {
         const payload = await this.requestWebApi(url, `Zotero Web API search failed for ${url}`);
         const parsed = JSON.parse(payload.toString("utf8"));
         if (!Array.isArray(parsed)) {
           return [];
         }
-        return parsed
-          .map((entry: any) => ({
-            key: entry.key ?? entry.data?.key,
-            data: entry.data ?? {},
-            meta: entry.meta ?? {},
-          }))
-          .filter((entry: ZoteroLocalItem) => typeof entry.key === "string" && entry.key.trim().length > 0);
+        return this.normalizeZoteroSearchResults(parsed);
       } catch (error) {
         console.warn("Failed to search Zotero via web API", error);
       }
     }
     return [];
+  }
+
+  private normalizeZoteroSearchResults(rawItems: any[]): ZoteroLocalItem[] {
+    return rawItems
+      .map((item) => ({
+        key: item.key ?? item.data?.key,
+        data: item.data ?? {},
+        meta: item.meta ?? {},
+      }))
+      .filter((item) => this.isImportableZoteroResult(item));
+  }
+
+  private isImportableZoteroResult(item: ZoteroLocalItem): boolean {
+    const key = typeof item.key === "string" ? item.key.trim() : "";
+    if (!key) {
+      return false;
+    }
+    const itemType = String(item.data?.itemType ?? "").trim().toLowerCase();
+    if (itemType === "attachment" || itemType === "note" || itemType === "annotation") {
+      return false;
+    }
+    const title = typeof item.data?.title === "string" ? item.data.title.trim() : "";
+    if (!title) {
+      return false;
+    }
+    return true;
   }
 
   private async updateZoteroItemLanguage(
@@ -7263,29 +7287,27 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   async searchZoteroItems(query: string): Promise<ZoteroLocalItem[]> {
-    const includeOptions = ["data,meta,children", "data,meta"];
+    const trimmedQuery = query.trim();
+    const includeOptions = ["data,meta"];
     for (const include of includeOptions) {
       const params = new URLSearchParams();
       params.set("itemType", "-attachment");
       params.set("limit", "25");
       params.set("include", include);
-      if (query.trim()) {
-        params.set("q", query.trim());
+      if (trimmedQuery) {
+        params.set("q", trimmedQuery);
+      } else {
+        params.set("sort", "dateAdded");
+        params.set("direction", "desc");
       }
-      const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items?${params.toString()}`);
+      const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/top?${params.toString()}`);
       try {
         const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
         const items = JSON.parse(payload.toString("utf8"));
         if (!Array.isArray(items)) {
           return [];
         }
-        return items
-          .map((item) => ({
-            key: item.key ?? item.data?.key,
-            data: item.data ?? {},
-            meta: item.meta ?? {},
-          }))
-          .filter((item) => typeof item.key === "string" && item.key.trim().length > 0);
+        return this.normalizeZoteroSearchResults(items);
       } catch (error) {
         console.warn("Failed to search Zotero via local API", error);
       }
@@ -7293,7 +7315,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!this.canUseWebApi()) {
       throw new Error("Zotero search failed for all include modes.");
     }
-    return this.searchZoteroItemsWeb(query);
+    return this.searchZoteroItemsWeb(trimmedQuery);
   }
 
   public async hasProcessableAttachment(item: ZoteroLocalItem): Promise<boolean> {

@@ -21,7 +21,6 @@ type RedisSearchProvider = {
 type ZoteroItemSuggestProvider = {
   getDocIndex: () => Promise<Record<string, any>>;
   searchZoteroItems: (query: string) => Promise<ZoteroLocalItem[]>;
-  hasProcessableAttachment: (item: ZoteroLocalItem) => Promise<boolean>;
 };
 
 export type OutputModalOptions = {
@@ -1152,8 +1151,11 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   private resolveSelection: ((item: ZoteroLocalItem | null) => void) | null;
   private lastError: string | null = null;
   private indexedDocIds: Set<string> | null = null;
-  private attachmentStatusCache = new Map<string, "yes" | "no">();
-  private attachmentChecks = new Set<string>();
+  private querySequence = 0;
+  private readonly queryDebounceMs = 200;
+  private readonly minQueryLength = 2;
+  private readonly maxQueryCacheEntries = 100;
+  private queryCache = new Map<string, ZoteroLocalItem[]>();
 
   constructor(app: App, plugin: ZoteroItemSuggestProvider, onSelect: (item: ZoteroLocalItem | null) => void) {
     super(app);
@@ -1163,12 +1165,41 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   }
 
   async getSuggestions(query: string): Promise<ZoteroLocalItem[]> {
+    const trimmed = query.trim();
+    if (trimmed.length > 0 && trimmed.length < this.minQueryLength) {
+      return [];
+    }
+
+    const cacheKey = trimmed.toLowerCase();
+    const cached = this.queryCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const sequence = ++this.querySequence;
     try {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, this.queryDebounceMs);
+      });
+      if (sequence !== this.querySequence) {
+        return [];
+      }
       if (!this.indexedDocIds) {
         const index = await this.plugin.getDocIndex();
         this.indexedDocIds = new Set(Object.keys(index));
       }
-      return await this.plugin.searchZoteroItems(query);
+      const results = await this.plugin.searchZoteroItems(trimmed);
+      if (sequence !== this.querySequence) {
+        return [];
+      }
+      this.queryCache.set(cacheKey, results);
+      if (this.queryCache.size > this.maxQueryCacheEntries) {
+        const oldestKey = this.queryCache.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.queryCache.delete(oldestKey);
+        }
+      }
+      return results;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (this.lastError !== message) {
@@ -1221,19 +1252,6 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
       metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
       hasMeta = true;
     }
-    if (pdfStatus === "unknown") {
-      const cached = docId ? this.attachmentStatusCache.get(docId) : undefined;
-      if (cached === "no") {
-        addSeparator();
-        metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
-        hasMeta = true;
-        el.addClass("zrr-no-pdf-item");
-      } else if (cached === "yes") {
-        // Nothing to render.
-      } else if (docId) {
-        void this.refreshAttachmentStatus(docId, item, el, metaEl);
-      }
-    }
     el.addEventListener("click", () => {
       if (this.resolveSelection) {
         this.resolveSelection(item);
@@ -1255,33 +1273,6 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     if (this.resolveSelection) {
       this.resolveSelection(null);
       this.resolveSelection = null;
-    }
-  }
-
-  private async refreshAttachmentStatus(
-    docId: string,
-    item: ZoteroLocalItem,
-    el: HTMLElement,
-    metaEl: HTMLElement
-  ): Promise<void> {
-    if (this.attachmentChecks.has(docId)) {
-      return;
-    }
-    this.attachmentChecks.add(docId);
-    try {
-      const hasPdf = await this.plugin.hasProcessableAttachment(item);
-      this.attachmentStatusCache.set(docId, hasPdf ? "yes" : "no");
-      if (!hasPdf && metaEl.isConnected && el.isConnected) {
-        if (!metaEl.querySelector(".zrr-no-pdf-flag")) {
-          if (metaEl.childNodes.length > 0) {
-            metaEl.createSpan({ text: " - " });
-          }
-          metaEl.createSpan({ text: "No PDF attachment", cls: "zrr-no-pdf-flag" });
-        }
-        el.addClass("zrr-no-pdf-item");
-      }
-    } finally {
-      this.attachmentChecks.delete(docId);
     }
   }
 }
