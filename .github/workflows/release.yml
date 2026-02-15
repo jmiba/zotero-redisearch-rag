@@ -21,6 +21,7 @@ jobs:
       - run: npm run package-release
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: |
             main.js
             manifest.json
