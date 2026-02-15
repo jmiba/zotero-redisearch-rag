@@ -1,4 +1,9 @@
 # Changelog
+## 0.6.9 (Bugfix Release)
+
+- Fix `citekey` sync regression where unpinned Better BibTeX keys could be cleared from notes on open.
+- Resolve Zotero citekeys with a CSL fallback so BBT-generated keys sync into notes even when not pinned in `Extra`.
+- Restore note -> Zotero `citekey` sync by writing `Citation Key: ...` into Zotero `Extra` when `citekey` is edited in Obsidian.
 
 ## 0.6.8
 

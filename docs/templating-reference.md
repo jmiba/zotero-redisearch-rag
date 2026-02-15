@@ -21,7 +21,7 @@ In plugin settings:
 - If the frontmatter template is blank, the plugin still writes frontmatter with `doc id`.
 - Empty frontmatter fields are removed automatically (except `abstract`, which is preserved).
 - For YAML-safe values, use `_yaml` placeholders (for example, `{{title_yaml}}`).
-- `citekey` is part of metadata sync. Zotero -> note updates always apply. Note -> Zotero updates are only written when Zotero `Extra` already contains a pinned citation-key line (`Citation Key: ...`, `BibTeX: ...`, or `biblatexcitekey[...]`).
+- `citekey` is part of metadata sync. Zotero -> note updates always apply (including Better BibTeX-generated keys). Note -> Zotero updates write `Citation Key: ...` into Zotero `Extra`.
 
 ## Note body template behavior
 
