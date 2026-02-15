@@ -14,6 +14,7 @@ export type PdfAttachment = {
 export type NoteMetadataFields = {
   title: string;
   short_title: string;
+  citekey: string;
   date: string;
   abstract: string;
   doi: string;

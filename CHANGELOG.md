@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.7
+
+- Add `citekey` to two-way metadata sync between note frontmatter and Zotero items.
+- Sync `citekey` to Zotero via `Extra` (`Citation Key: ...`) so Better BibTeX-pinned keys can be updated from Obsidian.
+- Update docs to list synced metadata fields and clarify `citekey`/Better BibTeX behavior.
+
 ## 0.6.6
 
 - Speed up Zotero import picker search for large libraries by reducing search payloads, adding query debouncing, and caching repeated queries.

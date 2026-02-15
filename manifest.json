@@ -1,7 +1,7 @@
 {
   "id": "zotero-redisearch-rag",
   "name": "Zotero Redis RAG",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "minAppVersion": "1.5.0",
   "isDesktopOnly": true,
   "description": "Zotero import, Docling extraction, and Redis Stack indexing for RAG in Obsidian",

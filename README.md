@@ -45,8 +45,10 @@ You can edit chunk text directly in the note. On save, the plugin updates the ca
 ## Zotero sync (metadata + annotations)
 
 The plugin syncs metadata and annotations from your Zotero library when you import or re-sync an item.
-Metadata updates (title, authors, tags, collections, etc.) refresh the note frontmatter. Annotation changes
+Metadata updates (`title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `tags`, `authors`, `editors`) refresh the note frontmatter. Annotation changes
 update the note body, and any edits you make inside a chunk are preserved unless you remove that chunk.
+
+For `citekey`, the plugin syncs via Zotero `Extra` (`Citation Key: ...`). With Better BibTeX installed, this pins/updates the BBT citation key.
 
 **Note:** Edits inside chunks are preserved, but deleting a chunk marker removes its sync target!
 

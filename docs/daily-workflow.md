@@ -12,6 +12,10 @@ The plugin creates a note, extracts text, and indexes the chunks.
 ## Re‑sync metadata and annotations
 Metadata and annotations are refreshed automatically when you **open** or **save** a Zotero note. This keeps the frontmatter and annotation callouts in sync with Zotero.
 
+Synced metadata fields: `title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `tags`, `authors`, `editors`.
+
+`citekey` is synced through Zotero `Extra` as `Citation Key: ...`. If Better BibTeX is installed, this also pins/updates the BBT citekey.
+
 If you want a full refresh (including text extraction), re‑run the import command on the same item. The plugin will update the cached files and the index.
 
 ## Edit chunks safely

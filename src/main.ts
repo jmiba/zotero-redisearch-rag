@@ -4693,6 +4693,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const fieldOrder: Array<keyof NoteMetadataFields> = [
         "title",
         "short_title",
+        "citekey",
         "date",
         "abstract",
         "doi",
@@ -4709,6 +4710,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const frontmatterKeys: Record<keyof NoteMetadataFields, string> = {
         title: "title",
         short_title: "short_title",
+        citekey: "citekey",
         date: "date",
         abstract: "abstract",
         doi: "doi",
@@ -4732,6 +4734,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const fieldLabels: Record<keyof NoteMetadataFields, string> = {
         title: "Title",
         short_title: "Short title",
+        citekey: "Citekey",
         date: "Date",
         abstract: "Abstract",
         doi: "DOI",
@@ -5113,6 +5116,13 @@ export default class ZoteroRagPlugin extends Plugin {
         ?? frontmatter?.["short-title"]
         ?? frontmatter?.["title-short"]
     );
+    const citekey = this.normalizeMetadataString(
+      frontmatter?.citekey
+        ?? frontmatter?.["citation key"]
+        ?? frontmatter?.citation_key
+        ?? frontmatter?.citationKey
+        ?? frontmatter?.["citation-key"]
+    );
     const date = this.normalizeMetadataString(frontmatter?.date);
     const abstractNote = this.normalizeMetadataString(
       frontmatter?.abstract ?? frontmatter?.abstractNote
@@ -5136,6 +5146,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return {
       title,
       short_title: shortTitle,
+      citekey,
       date,
       abstract: abstractNote,
       doi,
@@ -5154,6 +5165,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private extractZoteroMetadata(values: ZoteroItemValues): NoteMetadataFields {
     const title = this.normalizeMetadataString(values?.title);
     const shortTitle = this.normalizeMetadataString(extractShortTitleFromValues(values));
+    const citekey = this.normalizeMetadataString(extractCitekey(values));
     const date = this.normalizeMetadataString(values?.date);
     const abstractNote = this.normalizeMetadataString(values?.abstractNote);
     const doi = this.normalizeMetadataString(values?.DOI ?? values?.doi);
@@ -5186,6 +5198,7 @@ export default class ZoteroRagPlugin extends Plugin {
     return {
       title,
       short_title: shortTitle,
+      citekey,
       date,
       abstract: abstractNote,
       doi,
@@ -5949,6 +5962,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const fieldLabels: Record<keyof NoteMetadataFields, string> = {
       title: "Title",
       short_title: "Short title",
+      citekey: "Citekey",
       date: "Date",
       abstract: "Abstract",
       doi: "DOI",
@@ -6089,6 +6103,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const fieldOrder: Array<keyof NoteMetadataFields> = [
       "title",
       "short_title",
+      "citekey",
       "date",
       "abstract",
       "doi",
@@ -6470,6 +6485,13 @@ export default class ZoteroRagPlugin extends Plugin {
           delete (frontmatter as Record<string, any>).shortTitle;
           delete (frontmatter as Record<string, any>)["title-short"];
         }
+        if ("citekey" in updates) {
+          frontmatter.citekey = updates.citekey ?? "";
+          delete (frontmatter as Record<string, any>).citation_key;
+          delete (frontmatter as Record<string, any>).citationKey;
+          delete (frontmatter as Record<string, any>)["citation key"];
+          delete (frontmatter as Record<string, any>)["citation-key"];
+        }
         if ("date" in updates) {
           frontmatter.date = updates.date ?? "";
         }
@@ -6537,6 +6559,9 @@ export default class ZoteroRagPlugin extends Plugin {
     if ("short_title" in updates) {
       payload.shortTitle = updates.short_title ?? "";
     }
+    if ("citekey" in updates) {
+      payload.extra = this.updateExtraWithCitekey(values?.extra, updates.citekey ?? "");
+    }
     if ("date" in updates) {
       payload.date = updates.date ?? "";
     }
@@ -6585,6 +6610,28 @@ export default class ZoteroRagPlugin extends Plugin {
       );
     }
     await this.updateZoteroItemFields(itemKey, values, payload);
+  }
+
+  private updateExtraWithCitekey(extraRaw: unknown, citekeyRaw: string): string {
+    const citekey = this.normalizeMetadataString(citekeyRaw);
+    const extra = this.normalizeMetadataString(extraRaw);
+    const lines = extra ? extra.split(/\r?\n/) : [];
+    const filtered = lines.filter((line) => !this.isCitekeyExtraLine(line));
+    if (citekey) {
+      filtered.push(`Citation Key: ${citekey}`);
+    }
+    return filtered.join("\n").trim();
+  }
+
+  private isCitekeyExtraLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return false;
+    }
+    if (/^biblatexcitekey\s*\[[^\]]*\]\s*$/i.test(trimmed)) {
+      return true;
+    }
+    return /^\s*(citation key|citationkey|citekey|citation-key|bibtex key|bibtexkey|bibtex)\s*:/i.test(trimmed);
   }
 
   private async applyZoteroAnnotationUpdates(
