@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.8
+
+- Adjust `citekey` sync policy: only sync note `citekey` back to Zotero `Extra` when a pinned citation-key line already exists.
+- Always sync Zotero/Better BibTeX citekey changes into the Obsidian note, even when back-sync is disabled.
+- Clarify docs for directional `citekey` sync behavior.
+
 ## 0.6.7
 
 - Add `citekey` to two-way metadata sync between note frontmatter and Zotero items.

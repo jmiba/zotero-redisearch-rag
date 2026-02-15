@@ -14,7 +14,7 @@ Metadata and annotations are refreshed automatically when you **open** or **save
 
 Synced metadata fields: `title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `tags`, `authors`, `editors`.
 
-`citekey` is synced through Zotero `Extra` as `Citation Key: ...`. If Better BibTeX is installed, this also pins/updates the BBT citekey.
+`citekey` from Zotero always updates the note. Writing `citekey` back to Zotero is only done if Zotero `Extra` already has a pinned citation-key line (`Citation Key: ...`, `BibTeX: ...`, or `biblatexcitekey[...]`). With Better BibTeX installed, that updates the pinned BBT citekey.
 
 If you want a full refresh (including text extraction), re‑run the import command on the same item. The plugin will update the cached files and the index.
 

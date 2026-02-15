@@ -48,7 +48,7 @@ The plugin syncs metadata and annotations from your Zotero library when you impo
 Metadata updates (`title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `tags`, `authors`, `editors`) refresh the note frontmatter. Annotation changes
 update the note body, and any edits you make inside a chunk are preserved unless you remove that chunk.
 
-For `citekey`, the plugin syncs via Zotero `Extra` (`Citation Key: ...`). With Better BibTeX installed, this pins/updates the BBT citation key.
+For `citekey`, Zotero -> note sync always applies. Note -> Zotero sync is only applied when Zotero `Extra` already contains a pinned citation-key line (`Citation Key: ...`, `BibTeX: ...`, or `biblatexcitekey[...]`). With Better BibTeX installed, that updates the pinned BBT citation key.
 
 **Note:** Edits inside chunks are preserved, but deleting a chunk marker removes its sync target!
 

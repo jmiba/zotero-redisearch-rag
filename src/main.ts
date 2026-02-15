@@ -4748,10 +4748,18 @@ export default class ZoteroRagPlugin extends Plugin {
         authors: "Authors",
         editors: "Editors",
       };
+      const canBackSyncCitekey = this.hasPinnedCitekeyInExtra(zoteroValues?.extra);
 
       for (const field of activeFields) {
         const noteValue = noteFields[field];
         const zoteroValue = zoteroFields[field];
+        if (field === "citekey" && !canBackSyncCitekey) {
+          if (!this.metadataValuesEqual(field, noteValue, zoteroValue)) {
+            decisions[field] = "zotero";
+            this.assignMetadataUpdate(noteUpdates, field, zoteroValue);
+          }
+          continue;
+        }
         if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
           continue;
         }
@@ -6559,7 +6567,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if ("short_title" in updates) {
       payload.shortTitle = updates.short_title ?? "";
     }
-    if ("citekey" in updates) {
+    if ("citekey" in updates && this.hasPinnedCitekeyInExtra(values?.extra)) {
       payload.extra = this.updateExtraWithCitekey(values?.extra, updates.citekey ?? "");
     }
     if ("date" in updates) {
@@ -6621,6 +6629,30 @@ export default class ZoteroRagPlugin extends Plugin {
       filtered.push(`Citation Key: ${citekey}`);
     }
     return filtered.join("\n").trim();
+  }
+
+  private hasPinnedCitekeyInExtra(extraRaw: unknown): boolean {
+    const extra = this.normalizeMetadataString(extraRaw);
+    if (!extra) {
+      return false;
+    }
+    for (const line of extra.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const biblatexMatch = trimmed.match(/^biblatexcitekey\s*\[([^\]]+)\]\s*$/i);
+      if (biblatexMatch && biblatexMatch[1] && biblatexMatch[1].trim()) {
+        return true;
+      }
+      const match = trimmed.match(
+        /^\s*(citation key|citationkey|citekey|citation-key|bibtex key|bibtexkey|bibtex)\s*:\s*(.+)\s*$/i
+      );
+      if (match && match[2] && match[2].trim()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private isCitekeyExtraLine(line: string): boolean {
