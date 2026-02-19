@@ -525,10 +525,48 @@ export default class ZoteroRagPlugin extends Plugin {
     return normalizedA.localeCompare(normalizedB, undefined, { numeric: true, sensitivity: "base" });
   }
 
+  private isFullChangelogLine(line: string): boolean {
+    const normalized = String(line || "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[*_`]/g, "")
+      .trim()
+      .toLowerCase();
+    return normalized.includes("full changelog");
+  }
+
   private sanitizeReleaseNotesMarkdown(markdown: string): string {
     const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
-    const filtered = lines.filter((line) => !/full\s+changelog\s*:/i.test(line));
-    return filtered.join("\n").trim();
+    const filtered = lines.filter((line) => !this.isFullChangelogLine(line));
+    return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  private stripLeadingVersionHeading(markdown: string, version: string): string {
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    const firstNonEmpty = lines.findIndex((line) => line.trim().length > 0);
+    if (firstNonEmpty < 0) {
+      return "";
+    }
+    const normalizedVersion = this.normalizeReleaseVersion(version);
+    if (!normalizedVersion) {
+      return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    const escapedVersion = normalizedVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const normalizedFirstLine = lines[firstNonEmpty]
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[*_`]/g, "")
+      .trim();
+    const versionHeadingRe = new RegExp(`^#{0,6}\\s*v?${escapedVersion}(?:\\b|\\s|\\(|-)`, "i");
+    if (!versionHeadingRe.test(normalizedFirstLine)) {
+      return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    lines.splice(firstNonEmpty, 1);
+    while (firstNonEmpty < lines.length && lines[firstNonEmpty].trim().length === 0) {
+      lines.splice(firstNonEmpty, 1);
+    }
+    if (firstNonEmpty < lines.length && /^[-=]{3,}\s*$/.test(lines[firstNonEmpty].trim())) {
+      lines.splice(firstNonEmpty, 1);
+    }
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
 
   private getBundledReleaseNotesEntries(): ReleaseNotesEntry[] {
@@ -576,11 +614,22 @@ export default class ZoteroRagPlugin extends Plugin {
       return "This version includes improvements and fixes.";
     }
 
+    if (entriesToRender.length === 1) {
+      const entry = entriesToRender[0];
+      const body = this.stripLeadingVersionHeading(
+        this.sanitizeReleaseNotesMarkdown(String(entry.markdown || "")),
+        entry.version
+      );
+      return `### v${entry.version}\n\n${body || "This release includes improvements and fixes."}`;
+    }
+
     return entriesToRender
       .map((entry) => {
         const body =
-          this.sanitizeReleaseNotesMarkdown(String(entry.markdown || "")) ||
-          "This release includes improvements and fixes.";
+          this.stripLeadingVersionHeading(
+            this.sanitizeReleaseNotesMarkdown(String(entry.markdown || "")),
+            entry.version
+          ) || "This release includes improvements and fixes.";
         return `### v${entry.version}\n\n${body}`;
       })
       .join("\n\n");

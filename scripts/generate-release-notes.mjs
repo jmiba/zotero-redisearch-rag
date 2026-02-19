@@ -45,11 +45,20 @@ const compareVersions = (left, right) => {
   });
 };
 
+const isFullChangelogLine = (line) => {
+  const normalized = String(line || "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_`]/g, "")
+    .trim()
+    .toLowerCase();
+  return normalized.includes("full changelog");
+};
+
 const normalizeMarkdown = (value) => {
   const markdown = String(value || "").replace(/\r\n/g, "\n");
   const filtered = markdown
     .split("\n")
-    .filter((line) => !/full\s+changelog\s*:/i.test(line))
+    .filter((line) => !isFullChangelogLine(line))
     .join("\n")
     .trim();
   return filtered || "This release includes improvements and fixes.";

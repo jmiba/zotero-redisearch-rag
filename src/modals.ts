@@ -230,7 +230,7 @@ export class ReleaseNotesModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("zrr-release-notes-modal");
-    contentEl.createEl("h3", { text: `What's new in v${this.version}` });
+    contentEl.createEl("h3", { text: "What's new" });
     this.markdownComponent?.unload();
     this.markdownComponent = new Component();
     this.markdownComponent.load();
