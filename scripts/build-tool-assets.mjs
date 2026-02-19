@@ -17,6 +17,8 @@ const tools = [
   { name: "ocr_wordlist.txt", path: "tools/ocr_wordlist.txt" },
   { name: "requirements.txt", path: "requirements.txt" },
   { name: "docker-compose.yml", path: "docker-compose.yml" },
+  { name: "python-worker.Dockerfile", path: "tools/python-worker.Dockerfile" },
+  { name: "python-worker-entrypoint.sh", path: "tools/python-worker-entrypoint.sh" },
   { name: "redis-stack.conf", path: "redis-stack.conf" },
 ];
 

@@ -110,10 +110,10 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 ## Requirements
 
 - Obsidian (desktop)
-- Zotero 7 (desktop)
-- Docker Desktop or Podman (for Redis Stack)
+- Zotero 7 or 8 (desktop)
+- Docker Desktop or Podman (for Redis Stack + Python worker)
 - LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
-- Python 3.11–3.13 (for Docling tools)
+- Optional (local runtime mode only): Python 3.11–3.13
 
 ## Security and network disclosure
 
@@ -148,9 +148,9 @@ Depending on your configuration, the plugin may interact with:
 
 The plugin depends on local tools installed on your system:
 
-- Python 3.11–3.13
-- Docker Desktop or Podman (for Redis Stack startup)
-- Optional: Tesseract and Poppler (for OCR-layered PDF workflows)
+- Docker Desktop or Podman (for Redis Stack + Python worker startup)
+- Optional (local runtime mode only): Python 3.11–3.13
+- Optional (local runtime mode only): Tesseract and Poppler (worker mode includes these in the `python-worker` image)
 
 ### API key handling
 
@@ -200,13 +200,14 @@ Then copy the plugin folder to your vault as above.
 
 ### 3) Start Redis Stack
 Recommended: start from the plugin
-- Command palette -> "Start Redis Stack (Docker Compose)"
+- Command palette -> "Start Redis Stack (Docker/Podman Compose)"
 
 Settings related to Redis (Settings → Prerequisites):
+- Python runtime: `Python worker container` (recommended) or `Local interpreter/venv`.
 - Docker/Podman path: path to the CLI (default `docker`; set to `podman` if using Podman).
 - Redis URL: `redis://127.0.0.1:6379` (updated automatically when Auto‑assign is ON).
 - Auto-assign Redis port: OFF by default. When enabled, the plugin picks a free local port and updates Redis URL on start.
-- Auto-start Redis stack: ON by default. The plugin will ensure the stack is running when needed.
+- Auto-start Redis stack: ON by default. The plugin will ensure Redis + worker are running when needed.
 - Start Redis stack now: button in settings to start/restart immediately.
 
 Notes:
@@ -243,16 +244,24 @@ Cloud options
       - API key: your key from the provider
    - Then select that profile for Embeddings/Chat/OCR cleanup and choose a model via the Refresh buttons.
 
-### 5) Python setup (Docling)
+### 5) Python runtime setup (Docling)
+Recommended (worker mode):
+
+1. In **Settings → Prerequisites**, set **Python runtime** to **Python worker container (recommended)**.
+2. Click **Start Redis stack now**.
+3. Wait for first startup to finish (worker venv dependencies are installed on first run).
+
+Local fallback mode:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
-You can also create/update the Python env from the settings panel ("Python environment"):
-- Creates `.venv` inside the plugin folder.
-- Uses the configured Python path if valid; otherwise tries `python3`/`python` (Windows: `py -3`, then `python`).
-- Installs `requirements.txt` into that venv and updates your `Python path` setting.
+If you use local mode:
+- Set **Python runtime** to `Local interpreter/venv`.
+- Use **Python environment → Create/Update** in settings, or the terminal commands above.
+- Set **Python path** if auto-detection is incorrect.
 Optional (for stronger OCR fallback):
 - Install Poppler and Tesseract on your system.
 Optional (for faster native rebuilds):
@@ -263,8 +272,8 @@ Obsidian -> Settings -> Community plugins -> Zotero Redis RAG
 
 Key settings:
 - Prerequisites
-   - Python path: `/path/to/your/.venv/bin/python` (or leave blank to auto‑detect)
-   - Python environment: Create/Update button to set up the plugin venv
+   - Python runtime: `Python worker container` (recommended)
+   - Python path + Python environment: only needed for local runtime mode
    - Docker/Podman path: `docker` (or `podman`)
    - Redis URL: `redis://127.0.0.1:6379` (auto‑updated if Auto‑assign is ON)
    - Auto-assign Redis port: toggle (default OFF)
@@ -316,7 +325,9 @@ When triggered, the search doubles `k` (minimum 12) and relaxes narrative filter
 - If "Copy PDFs into vault" is ON, the note links to the vault PDF.
 - If it is OFF, the note links to the Zotero attachment (so you can see your Zotero annotations).
 - If the local PDF path is unavailable, the plugin will temporarily copy the PDF into the vault for processing and tell you.
-- "Create OCR-layered PDF copy" writes a new, searchable PDF (requires Tesseract + Poppler) and uses it for citations when opening PDFs.
+- "Create OCR-layered PDF copy" writes a new, searchable PDF and uses it for citations when opening PDFs.
+  - Worker runtime (default): Tesseract + Poppler are included in the `python-worker` image.
+  - Local runtime: install Tesseract + Poppler on your host system.
 
 ## Web API fallback (optional)
 

@@ -1,0 +1,40 @@
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG ZRR_TESSERACT_LANG_PACKS="eng deu fra spa ita nld por pol swe"
+
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gcc \
+    g++ \
+    libglib2.0-0 \
+    libgl1 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    poppler-utils \
+    tesseract-ocr; \
+  for lang in ${ZRR_TESSERACT_LANG_PACKS}; do \
+    [ -n "${lang}" ] || continue; \
+    apt-get install -y --no-install-recommends "tesseract-ocr-${lang}"; \
+  done; \
+  rm -rf /var/lib/apt/lists/*
+
+COPY tools/python-worker-entrypoint.sh /usr/local/bin/python-worker-entrypoint.sh
+RUN chmod +x /usr/local/bin/python-worker-entrypoint.sh
+
+WORKDIR /workspace
+
+ENV ZRR_WORKER_REQUIREMENTS=/workspace/plugin/tools/requirements.txt
+ENV ZRR_WORKER_VENV_DIR=/workspace/cache/venv
+ENV PATH=/workspace/cache/venv/bin:$PATH
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+ENV DISABLE_MODEL_SOURCE_CHECK=True
+
+ENTRYPOINT ["/usr/local/bin/python-worker-entrypoint.sh"]
+CMD ["sleep", "infinity"]

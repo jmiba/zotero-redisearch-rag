@@ -108,6 +108,11 @@ const ISO_639_1_TO_3: Record<string, string> = {
 const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
 const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
+const REDIS_STACK_SERVICE = "redis-stack";
+const PYTHON_WORKER_SERVICE = "python-worker";
+const PYTHON_WORKER_VENV_PYTHON = "/workspace/cache/venv/bin/python";
+const PYTHON_WORKER_PLUGIN_ROOT = "/workspace/plugin";
+const PYTHON_WORKER_VAULT_ROOT = "/workspace/vault";
 const MAX_CITATION_TITLE_LENGTH = 80;
 const ANNOTATION_SYNC_GRACE_MS = 120000;
 const ZRR_ANNOTATIONS_START_RE = /<!--\s*zrr:annotations-start\b[^>]*-->/i;
@@ -203,6 +208,18 @@ type AnnotationSnapshotEntry = {
 type AnnotationSnapshotCacheEntry = {
   attachment_key?: string;
   annotations: Record<string, AnnotationSnapshotEntry>;
+};
+
+type ComposeCommandSpec = {
+  command: string;
+  argsPrefix: string[];
+};
+
+type ComposeProjectContext = {
+  composePath: string;
+  composeCommand: ComposeCommandSpec;
+  composeEnv: NodeJS.ProcessEnv;
+  project: string;
 };
 
 export default class ZoteroRagPlugin extends Plugin {
@@ -416,6 +433,9 @@ export default class ZoteroRagPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) ?? {};
     const settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    if ((data as any).pythonRuntime === undefined) {
+      settings.pythonRuntime = "local";
+    }
     if (
       settings.preferObsidianNoteForCitations === undefined &&
       typeof (data as any).preferVaultPdfForCitations === "boolean"
@@ -9880,6 +9900,97 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.resolveUserPath(this.settings.pythonPath || "");
   }
 
+  private getPythonRuntimeMode(): "worker" | "local" {
+    return this.settings.pythonRuntime === "local" ? "local" : "worker";
+  }
+
+  private usePythonWorker(): boolean {
+    return this.getPythonRuntimeMode() === "worker";
+  }
+
+  private getPythonWorkerCacheDir(): string {
+    return path.join(this.getVaultBasePath(), CACHE_ROOT, "python-worker-cache");
+  }
+
+  private getComposeServiceNamesForCurrentRuntime(): string[] {
+    if (this.usePythonWorker()) {
+      return [REDIS_STACK_SERVICE, PYTHON_WORKER_SERVICE];
+    }
+    return [REDIS_STACK_SERVICE];
+  }
+
+  private toContainerPath(base: string, target: string, containerRoot: string): string | null {
+    const relative = path.relative(base, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      return null;
+    }
+    const parts = relative.split(path.sep).filter(Boolean);
+    return parts.length ? path.posix.join(containerRoot, ...parts) : containerRoot;
+  }
+
+  private mapPathForPythonWorker(rawPath: string): string {
+    if (!path.isAbsolute(rawPath)) {
+      return rawPath;
+    }
+    const normalized = path.normalize(rawPath);
+    const pluginDir = path.normalize(this.getPluginDir());
+    const vaultDir = path.normalize(this.getVaultBasePath());
+
+    return (
+      this.toContainerPath(pluginDir, normalized, PYTHON_WORKER_PLUGIN_ROOT) ??
+      this.toContainerPath(vaultDir, normalized, PYTHON_WORKER_VAULT_ROOT) ??
+      rawPath
+    );
+  }
+
+  private getWorkerHostAlias(): string {
+    const configured = (this.settings.dockerPath || "").toLowerCase();
+    if (configured.includes("podman")) {
+      return "host.containers.internal";
+    }
+    return "host.docker.internal";
+  }
+
+  private mapUrlForPythonWorker(rawValue: string): string {
+    const trimmed = (rawValue || "").trim();
+    if (!trimmed) {
+      return rawValue;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return rawValue;
+    }
+    if (!["http:", "https:", "redis:", "rediss:"].includes(parsed.protocol)) {
+      return rawValue;
+    }
+    if (!this.isLocalRedisHost(parsed.hostname || "")) {
+      return rawValue;
+    }
+    parsed.hostname = this.getWorkerHostAlias();
+    return parsed.toString();
+  }
+
+  private mapPythonArgsForWorker(args: string[]): string[] {
+    return args.map((arg) => {
+      const mappedUrl = this.mapUrlForPythonWorker(arg);
+      if (mappedUrl !== arg) {
+        return mappedUrl;
+      }
+      if (!path.isAbsolute(arg)) {
+        return arg;
+      }
+      const mapped = this.mapPathForPythonWorker(arg);
+      if (mapped === arg) {
+        throw new Error(
+          `Python worker cannot access path '${arg}'. Keep files under your vault or plugin directory.`
+        );
+      }
+      return mapped;
+    });
+  }
+
   private resolveUserPath(value: string, baseDir?: string): string {
     const expanded = this.expandPathValue(value);
     if (!expanded) {
@@ -10424,7 +10535,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async resolveComposeCommand(
     cliPath: string
-  ): Promise<{ command: string; argsPrefix: string[] } | null> {
+  ): Promise<ComposeCommandSpec | null> {
     const base = path.basename(cliPath);
     if (base === "podman-compose") {
       return { command: cliPath, argsPrefix: [] };
@@ -10443,6 +10554,78 @@ export default class ZoteroRagPlugin extends Plugin {
       return { command: cliPath, argsPrefix: ["compose"] };
     }
     return null;
+  }
+
+  private async buildComposeEnvironment(
+    dockerPath: string,
+    composeCommand: ComposeCommandSpec,
+    options?: { dataDir?: string; redisPort?: number }
+  ): Promise<NodeJS.ProcessEnv> {
+    const composeEnv: NodeJS.ProcessEnv = { ...process.env };
+    this.prependBinaryDirToPath(composeEnv, dockerPath);
+    this.prependBinaryDirToPath(composeEnv, composeCommand.command);
+    if (path.basename(composeCommand.command) === "podman-compose") {
+      const podmanBin = await this.resolvePodmanBin();
+      if (podmanBin) {
+        composeEnv.PODMAN_BIN = podmanBin;
+        this.prependBinaryDirToPath(composeEnv, podmanBin);
+      }
+    }
+    const dataDir = options?.dataDir || this.getRedisDataDir();
+    const redisPort = options?.redisPort ?? this.getRedisPortFromUrl();
+    composeEnv.ZRR_DATA_DIR = dataDir;
+    composeEnv.ZRR_PORT = String(redisPort);
+    composeEnv.ZRR_VAULT_DIR = this.getVaultBasePath();
+    composeEnv.ZRR_PLUGIN_DIR = this.getPluginDir();
+    composeEnv.ZRR_WORKER_CACHE_DIR = this.getPythonWorkerCacheDir();
+    return composeEnv;
+  }
+
+  private async resolveComposeProjectContext(
+    options?: { dataDir?: string; redisPort?: number }
+  ): Promise<ComposeProjectContext> {
+    await this.ensureBundledTools();
+    const composePath = this.getDockerComposePath();
+    const dockerPath = await this.resolveDockerPath();
+    if (!(await this.isContainerCliAvailable(dockerPath))) {
+      throw new Error(
+        'Docker or Podman not found. Install Docker Desktop or Podman and set "Docker/Podman path" in settings.'
+      );
+    }
+    if (!(await this.isContainerDaemonRunning(dockerPath))) {
+      throw new Error(this.getContainerDaemonHint(dockerPath));
+    }
+    const composeCommand = await this.resolveComposeCommand(dockerPath);
+    if (!composeCommand) {
+      throw new Error(
+        "Compose support not found. Install Docker Desktop or Podman with podman-compose."
+      );
+    }
+    const composeEnv = await this.buildComposeEnvironment(dockerPath, composeCommand, options);
+    return {
+      composePath,
+      composeCommand,
+      composeEnv,
+      project: this.getDockerProjectName(),
+    };
+  }
+
+  private buildComposeExecArgs(
+    context: ComposeProjectContext,
+    service: string,
+    commandArgs: string[]
+  ): string[] {
+    return [
+      ...context.composeCommand.argsPrefix,
+      "-p",
+      context.project,
+      "-f",
+      context.composePath,
+      "exec",
+      "-T",
+      service,
+      ...commandArgs,
+    ];
   }
 
   private async autoDetectContainerCliOnLoad(): Promise<void> {
@@ -10682,33 +10865,42 @@ export default class ZoteroRagPlugin extends Plugin {
     composeArgsPrefix: string[],
     composePath: string,
     project: string,
-    env?: NodeJS.ProcessEnv
+    env?: NodeJS.ProcessEnv,
+    services: string[] = []
   ): Promise<boolean> {
-    return new Promise((resolve) => {
-      const child = spawn(
-        composeCommand,
-        [...composeArgsPrefix, "-p", project, "-f", composePath, "ps", "-q"],
-        {
-          cwd: path.dirname(composePath),
-          env,
-        }
-      );
-      let stdout = "";
-      child.stdout.on("data", (data) => {
-        stdout += data.toString();
-      });
-      child.on("error", (error) => {
-        console.warn("Redis Stack status check failed", error);
-        resolve(false);
-      });
-      child.on("close", (code) => {
-        if (code !== 0) {
+    const servicesToCheck = services.length ? services : [""];
+    for (const service of servicesToCheck) {
+      const running = await new Promise<boolean>((resolve) => {
+        const serviceArgs = service ? [service] : [];
+        const child = spawn(
+          composeCommand,
+          [...composeArgsPrefix, "-p", project, "-f", composePath, "ps", "-q", ...serviceArgs],
+          {
+            cwd: path.dirname(composePath),
+            env,
+          }
+        );
+        let stdout = "";
+        child.stdout.on("data", (data) => {
+          stdout += data.toString();
+        });
+        child.on("error", (error) => {
+          console.warn("Redis Stack status check failed", error);
           resolve(false);
-          return;
-        }
-        resolve(stdout.trim().length > 0);
+        });
+        child.on("close", (code) => {
+          if (code !== 0) {
+            resolve(false);
+            return;
+          }
+          resolve(stdout.trim().length > 0);
+        });
       });
-    });
+      if (!running) {
+        return false;
+      }
+    }
+    return true;
   }
 
   async startRedisStack(silent?: boolean): Promise<void> {
@@ -10716,7 +10908,9 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.ensureBundledTools();
       const composePath = this.getDockerComposePath();
       const dataDir = this.getRedisDataDir();
+      const workerCacheDir = this.getPythonWorkerCacheDir();
       await fs.mkdir(dataDir, { recursive: true });
+      await fs.mkdir(workerCacheDir, { recursive: true });
       const dockerPath = await this.resolveDockerPath();
       const configuredRaw = this.settings.dockerPath?.trim() || "docker";
       const configured = this.resolveUserPath(configuredRaw);
@@ -10756,33 +10950,39 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         return;
       }
-      const composeEnv: NodeJS.ProcessEnv = { ...process.env };
-      this.prependBinaryDirToPath(composeEnv, dockerPath);
-      this.prependBinaryDirToPath(composeEnv, composeCommand.command);
-      if (path.basename(composeCommand.command) === "podman-compose") {
-        const podmanBin = await this.resolvePodmanBin();
-        if (podmanBin) {
-          composeEnv.PODMAN_BIN = podmanBin;
-          this.prependBinaryDirToPath(composeEnv, podmanBin);
-        }
-      }
+      const requestedPort = this.getRedisPortFromUrl();
+      const composeEnv = await this.buildComposeEnvironment(dockerPath, composeCommand, {
+        dataDir,
+        redisPort: requestedPort,
+      });
       const project = this.getDockerProjectName();
+      const composeContext: ComposeProjectContext = {
+        composePath,
+        composeCommand,
+        composeEnv,
+        project,
+      };
+      const requiredServices = this.getComposeServiceNamesForCurrentRuntime();
       if (
         await this.isComposeProjectRunning(
           composeCommand.command,
           composeCommand.argsPrefix,
           composePath,
           project,
-          composeEnv
+          composeEnv,
+          requiredServices
         )
       ) {
         if (!silent) {
-          new Notice("Redis Stack already running for this vault.");
+          new Notice(
+            this.usePythonWorker()
+              ? "Redis Stack and Python worker already running for this vault."
+              : "Redis Stack already running for this vault."
+          );
         }
         return;
       }
 
-      const requestedPort = this.getRedisPortFromUrl();
       const redisHost = this.getRedisHostFromUrl();
       const portCheckHost = this.getPortCheckHost(redisHost);
       const autoAssign = this.settings.autoAssignRedisPort && this.isLocalRedisHost(redisHost);
@@ -10823,6 +11023,9 @@ export default class ZoteroRagPlugin extends Plugin {
           if (!portFree) {
             if (await this.isRedisReachable(redisUrl)) {
               notifySharedRedisHint();
+              if (this.usePythonWorker()) {
+                await this.startPythonWorkerService(composeContext);
+              }
             } else if (!silent) {
               new Notice(
                 `Port ${redisPort} is already in use and Redis is not reachable at ${redisUrl}. ` +
@@ -10834,10 +11037,12 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         if (await this.isRedisReachable(redisUrl)) {
           notifySharedRedisHint();
+          if (this.usePythonWorker()) {
+            await this.startPythonWorkerService(composeContext);
+          }
           return;
         }
       }
-      composeEnv.ZRR_DATA_DIR = dataDir;
       composeEnv.ZRR_PORT = String(redisPort);
       try {
         await this.runCommand(
@@ -10848,14 +11053,14 @@ export default class ZoteroRagPlugin extends Plugin {
       } catch (error) {
         console.warn("Redis Stack stop before restart failed", error);
       }
-      await this.runCommand(
-        composeCommand.command,
-        [...composeCommand.argsPrefix, "-p", project, "-f", composePath, "up", "-d"],
-        {
-          cwd: path.dirname(composePath),
-          env: composeEnv,
-        }
-      );
+      const upArgs = [...composeCommand.argsPrefix, "-p", project, "-f", composePath, "up", "-d"];
+      if (this.usePythonWorker()) {
+        upArgs.push("--build");
+      }
+      await this.runCommand(composeCommand.command, upArgs, {
+        cwd: path.dirname(composePath),
+        env: composeEnv,
+      });
       if (!silent) {
         new Notice("Redis Stack started.");
       }
@@ -10867,7 +11072,113 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async waitForPythonWorkerReady(
+    context: ComposeProjectContext,
+    timeoutMs = 15 * 60 * 1000
+  ): Promise<void> {
+    const startedAt = Date.now();
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const checkArgs = this.buildComposeExecArgs(context, PYTHON_WORKER_SERVICE, [
+      PYTHON_WORKER_VENV_PYTHON,
+      "--version",
+    ]);
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        await this.runCommand(context.composeCommand.command, checkArgs, {
+          cwd: path.dirname(context.composePath),
+          env: context.composeEnv,
+        });
+        return;
+      } catch {
+        await delay(2000);
+      }
+    }
+    throw new Error(
+      "Python worker is still starting. Check compose logs for the python-worker service."
+    );
+  }
+
+  private async startPythonWorkerService(context?: ComposeProjectContext): Promise<void> {
+    const resolved =
+      context ??
+      (await this.resolveComposeProjectContext({
+        dataDir: this.getRedisDataDir(),
+        redisPort: this.getRedisPortFromUrl(),
+      }));
+    const upArgs = [
+      ...resolved.composeCommand.argsPrefix,
+      "-p",
+      resolved.project,
+      "-f",
+      resolved.composePath,
+      "up",
+      "-d",
+      "--build",
+      PYTHON_WORKER_SERVICE,
+    ];
+    await this.runCommand(resolved.composeCommand.command, upArgs, {
+      cwd: path.dirname(resolved.composePath),
+      env: resolved.composeEnv,
+    });
+  }
+
+  private async ensurePythonWorkerContext(startIfStopped: boolean): Promise<ComposeProjectContext> {
+    const dataDir = this.getRedisDataDir();
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.mkdir(this.getPythonWorkerCacheDir(), { recursive: true });
+    let context = await this.resolveComposeProjectContext({
+      dataDir,
+      redisPort: this.getRedisPortFromUrl(),
+    });
+    const services = [PYTHON_WORKER_SERVICE];
+    const running = await this.isComposeProjectRunning(
+      context.composeCommand.command,
+      context.composeCommand.argsPrefix,
+      context.composePath,
+      context.project,
+      context.composeEnv,
+      services
+    );
+    if (!running && startIfStopped) {
+      await this.startPythonWorkerService(context);
+      context = await this.resolveComposeProjectContext({
+        dataDir,
+        redisPort: this.getRedisPortFromUrl(),
+      });
+    }
+    const confirmed = await this.isComposeProjectRunning(
+      context.composeCommand.command,
+      context.composeCommand.argsPrefix,
+      context.composePath,
+      context.project,
+      context.composeEnv,
+      services
+    );
+    if (!confirmed) {
+      throw new Error(
+        "Python worker is not running. Start Redis stack now or enable Auto-start Redis stack."
+      );
+    }
+    await this.waitForPythonWorkerReady(context);
+    return context;
+  }
+
   async setupPythonEnv(): Promise<void> {
+    if (this.usePythonWorker()) {
+      try {
+        new Notice("Setting up Python worker environment...");
+        this.showStatusProgress("Setting up Python worker environment...", null);
+        await this.ensurePythonWorkerContext(true);
+        this.clearStatusProgress();
+        new Notice("Python worker environment ready.");
+      } catch (error) {
+        this.clearStatusProgress();
+        new Notice("Failed to set up Python worker environment. See console for details.");
+        console.error("Python worker setup failed", error);
+      }
+      return;
+    }
+
     const pluginDir = this.getPluginDir();
     const venvDir = this.getPythonVenvDir();
     const venvPython = this.getVenvPythonPath(venvDir);
@@ -10950,6 +11261,13 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   async detectOcrEngines(): Promise<OcrEngineAvailability> {
+    if (this.usePythonWorker()) {
+      return {
+        tesseract: true,
+        paddleStructureLocal: true,
+        paddleVlLocal: true,
+      };
+    }
     const tesseractAvailable = await this.canRunCommand("tesseract", []);
     let pythonCommand = this.resolvePythonPath();
     let pythonArgs: string[] = [];
@@ -11170,12 +11488,58 @@ export default class ZoteroRagPlugin extends Plugin {
     return env;
   }
 
-  private runPython(scriptPath: string, args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
+  private async resolvePythonScriptInvocation(
+    scriptPath: string,
+    args: string[],
+    startIfStopped: boolean
+  ): Promise<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> {
+    if (!this.usePythonWorker()) {
       const pythonPath = this.resolvePythonPath();
-      const child = spawn(pythonPath, [scriptPath, ...args], {
+      return {
+        command: pythonPath,
+        args: [scriptPath, ...args],
         cwd: path.dirname(scriptPath),
         env: this.buildPythonEnv(),
+      };
+    }
+
+    const context = await this.ensurePythonWorkerContext(startIfStopped);
+    const mappedScript = this.mapPathForPythonWorker(scriptPath);
+    if (mappedScript === scriptPath) {
+      throw new Error(
+        `Python worker cannot access script '${scriptPath}'. Keep plugin files under your vault or plugin directory.`
+      );
+    }
+    const mappedArgs = this.mapPythonArgsForWorker(args);
+    const composeArgs = this.buildComposeExecArgs(context, PYTHON_WORKER_SERVICE, [
+      PYTHON_WORKER_VENV_PYTHON,
+      mappedScript,
+      ...mappedArgs,
+    ]);
+    return {
+      command: context.composeCommand.command,
+      args: composeArgs,
+      cwd: path.dirname(context.composePath),
+      env: context.composeEnv,
+    };
+  }
+
+  private async runPython(scriptPath: string, args: string[]): Promise<void> {
+    let invocation: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
+    try {
+      invocation = await this.resolvePythonScriptInvocation(
+        scriptPath,
+        args,
+        this.settings.autoStartRedis
+      );
+    } catch (error) {
+      this.handlePythonProcessError(String(error));
+      throw error;
+    }
+    return new Promise((resolve, reject) => {
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        env: invocation.env,
       });
 
       let stdout = "";
@@ -11234,7 +11598,7 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
-  private runPythonStreaming(
+  private async runPythonStreaming(
     scriptPath: string,
     args: string[],
     onPayload: (payload: any) => void,
@@ -11243,11 +11607,21 @@ export default class ZoteroRagPlugin extends Plugin {
     stderrLogLabel = "docling_extract",
     onSpawn?: (child: ChildProcess) => void
   ): Promise<void> {
+    let invocation: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
+    try {
+      invocation = await this.resolvePythonScriptInvocation(
+        scriptPath,
+        args,
+        this.settings.autoStartRedis
+      );
+    } catch (error) {
+      this.handlePythonProcessError(String(error));
+      throw error;
+    }
     return new Promise((resolve, reject) => {
-      const pythonPath = this.resolvePythonPath();
-      const child = spawn(pythonPath, [scriptPath, ...args], {
-        cwd: path.dirname(scriptPath),
-        env: this.buildPythonEnv(),
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        env: invocation.env,
       });
       if (onSpawn) {
         onSpawn(child);
@@ -11362,19 +11736,39 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!raw) {
       return;
     }
+    if (/Python worker cannot access path/i.test(raw)) {
+      this.notifyContainerOnce(raw.replace(/^Error:\s*/i, ""));
+      return;
+    }
+    if (/python-worker/i.test(raw) && /(No such service|is not running|not found|no container)/i.test(raw)) {
+      this.notifyContainerOnce(
+        "Python worker is not running. Start Redis stack now or enable Auto-start Redis stack."
+      );
+      return;
+    }
+    if (/Cannot connect to the Docker daemon|docker desktop is not running|podman machine/i.test(raw)) {
+      this.notifyContainerOnce("Container runtime is not available. Start Docker Desktop or Podman.");
+      return;
+    }
     const missingModule = raw.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/);
     if (missingModule) {
-      const notice = `Python env missing module '${missingModule[1]}'. Open Settings > Python environment > Create/Update.`;
+      const notice = this.usePythonWorker()
+        ? `Python worker missing module '${missingModule[1]}'. Restart Redis stack to rebuild worker env.`
+        : `Python env missing module '${missingModule[1]}'. Open Settings > Python environment > Create/Update.`;
       this.notifyPythonEnvOnce(notice, true);
       return;
     }
     if (/No module named ['"]|ImportError: No module named/i.test(raw)) {
-      const notice = "Python env missing required modules. Open Settings > Python environment > Create/Update.";
+      const notice = this.usePythonWorker()
+        ? "Python worker missing required modules. Restart Redis stack to rebuild worker env."
+        : "Python env missing required modules. Open Settings > Python environment > Create/Update.";
       this.notifyPythonEnvOnce(notice, true);
       return;
     }
     if (/ENOENT|No such file or directory|not found|command not found|spawn .* ENOENT/i.test(raw)) {
-      const notice = "Python not found. Configure the Python path or use Settings > Python environment > Create/Update.";
+      const notice = this.usePythonWorker()
+        ? "Python worker command failed. Start Redis stack and check container logs."
+        : "Python not found. Configure the Python path or use Settings > Python environment > Create/Update.";
       this.notifyPythonEnvOnce(notice, true);
     }
   }
@@ -11564,17 +11958,27 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  private runPythonWithOutput(
+  private async runPythonWithOutput(
     scriptPath: string,
     args: string[],
     stderrLogPath?: string | null,
     stderrLogLabel = "docling_extract"
   ): Promise<string> {
+    let invocation: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
+    try {
+      invocation = await this.resolvePythonScriptInvocation(
+        scriptPath,
+        args,
+        this.settings.autoStartRedis
+      );
+    } catch (error) {
+      this.handlePythonProcessError(String(error));
+      throw error;
+    }
     return new Promise((resolve, reject) => {
-      const pythonPath = this.resolvePythonPath();
-      const child = spawn(pythonPath, [scriptPath, ...args], {
-        cwd: path.dirname(scriptPath),
-        env: this.buildPythonEnv(),
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: invocation.cwd,
+        env: invocation.env,
       });
 
       let stdout = "";

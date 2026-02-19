@@ -1,4 +1,13 @@
-import { App, DropdownComponent, Notice, PluginSettingTab, Setting, TextComponent, requestUrl } from "obsidian";
+import {
+  App,
+  ButtonComponent,
+  DropdownComponent,
+  Notice,
+  PluginSettingTab,
+  Setting,
+  TextComponent,
+  requestUrl,
+} from "obsidian";
 import { randomBytes } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
@@ -29,6 +38,7 @@ const COMPANION_XPI_URL =
   "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi";
 
 export interface ZoteroRagSettings {
+  pythonRuntime: "worker" | "local";
   zoteroBaseUrl: string;
   zoteroUserId: string;
   webApiBaseUrl: string;
@@ -117,6 +127,7 @@ type SettingsTabId = "prerequisites" | "zotero-import" | "annotations" | "ocr" |
 
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   // Prerequisites
+  pythonRuntime: "worker",
   pythonPath: "",
   pythonEnvLocation: "shared",
   dockerPath: "docker",
@@ -356,46 +367,103 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     const renderPrerequisites = (tabEl: HTMLElement) => {
       tabEl.createEl("h2", { text: "Prerequisites" });
 
+      let pythonPathSetting: Setting | null = null;
+      let pythonEnvSetting: Setting | null = null;
+      let pythonEnvLocationSetting: Setting | null = null;
+      let pythonPathText: TextComponent | null = null;
+      let pythonEnvLocationDropdown: DropdownComponent | null = null;
+      let pythonEnvButton: HTMLButtonElement | null = null;
+      let pythonEnvButtonComponent: ButtonComponent | null = null;
+
+      const applyDisabledSettingState = (setting: Setting | null, disabled: boolean): void => {
+        if (!setting) {
+          return;
+        }
+        setting.settingEl.classList.toggle("is-disabled", disabled);
+        setting.settingEl.style.opacity = disabled ? "0.55" : "";
+        const desc = setting.settingEl.querySelector(".setting-item-description") as HTMLElement | null;
+        if (desc) {
+          desc.style.color = disabled ? "var(--text-faint)" : "";
+        }
+      };
+
+      const refreshPythonRuntimeState = (): void => {
+        const localMode = this.plugin.settings.pythonRuntime === "local";
+        pythonPathText?.setDisabled(!localMode);
+        pythonEnvLocationDropdown?.setDisabled(!localMode);
+        pythonEnvButtonComponent?.setDisabled(!localMode);
+        if (pythonEnvButton) {
+          pythonEnvButton.disabled = !localMode;
+        }
+        applyDisabledSettingState(pythonPathSetting, !localMode);
+        applyDisabledSettingState(pythonEnvSetting, !localMode);
+        applyDisabledSettingState(pythonEnvLocationSetting, !localMode);
+      };
+
       new Setting(tabEl)
+        .setName("Python runtime")
+        .setDesc(
+          "Recommended: Worker container (Docker/Podman Compose). Local interpreter mode is optional."
+        )
+        .addDropdown((dropdown: DropdownComponent) => {
+          dropdown.addOption("worker", "Python worker container (recommended)");
+          dropdown.addOption("local", "Local interpreter/venv");
+          dropdown
+            .setValue(this.plugin.settings.pythonRuntime)
+            .onChange(async (value) => {
+              if (value !== "worker" && value !== "local") {
+                return;
+              }
+              this.plugin.settings.pythonRuntime = value;
+              await this.plugin.saveSettings();
+              refreshPythonRuntimeState();
+            });
+        });
+
+      pythonPathSetting = new Setting(tabEl)
         .setName("Python path")
         .setDesc(
-          "Optional path to the Python interpreter used to create or run the plugin env. " +
+          "Local mode only: optional path to the Python interpreter used to create or run the plugin env. " +
             "Leave blank to auto-detect (python3.13/3.12/3.11/3.10/python3/python, or py on Windows). " +
             "Supports ~, $HOME, and %USERPROFILE%. Relative paths with separators resolve from your home dir."
         )
-        .addText((text) =>
-          text
+        .addText((text) => {
+          pythonPathText = text;
+          return text
             .setPlaceholder("auto-detect")
             .setValue(this.plugin.settings.pythonPath)
             .onChange(async (value) => {
               this.plugin.settings.pythonPath = value.trim();
               await this.plugin.saveSettings();
-            })
-        );
+            });
+        });
 
-      new Setting(tabEl)
+      pythonEnvSetting = new Setting(tabEl)
         .setName("Python environment")
         .setDesc(
-          "Create or update the plugin's Python env (location configured below)."
+          "Local mode: create or update the plugin's Python env. Worker mode: managed by Docker startup."
         )
         .addButton((button) => {
+          pythonEnvButtonComponent = button;
+          pythonEnvButton = button.buttonEl;
           button.setButtonText("Create/Update").setCta();
           button.onClick(async () => {
             button.setDisabled(true);
             try {
               await this.plugin.setupPythonEnv();
             } finally {
-              button.setDisabled(false);
+              button.setDisabled(this.plugin.settings.pythonRuntime !== "local");
             }
           });
         });
 
-      new Setting(tabEl)
+      pythonEnvLocationSetting = new Setting(tabEl)
         .setName("Python env location")
         .setDesc(
-          "Shared user cache can be reused across vaults; plugin folder keeps a per-vault env."
+          "Local mode only: shared user cache can be reused across vaults; plugin folder keeps a per-vault env."
         )
         .addDropdown((dropdown: DropdownComponent) => {
+          pythonEnvLocationDropdown = dropdown;
           dropdown.addOption("shared", "Shared user cache");
           dropdown.addOption("plugin", "Plugin folder (.venv)");
           dropdown
@@ -412,7 +480,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       new Setting(tabEl)
         .setName("Docker/Podman path")
         .setDesc(
-          "CLI path for Docker or Podman (used to start Redis Stack). Leave as 'docker'/'podman' to auto-detect via PATH " +
+          "CLI path for Docker or Podman (used to start Redis Stack and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
             "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~, $HOME, and %USERPROFILE%. " +
             "Relative paths with separators resolve from your home dir."
         )
@@ -425,6 +493,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             })
         );
+
+      refreshPythonRuntimeState();
 
       new Setting(tabEl)
         .setName("Redis URL")
@@ -504,7 +574,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Auto-start Redis stack (Docker/Podman Compose)")
         .setDesc(
           "Requires Docker Desktop running and your vault path shared with Docker. " +
-            "Uses a vault-specific data dir at .obsidian/zotero-redisearch-rag/redis-data unless overridden."
+            "Starts Redis and, in worker mode, the Python worker container."
         )
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.autoStartRedis).onChange(async (value) => {
@@ -515,7 +585,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Start Redis stack now")
-        .setDesc("Restarts Docker/Podman Compose with the vault data directory.")
+        .setDesc("Starts or restarts Redis stack (and Python worker in worker mode).")
         .addButton((button) =>
           button.setButtonText("Start").onClick(async () => {
             await this.plugin.startRedisStack();

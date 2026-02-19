@@ -27,4 +27,10 @@ Redis Stack stores its own data separately:
 - When started from the plugin, it uses a per‑vault data folder under your vault’s `.obsidian/zotero-redisearch-rag/redis-data` (unless overridden).
 - If you run Redis yourself, data location depends on your Redis configuration.
 
+## Python worker data (worker runtime mode)
+
+When using **Python worker container** runtime, the worker keeps a persistent virtual environment/cache at:
+
+- `.zotero-redisearch-rag/python-worker-cache/`
+
 If multiple vaults share one Redis instance, the plugin namespaces the index and key prefix to avoid conflicts.

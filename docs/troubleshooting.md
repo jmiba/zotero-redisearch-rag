@@ -35,12 +35,15 @@ If OCR output is noisy or incomplete:
 - Try a different **OCR engine** (Tesseract vs. Paddle options).
 - Enable **OCR cleanup** with an LLM to improve low‑quality text.
 
-For scanned PDFs, installing Tesseract + Poppler improves OCR accuracy.
+For scanned PDFs:
+
+- Worker runtime: Tesseract + Poppler are already in the worker image.
+- Local runtime: installing Tesseract + Poppler on the host improves OCR accuracy.
 
 ## Redis Stack start failures
 
 Docker/Podman will **pull** the image (if missing) and then create a container.
-If no Redis container appears (or it exits immediately), common causes to check:
+If no Redis container appears (or it exits immediately), or the Python worker fails to come up, common causes to check:
 
 - **Missing file sharing configuration**: Docker Desktop/Podman Desktop must allow mounting your vault path (and plugin/tools path if separate). Typical errors include `Mounts denied` or `operation not permitted`.
 - **Docker/Podman isn’t running**: The CLI exists, but the daemon is stopped.
@@ -59,7 +62,8 @@ Quick checks:
 ```bash
 docker compose config
 docker compose pull redis-stack
-docker compose up -d redis-stack
+docker compose up -d redis-stack python-worker
 docker compose ps -a
 docker compose logs redis-stack
+docker compose logs python-worker
 ```

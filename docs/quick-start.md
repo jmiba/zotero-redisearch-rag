@@ -7,7 +7,6 @@ This page walks you through a minimal, working setup so you can import a Zotero 
 - Zotero 7 or 8 (desktop)
 - Docker Desktop or Podman (for Redis Stack)
 - A local or cloud OpenAI-compatible model provider
-- Python 3.11–3.13 (for Docling tools)
 
 ## 1) Enable the Zotero local API (read-only)
 In Zotero:
@@ -60,11 +59,11 @@ Cloud options:
 Default (recommended):
 
 1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
-2. In **Python env location**, choose **Shared user cache** (recommended; keeps venv outside your vault and reduces sync churn).
-3. Click **Python environment → Create/Update**.
-4. Wait for `Python environment ready.`.
+2. Set **Python runtime** to **Python worker container (recommended)**.
+3. Click **Start Redis stack now**.
+4. Wait for startup to finish (first run may take longer while worker dependencies install).
 
-Fallback (terminal):
+Fallback (terminal, local runtime mode only):
 
 ```bash
 python3 -m venv .venv
@@ -77,7 +76,7 @@ For full details, see [Python Setup](python-setup.md).
 ## 6) Configure the plugin
 Open **Settings → Community plugins → Zotero Redis RAG** and set:
 
-- **Prerequisites**: Python path, Docker/Podman path, Redis URL
+- **Prerequisites**: Python runtime, Docker/Podman path, Redis URL
 - **LLM provider profiles** (optional but recommended)
 - **Embeddings** and **Chat** models
 - **Output folders** (PDFs, notes, chats)

@@ -1,4 +1,20 @@
 # Changelog
+## 0.7.0 (Minor Release)
+
+- Add Python worker runtime architecture as the recommended path, with Redis and Python running as separate compose services.
+- Route Python execution through the worker container in worker mode, including path mapping, worker readiness checks, and worker startup helpers.
+- Improve worker reliability:
+  - fix requirements path resolution and add fallback handling in worker entrypoint,
+  - rebuild worker image automatically on worker startup,
+  - remove home-directory mount to avoid Docker home-sharing prompts.
+- Improve worker networking compatibility by mapping local loopback provider URLs for container execution.
+- Add configurable Tesseract language pack installation in the worker image (default: `eng deu fra spa ita nld por pol swe`).
+- Keep local Python fallback mode while disabling/greying local-only Python settings when worker runtime is selected.
+- Update docs for worker-first setup, OCR dependencies, Docker setup, and troubleshooting.
+- PDF sidebar sync stability fixes:
+  - serialize/queue sidebar PDF page jumps and retry once on PDF.js `injectLinkAnnotations` render-order race,
+  - stop forcing active-leaf switching during sidebar sync to avoid triggering incompatible active-leaf handlers in other plugins.
+
 ## 0.6.9 (Bugfix Release)
 
 - Fix `citekey` sync regression where unpinned Better BibTeX keys could be cleared from notes on open.

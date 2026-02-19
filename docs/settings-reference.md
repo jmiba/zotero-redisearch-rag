@@ -3,13 +3,14 @@
 This page summarizes the main settings tabs and what they control.
 
 ## Prerequisites
-- **Python path**: Interpreter used for Docling tools. Leave blank to auto‑detect.
-- **Python env location**: Store the venv in a shared cache or inside the plugin folder.
-- **Docker/Podman path**: CLI path used to start Redis Stack.
+- **Python runtime**: Choose `Python worker container` (recommended) or `Local interpreter/venv`.
+- **Python path**: Local mode only. Interpreter used for Docling tools.
+- **Python env location**: Local mode only. Store the venv in a shared cache or inside the plugin folder.
+- **Docker/Podman path**: CLI path used to start Redis Stack and Python worker.
 - **Redis URL**: Connection string for Redis Stack.
 - **Auto‑assign Redis port**: Pick a free local port when starting Redis.
 - **Auto‑start Redis stack**: Start Redis automatically when needed.
-- **Start Redis stack now**: Manual start/restart button.
+- **Start Redis stack now**: Manual start/restart button (also starts Python worker in worker mode).
 
 Step-by-step setup guides:
 - [Python Setup](python-setup.md)

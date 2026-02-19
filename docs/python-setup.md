@@ -1,43 +1,42 @@
 # Python Setup
 
-This guide explains how to set up Python for Docling tools used by Zotero Redis RAG.
+This guide explains how Python is provided for Docling tools in Zotero Redis RAG.
 
-## Prerequisites
+## Recommended mode: Python worker container
+
+The plugin now supports a dedicated `python-worker` service (separate from Redis).
+
+1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
+2. Set **Python runtime** to **Python worker container (recommended)**.
+3. Ensure **Docker/Podman path** is correct.
+4. Click **Start Redis stack now**.
+5. Wait until startup finishes (first run can take longer while Python deps are installed in the worker venv).
+
+In this mode:
+
+- No local Python install is required for plugin runtime.
+- Redis and Python stay in separate containers.
+- Python dependencies are installed into a persistent worker venv.
+- OCR binaries are inside the worker image (`tesseract`, `poppler`), with Tesseract language packs
+  defaulting to `eng deu fra spa ita nld por pol swe` (override via `ZRR_TESSERACT_LANG_PACKS`).
+
+## Local fallback mode (optional)
+
+Use this if you explicitly want local Python execution.
+
+Prerequisites:
 
 - Python `3.11` to `3.13`
 - `pip` available for that Python
 
-Quick check:
+In settings:
 
-```bash
-python3 --version
-python3 -m pip --version
-```
-
-## 1) Default setup: use the settings button (recommended)
-
-In Obsidian plugin settings:
-
-1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
-2. (Optional) Set **Python path** if auto-detection does not find the right interpreter.
-3. Choose **Python env location**:
-   - `Shared user cache` (recommended), or
-   - `Plugin folder (.venv)`
+1. Set **Python runtime** to **Local interpreter/venv**.
+2. (Optional) Set **Python path** if auto-detection is wrong.
+3. Choose **Python env location** (`Shared user cache` recommended).
 4. Click **Python environment → Create/Update**.
-5. Wait for the success notice (`Python environment ready.`).
 
-This is the default path and should be used first.
-
-Why `Shared user cache` is recommended:
-
-- It keeps the Python environment outside the vault, so Obsidian sync tools do not try to sync large venv files.
-- It reduces sync conflicts/churn across devices.
-
-## 2) Fallback: create `.venv` in terminal
-
-Use this only if the settings-button flow fails.
-
-From the plugin directory:
+Terminal fallback:
 
 ```bash
 python3 -m venv .venv
@@ -45,20 +44,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Then set **Python path** to your venv interpreter:
+Then set **Python path** to:
 
 - macOS/Linux: `.venv/bin/python`
 - Windows: `.venv\Scripts\python.exe`
 
-## 3) Verify
+## Verify
 
 1. Run **Import Zotero item and index (Docling → RedisSearch)** on a small PDF.
-2. If extraction fails, open logs in **Maintenance → Logs**.
+2. If extraction fails, inspect logs in **Maintenance → Logs** and container logs (`python-worker`) if using worker mode.
 
 ## Common pitfalls
 
-- **Unsupported Python version**: 3.10 or 3.14 may fail with dependencies.
-- **Wrong interpreter path**: points to a missing or stale virtual environment.
-- **Create/Update fails**: set an explicit **Python path** and retry **Create/Update**.
-- **`pip` install failed** (terminal fallback): retry inside the activated `.venv`.
-- **Permission issues**: make sure Obsidian can read/write the plugin tools and cache folders.
+- **Docker/Podman not running**: worker mode cannot start.
+- **File sharing not configured**: worker cannot access mounted vault/plugin paths.
+- **Worker startup still in progress**: first start may take time due dependency installation.
+- **Unsupported local Python version**: local mode works with Python 3.11–3.13.

@@ -16,13 +16,16 @@ You can choose whether PDFs are stored in your vault or linked directly from Zot
 If the local PDF path is unavailable, the plugin temporarily copies the PDF into your vault to process it and lets you know.
 
 ## OCR‑layered PDF copy
-When OCR is used (cf. [OCR section](settings-reference.md#ocr)), you can optionally create an OCR‑layered PDF. This writes a new, searchable PDF with a text layer (requires Tesseract + Poppler).
+When OCR is used (cf. [OCR section](settings-reference.md#ocr)), you can optionally create an OCR‑layered PDF. This writes a new, searchable PDF with a text layer.
+
+- Worker runtime (recommended/default): Tesseract + Poppler are included in the `python-worker` image.
+- Local runtime: install Tesseract + Poppler on your host system.
 
 - Works only when **Copy PDFs to vault** is enabled.
 - The OCR‑layered PDF replaces the vault copy so citations can open the searchable file.
 
 ### Install Tesseract + Poppler
-These tools are required for creating OCR‑layered PDFs.
+Only needed for **local runtime**.
 
 - macOS (Homebrew):
 

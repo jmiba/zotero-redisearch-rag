@@ -54,6 +54,8 @@ export class PdfSidebarController {
   private previewScrollEl: HTMLElement | null = null;
   private previewScrollHandler: ((event: Event) => void) | null = null;
   private previewScrollFrame: number | null = null;
+  private pdfSyncInFlight = false;
+  private queuedPdfSync: { docId: string; pageNumber?: number; chunkId?: string } | null = null;
 
   constructor(deps: PdfSidebarDependencies, helpers: PdfSidebarHelpers) {
     this.deps = deps;
@@ -203,67 +205,72 @@ export class PdfSidebarController {
     if (!docId) {
       return;
     }
-    let entry = await this.deps.getDocIndexEntry(docId);
-    if (!entry) {
-      entry = await this.deps.hydrateDocIndexFromCache(docId);
-    }
-    const pdfPath = entry?.pdf_path ? String(entry.pdf_path) : "";
-    if (!pdfPath) {
+    if (this.pdfSyncInFlight) {
+      this.queuedPdfSync = { docId, pageNumber, chunkId };
       return;
     }
-    let relativePdf = this.deps.toVaultRelativePath(pdfPath);
-    if (!relativePdf) {
-      const normalized = normalizePath(pdfPath);
-      const directFile = this.deps.app.vault.getAbstractFileByPath(normalized);
-      if (directFile instanceof TFile) {
-        relativePdf = normalized;
-      }
-    }
-    if (!relativePdf) {
-      return;
-    }
-    const file = this.deps.app.vault.getAbstractFileByPath(relativePdf);
-    if (!(file instanceof TFile) || file.extension.toLowerCase() !== "pdf") {
-      return;
-    }
-    const leaf = await this.getPdfSidebarLeaf();
-    if (!leaf) {
-      this.pendingPdfSync = { docId, pageNumber, chunkId };
-      return;
-    }
-    this.updatePdfSidebarIcon(leaf);
-    if (!this.isLeafTabActive(leaf)) {
-      this.pendingPdfSync = { docId, pageNumber, chunkId };
-      return;
-    }
-    let nextPage = Number.isFinite(pageNumber ?? NaN) ? Number(pageNumber) : null;
-    if (nextPage === null && chunkId) {
-      nextPage = await this.resolvePageNumberForChunk(docId, chunkId);
-    }
-    if (nextPage === null) {
-      return;
-    }
-    if (
-      this.pdfSidebarDocId === docId
-      && this.pdfSidebarPdfPath === file.path
-      && this.pdfSidebarPage === nextPage
-    ) {
-      return;
-    }
-    this.pdfSidebarDocId = docId;
-    this.pdfSidebarPdfPath = file.path;
-    this.pdfSidebarPage = nextPage;
-    const relativeLink = relativePdf;
-    const linkText = nextPage !== null ? `${relativeLink}#page=${nextPage}` : relativeLink;
-    const workspace = this.deps.app.workspace;
-    const activeLeaf = workspace.getMostRecentLeaf();
-    workspace.setActiveLeaf(leaf, { focus: false });
+    this.pdfSyncInFlight = true;
     try {
+      let entry = await this.deps.getDocIndexEntry(docId);
+      if (!entry) {
+        entry = await this.deps.hydrateDocIndexFromCache(docId);
+      }
+      const pdfPath = entry?.pdf_path ? String(entry.pdf_path) : "";
+      if (!pdfPath) {
+        return;
+      }
+      let relativePdf = this.deps.toVaultRelativePath(pdfPath);
+      if (!relativePdf) {
+        const normalized = normalizePath(pdfPath);
+        const directFile = this.deps.app.vault.getAbstractFileByPath(normalized);
+        if (directFile instanceof TFile) {
+          relativePdf = normalized;
+        }
+      }
+      if (!relativePdf) {
+        return;
+      }
+      const file = this.deps.app.vault.getAbstractFileByPath(relativePdf);
+      if (!(file instanceof TFile) || file.extension.toLowerCase() !== "pdf") {
+        return;
+      }
+      const leaf = await this.getPdfSidebarLeaf();
+      if (!leaf) {
+        this.pendingPdfSync = { docId, pageNumber, chunkId };
+        return;
+      }
+      this.updatePdfSidebarIcon(leaf);
+      if (!this.isLeafTabActive(leaf)) {
+        this.pendingPdfSync = { docId, pageNumber, chunkId };
+        return;
+      }
+      let nextPage = Number.isFinite(pageNumber ?? NaN) ? Number(pageNumber) : null;
+      if (nextPage === null && chunkId) {
+        nextPage = await this.resolvePageNumberForChunk(docId, chunkId);
+      }
+      if (nextPage === null) {
+        return;
+      }
+      if (
+        this.pdfSidebarDocId === docId
+        && this.pdfSidebarPdfPath === file.path
+        && this.pdfSidebarPage === nextPage
+      ) {
+        return;
+      }
+      this.pdfSidebarDocId = docId;
+      this.pdfSidebarPdfPath = file.path;
+      this.pdfSidebarPage = nextPage;
+      const relativeLink = relativePdf;
+      const linkText = nextPage !== null ? `${relativeLink}#page=${nextPage}` : relativeLink;
       await this.openPdfLinkInLeaf(leaf, linkText);
       this.updatePdfSidebarIcon(leaf);
     } finally {
-      if (activeLeaf) {
-        workspace.setActiveLeaf(activeLeaf, { focus: false });
+      this.pdfSyncInFlight = false;
+      const queued = this.queuedPdfSync;
+      this.queuedPdfSync = null;
+      if (queued) {
+        void this.syncPdfSidebarForDoc(queued.docId, queued.pageNumber, queued.chunkId);
       }
     }
   }
@@ -442,17 +449,46 @@ export class PdfSidebarController {
     const pdfPlus = this.getPluginsRegistry()?.["pdf-plus"];
     const pdfPlusOpen = pdfPlus?.lib?.workspace?.openPDFLinkTextInLeaf;
     if (typeof pdfPlusOpen === "function") {
-      await pdfPlusOpen.call(pdfPlus.lib.workspace, leaf, linkText, "", { active: false });
-      return;
+      try {
+        await pdfPlusOpen.call(pdfPlus.lib.workspace, leaf, linkText, "", { active: false });
+        return;
+      } catch (error) {
+        if (!this.isPdfAnnotationRaceError(error)) {
+          throw error;
+        }
+        // Retry once after a short delay; the PDF page/view may still be initializing.
+        await this.delay(150);
+      }
     }
     const leafAny = leaf as unknown as {
       openLinkText?: (link: string, sourcePath: string, state?: { active?: boolean }) => Promise<void>;
     };
     if (typeof leafAny.openLinkText === "function") {
-      await leafAny.openLinkText(linkText, "", { active: false });
+      try {
+        await leafAny.openLinkText(linkText, "", { active: false });
+      } catch (error) {
+        if (!this.isPdfAnnotationRaceError(error)) {
+          throw error;
+        }
+        await this.delay(150);
+        await leafAny.openLinkText(linkText, "", { active: false });
+      }
       return;
     }
     await this.deps.app.workspace.openLinkText(linkText, "", false);
+  }
+
+  private isPdfAnnotationRaceError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!message) {
+      return false;
+    }
+    return /injectLinkAnnotations/i.test(message)
+      || /render method must be called before/i.test(message);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private getPluginsRegistry(): Record<string, any> | undefined {

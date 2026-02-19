@@ -1,6 +1,6 @@
 # Docker Setup
 
-This guide explains how to configure Docker (or Podman) so the plugin can start Redis Stack reliably.
+This guide explains how to configure Docker (or Podman) so the plugin can start Redis Stack and the Python worker reliably.
 
 ## 1) Install and start Docker/Podman
 
@@ -36,22 +36,35 @@ If file sharing is missing, Redis startup usually fails with mount errors (for e
 In **Settings → Prerequisites**:
 
 - **Docker/Podman path**: set the CLI binary (`docker`/`podman` or full path).
+- **Python runtime**: set to **Python worker container (recommended)**.
 - **Redis URL**: keep default unless you run your own Redis.
 - **Auto-assign Redis port**: recommended to avoid port conflicts across vaults.
 - **Auto-start Redis stack**: enable if you want automatic startup when needed.
 
 Then click **Start Redis stack now** once to validate setup.
 
-## 4) Verify Redis container startup
+Optional: customize OCR language packs baked into the worker image with `ZRR_TESSERACT_LANG_PACKS`.
+Default is `eng deu fra spa ita nld por pol swe`.
+
+Example:
+
+```bash
+export ZRR_TESSERACT_LANG_PACKS="eng deu fra"
+docker compose build python-worker
+docker compose up -d redis-stack python-worker
+```
+
+## 4) Verify Redis + Python worker startup
 
 If needed, run:
 
 ```bash
 docker compose config
 docker compose pull redis-stack
-docker compose up -d redis-stack
+docker compose up -d redis-stack python-worker
 docker compose ps -a
 docker compose logs redis-stack
+docker compose logs python-worker
 ```
 
 ## Common pitfalls

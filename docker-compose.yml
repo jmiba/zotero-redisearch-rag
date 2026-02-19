@@ -9,3 +9,21 @@ services:
     volumes:
       - "${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
       - "./redis-stack.conf:/redis-stack.conf:ro"
+
+  python-worker:
+    build:
+      context: "${ZRR_PLUGIN_DIR:-.}"
+      dockerfile: tools/python-worker.Dockerfile
+      args:
+        ZRR_TESSERACT_LANG_PACKS: "${ZRR_TESSERACT_LANG_PACKS:-eng deu fra spa ita nld por pol swe}"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ZRR_WORKER_REQUIREMENTS=${ZRR_WORKER_REQUIREMENTS:-/workspace/plugin/tools/requirements.txt}
+      - ZRR_WORKER_VENV_DIR=/workspace/cache/venv
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      - DISABLE_MODEL_SOURCE_CHECK=True
+    volumes:
+      - "${ZRR_PLUGIN_DIR:-.}:/workspace/plugin:ro"
+      - "${ZRR_VAULT_DIR:-.}:/workspace/vault"
+      - "${ZRR_WORKER_CACHE_DIR:-./.zotero-redisearch-rag/python-worker-cache}:/workspace/cache"
