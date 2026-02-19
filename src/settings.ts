@@ -2104,17 +2104,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderMaintenance = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "Release Notes" });
-
-      new Setting(tabEl)
-        .setName("Show release notes")
-        .setDesc("Open the current version splash screen.")
-        .addButton((button) =>
-          button.setButtonText("Show").onClick(async () => {
-            await this.plugin.openReleaseNotesModal();
-          })
-        );
-
       tabEl.createEl("h2", { text: "Logging" });
 
       new Setting(tabEl)
@@ -2225,6 +2214,17 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addButton((button) =>
           button.setButtonText("Cancel").onClick(() => {
             this.plugin.cancelRecreateMissingNotesFromCache();
+          })
+        );
+
+      tabEl.createEl("h2", { text: "Release Notes" });
+
+      new Setting(tabEl)
+        .setName("Show release notes")
+        .setDesc("Open the current version splash screen.")
+        .addButton((button) =>
+          button.setButtonText("Show").onClick(async () => {
+            await this.plugin.openReleaseNotesModal();
           })
         );
     };
