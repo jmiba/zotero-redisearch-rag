@@ -87,6 +87,7 @@ export interface ZoteroRagSettings {
   chatModel: string;
   chatTemperature: number;
   chatHistoryMessages: number;
+  lastSeenReleaseNotesVersion: string;
   enableAgenticRag: boolean;
   agenticMaxIters: number;
   enableQueryExpansion: boolean;
@@ -277,6 +278,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
+  lastSeenReleaseNotesVersion: "",
   chatPaneLocation: "right",
   enableAgenticRag: false,
   agenticMaxIters: 2,

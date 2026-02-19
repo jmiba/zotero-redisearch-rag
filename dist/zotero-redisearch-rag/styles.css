@@ -283,6 +283,25 @@
   width: 100%;
 }
 
+.zrr-release-notes-modal h3 {
+  margin-bottom: 0.5rem;
+}
+
+.zrr-release-notes-list {
+  margin: 0.25rem 0 0 1rem;
+  padding: 0;
+}
+
+.zrr-release-notes-list li {
+  margin: 0.3rem 0;
+}
+
+.zrr-release-notes-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
 .zrr-zotero-suggest-row {
   display: flex;
   align-items: flex-start;

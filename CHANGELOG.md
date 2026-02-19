@@ -1,4 +1,8 @@
 # Changelog
+## 0.8.1 (Patch Release)
+
+- Add an automatic **What's New** splash modal shown once after plugin version updates, backed by bundled versioned release notes.
+
 ## 0.8.0 (Minor Release)
 
 - Add optional **agentic retrieval** mode with a lightweight planner step before answer generation.

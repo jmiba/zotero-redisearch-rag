@@ -213,6 +213,39 @@ export class TextPromptModal extends Modal {
   }
 }
 
+export class ReleaseNotesModal extends Modal {
+  private version: string;
+  private entries: string[];
+
+  constructor(app: App, version: string, entries: string[]) {
+    super(app);
+    this.version = version;
+    this.entries = entries;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("zrr-release-notes-modal");
+    contentEl.createEl("h3", { text: `What's new in v${this.version}` });
+
+    if (this.entries.length > 0) {
+      const list = contentEl.createEl("ul", { cls: "zrr-release-notes-list" });
+      for (const entry of this.entries) {
+        list.createEl("li", { text: entry });
+      }
+    } else {
+      contentEl.createEl("p", {
+        text: "This version includes improvements and fixes. See CHANGELOG.md in the plugin folder for details.",
+      });
+    }
+
+    const actions = contentEl.createEl("div", { cls: "zrr-release-notes-actions" });
+    const closeButton = actions.createEl("button", { text: "Close" });
+    closeButton.addEventListener("click", () => this.close());
+  }
+}
+
 export class ChunkTagModal extends Modal {
   private chunkId: string;
   private initialTags: string[];

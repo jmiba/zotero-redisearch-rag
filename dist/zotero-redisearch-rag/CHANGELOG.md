@@ -1,4 +1,9 @@
 # Changelog
+## 0.8.1 (Patch Release)
+
+- Make the **What's New** splash source robust by using bundled, structured release notes per version instead of parsing `CHANGELOG.md`.
+- Keep showing the splash once per plugin version update via the persisted `lastSeenReleaseNotesVersion` marker.
+
 ## 0.8.0 (Minor Release)
 
 - Add optional **agentic retrieval** mode with a lightweight planner step before answer generation.
@@ -9,6 +14,7 @@
 - Add agentic controls in settings (`Enable agentic retrieval`, `Agentic max iterations`).
 - Extend RAG tool output with `agentic_mode` and `agentic_trace` for debugging and tuning.
 - Add an animated **Thinking** indicator in the assistant bubble before streaming starts.
+- Add an automatic **What's New** splash modal shown once after plugin version updates, backed by bundled versioned release notes.
 - Update docs for retrieval tuning and chat panel behavior.
 
 ## 0.7.0 (Minor Release)

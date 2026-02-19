@@ -50,6 +50,7 @@ import {
   MetadataConflictModal,
   MetadataConflictBatchModal,
   OutputModal,
+  ReleaseNotesModal,
   RedisSearchModal,
   TextPromptModal,
   ZoteroItemSuggestModal,
@@ -92,6 +93,7 @@ import {
 } from "./zoteroItemHelpers";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage, ChatRetrievedChunk } from "./chatView";
+import { RELEASE_NOTES } from "./releaseNotes";
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -265,6 +267,7 @@ export default class ZoteroRagPlugin extends Plugin {
     | "unknown"
     | null = null;
   private lastRedisSearchTerm = "";
+  private hadSavedSettingsData = false;
   private pdfSidebar!: PdfSidebarController;
 
   async onload(): Promise<void> {
@@ -423,6 +426,7 @@ export default class ZoteroRagPlugin extends Plugin {
       callback: () => this.purgeRedisOrphanedKeys(),
     });
 
+    void this.maybeShowReleaseNotesModal();
     void this.autoDetectContainerCliOnLoad();
 
     if (this.settings.autoStartRedis) {
@@ -432,6 +436,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const data = (await this.loadData()) ?? {};
+    this.hadSavedSettingsData = Object.keys(data).length > 0;
     const settings = Object.assign({}, DEFAULT_SETTINGS, data);
     if ((data as any).pythonRuntime === undefined) {
       settings.pythonRuntime = "local";
@@ -447,6 +452,42 @@ export default class ZoteroRagPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  private async maybeShowReleaseNotesModal(): Promise<void> {
+    const currentVersion = String(this.manifest.version || "").trim();
+    if (!currentVersion) {
+      return;
+    }
+    const seenVersion = String(this.settings.lastSeenReleaseNotesVersion || "").trim();
+    if (!seenVersion && !this.hadSavedSettingsData) {
+      this.settings.lastSeenReleaseNotesVersion = currentVersion;
+      await this.saveSettings();
+      return;
+    }
+    if (seenVersion === currentVersion) {
+      return;
+    }
+
+    const entries = this.getReleaseNotesEntries(currentVersion);
+    this.settings.lastSeenReleaseNotesVersion = currentVersion;
+    await this.saveSettings();
+    new ReleaseNotesModal(this.app, currentVersion, entries).open();
+  }
+
+  private getReleaseNotesEntries(version: string): string[] {
+    const normalizedVersion = String(version || "").trim();
+    if (!normalizedVersion) {
+      return [];
+    }
+    const entries = RELEASE_NOTES[normalizedVersion];
+    if (!Array.isArray(entries)) {
+      return [];
+    }
+    return entries
+      .map((entry) => String(entry || "").trim())
+      .filter((entry) => entry.length > 0)
+      .slice(0, 12);
   }
 
   private async importZoteroItem(): Promise<void> {
