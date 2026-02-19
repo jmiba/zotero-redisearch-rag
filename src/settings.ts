@@ -401,6 +401,23 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       new Setting(tabEl)
+        .setName("Docker/Podman path")
+        .setDesc(
+          "CLI path for Docker or Podman (used to start Redis Stack and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
+            "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~, $HOME, and %USERPROFILE%. " +
+            "Relative paths with separators resolve from your home dir."
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("docker")
+            .setValue(this.plugin.settings.dockerPath)
+            .onChange(async (value) => {
+              this.plugin.settings.dockerPath = value.trim() || "docker";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
         .setName("Python runtime")
         .setDesc(
           "Recommended: Worker container (Docker/Podman Compose). Local interpreter mode is optional."
@@ -476,23 +493,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
         });
-
-      new Setting(tabEl)
-        .setName("Docker/Podman path")
-        .setDesc(
-          "CLI path for Docker or Podman (used to start Redis Stack and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
-            "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~, $HOME, and %USERPROFILE%. " +
-            "Relative paths with separators resolve from your home dir."
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder("docker")
-            .setValue(this.plugin.settings.dockerPath)
-            .onChange(async (value) => {
-              this.plugin.settings.dockerPath = value.trim() || "docker";
-              await this.plugin.saveSettings();
-            })
-        );
 
       refreshPythonRuntimeState();
 
