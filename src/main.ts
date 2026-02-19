@@ -92,7 +92,7 @@ import {
 } from "./zoteroItemHelpers";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage, ChatRetrievedChunk } from "./chatView";
-import { RELEASE_NOTES } from "./releaseNotes";
+import { RELEASE_NOTES_LOG, type ReleaseNotesEntry } from "./releaseNotes";
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -468,27 +468,122 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    const markdown = this.getReleaseNotesMarkdown(currentVersion);
+    const markdown = this.getReleaseNotesMarkdown(currentVersion, seenVersion || null);
     this.settings.lastSeenReleaseNotesVersion = currentVersion;
     await this.saveSettings();
     new ReleaseNotesModal(this.app, currentVersion, markdown).open();
   }
 
-  private getReleaseNotesMarkdown(version: string): string {
-    const normalize = (value: string): string =>
-      String(value || "")
-        .trim()
-        .replace(/^refs\/tags\//, "")
-        .replace(/^v/, "");
-    const normalizedVersion = normalize(version);
-    if (!normalizedVersion) {
+  public async openReleaseNotesModal(): Promise<void> {
+    const currentVersion = String(this.manifest.version || "").trim();
+    if (!currentVersion) {
+      return;
+    }
+    const markdown = this.getReleaseNotesMarkdown(currentVersion, null);
+    new ReleaseNotesModal(this.app, currentVersion, markdown).open();
+  }
+
+  private normalizeReleaseVersion(value: string): string {
+    return String(value || "")
+      .trim()
+      .replace(/^refs\/tags\//, "")
+      .replace(/^v/, "");
+  }
+
+  private parseNumericReleaseVersion(version: string): number[] | null {
+    const normalized = this.normalizeReleaseVersion(version);
+    if (!normalized) {
+      return null;
+    }
+    const parts = normalized.split(".");
+    if (!parts.length) {
+      return null;
+    }
+    const parsed = parts.map((part) => Number.parseInt(part, 10));
+    if (parsed.some((part) => !Number.isFinite(part))) {
+      return null;
+    }
+    return parsed;
+  }
+
+  private compareReleaseVersions(a: string, b: string): number {
+    const normalizedA = this.normalizeReleaseVersion(a);
+    const normalizedB = this.normalizeReleaseVersion(b);
+    const numericA = this.parseNumericReleaseVersion(normalizedA);
+    const numericB = this.parseNumericReleaseVersion(normalizedB);
+    if (numericA && numericB) {
+      const maxLen = Math.max(numericA.length, numericB.length);
+      for (let index = 0; index < maxLen; index += 1) {
+        const left = numericA[index] ?? 0;
+        const right = numericB[index] ?? 0;
+        if (left !== right) {
+          return left - right;
+        }
+      }
+      return 0;
+    }
+    return normalizedA.localeCompare(normalizedB, undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  private sanitizeReleaseNotesMarkdown(markdown: string): string {
+    const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
+    const filtered = lines.filter((line) => !/full\s+changelog\s*:/i.test(line));
+    return filtered.join("\n").trim();
+  }
+
+  private getBundledReleaseNotesEntries(): ReleaseNotesEntry[] {
+    const seen = new Set<string>();
+    const entries = Array.isArray(RELEASE_NOTES_LOG) ? RELEASE_NOTES_LOG : [];
+    const normalizedEntries: ReleaseNotesEntry[] = [];
+    for (const entry of entries) {
+      const version = this.normalizeReleaseVersion(String(entry?.version ?? ""));
+      const markdown = this.sanitizeReleaseNotesMarkdown(String(entry?.markdown ?? ""));
+      if (!version || seen.has(version)) {
+        continue;
+      }
+      seen.add(version);
+      normalizedEntries.push({ version, markdown });
+    }
+    return normalizedEntries.sort((left, right) =>
+      this.compareReleaseVersions(right.version, left.version)
+    );
+  }
+
+  private getReleaseNotesMarkdown(currentVersion: string, fromVersion: string | null): string {
+    const normalizedCurrent = this.normalizeReleaseVersion(currentVersion);
+    if (!normalizedCurrent) {
       return "";
     }
-    const bundledVersion = normalize(RELEASE_NOTES.version || "");
-    if (!bundledVersion || bundledVersion !== normalizedVersion) {
-      return "";
+
+    const normalizedFrom = this.normalizeReleaseVersion(fromVersion || "");
+    const bundledEntries = this.getBundledReleaseNotesEntries();
+    const inRange = bundledEntries.filter((entry) => {
+      const toCurrent = this.compareReleaseVersions(entry.version, normalizedCurrent);
+      if (toCurrent > 0) {
+        return false;
+      }
+      if (!normalizedFrom) {
+        return entry.version === normalizedCurrent;
+      }
+      const fromSeen = this.compareReleaseVersions(entry.version, normalizedFrom);
+      return fromSeen > 0;
+    });
+
+    const entriesToRender = inRange.length
+      ? inRange
+      : bundledEntries.filter((entry) => entry.version === normalizedCurrent);
+    if (!entriesToRender.length) {
+      return "This version includes improvements and fixes.";
     }
-    return String(RELEASE_NOTES.markdown || "").trim();
+
+    return entriesToRender
+      .map((entry) => {
+        const body =
+          this.sanitizeReleaseNotesMarkdown(String(entry.markdown || "")) ||
+          "This release includes improvements and fixes.";
+        return `### v${entry.version}\n\n${body}`;
+      })
+      .join("\n\n");
   }
 
   private async importZoteroItem(): Promise<void> {

@@ -319,6 +319,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     clearLogFile?: () => Promise<void>;
     checkZoteroCompanionHealth: () => Promise<void>;
     openZoteroAddons: () => Promise<void>;
+    openReleaseNotesModal: () => Promise<void>;
     manifest: { dir?: string };
   };
   private activeTab: SettingsTabId = "prerequisites";
@@ -343,6 +344,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       clearLogFile: () => Promise<void>;
       checkZoteroCompanionHealth: () => Promise<void>;
       openZoteroAddons: () => Promise<void>;
+      openReleaseNotesModal: () => Promise<void>;
       manifest: { dir?: string };
     }
   ) {
@@ -2102,6 +2104,17 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderMaintenance = (tabEl: HTMLElement) => {
+      tabEl.createEl("h2", { text: "Release Notes" });
+
+      new Setting(tabEl)
+        .setName("Show release notes")
+        .setDesc("Open the current version splash screen.")
+        .addButton((button) =>
+          button.setButtonText("Show").onClick(async () => {
+            await this.plugin.openReleaseNotesModal();
+          })
+        );
+
       tabEl.createEl("h2", { text: "Logging" });
 
       new Setting(tabEl)

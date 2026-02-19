@@ -1,4 +1,11 @@
 # Changelog
+## 0.8.3 (Patch Release)
+
+- Add a versioned bundled release-notes log and show all changes between the previously seen plugin version and the current version.
+- Add a manual **Maintenance -> Release Notes -> Show** button to reopen the **What's New** splash on demand.
+- Strip per-release `Full Changelog:` lines from bundled notes and show one canonical link to the full changelog in the splash footer.
+- Improve release-note bundling by merging GitHub Release notes history (with local fallback) into the generated `releaseNotes.ts` log.
+
 ## 0.8.2 (Patch Release)
 
 - Generate bundled **What's New** content automatically from the GitHub Release body during the release workflow.

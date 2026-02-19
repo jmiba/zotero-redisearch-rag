@@ -88,6 +88,8 @@ const LANGUAGE_OPTIONS: LanguageOption[] = [
   { label: "Swedish (sv)", value: "sv" },
   { label: "Other (custom ISO code)", value: "__custom__" },
 ];
+const FULL_CHANGELOG_URL =
+  "https://github.com/jmiba/zotero-redisearch-rag/blob/main/CHANGELOG.md";
 
 const getLogLineClass = (text: string): string | null => {
   if (text.includes("STDERR")) {
@@ -238,6 +240,8 @@ export class ReleaseNotesModal extends Modal {
         text: "This version includes improvements and fixes.",
       });
     }
+    const changelog = contentEl.createDiv({ cls: "zrr-release-notes-body" });
+    void MarkdownRenderer.renderMarkdown(`[Full changelog](${FULL_CHANGELOG_URL})`, changelog, "", this);
 
     const actions = contentEl.createEl("div", { cls: "zrr-release-notes-actions" });
     const closeButton = actions.createEl("button", { text: "Close" });
