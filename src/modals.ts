@@ -6,7 +6,7 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
-import { App, MarkdownRenderer, Modal, Notice, SuggestModal, setIcon } from "obsidian";
+import { App, Component, MarkdownRenderer, Modal, Notice, SuggestModal, setIcon } from "obsidian";
 import type { MetadataDecision, ZoteroLocalItem } from "./types";
 import {
   extractYearFromItem,
@@ -218,6 +218,7 @@ export class TextPromptModal extends Modal {
 export class ReleaseNotesModal extends Modal {
   private version: string;
   private markdown: string;
+  private markdownComponent: Component | null = null;
 
   constructor(app: App, version: string, markdown: string) {
     super(app);
@@ -230,22 +231,36 @@ export class ReleaseNotesModal extends Modal {
     contentEl.empty();
     contentEl.addClass("zrr-release-notes-modal");
     contentEl.createEl("h3", { text: `What's new in v${this.version}` });
+    this.markdownComponent?.unload();
+    this.markdownComponent = new Component();
+    this.markdownComponent.load();
 
     const markdown = String(this.markdown || "").trim();
     if (markdown) {
       const body = contentEl.createDiv({ cls: "zrr-release-notes-body" });
-      void MarkdownRenderer.renderMarkdown(markdown, body, "", this);
+      void MarkdownRenderer.renderMarkdown(markdown, body, "", this.markdownComponent);
     } else {
       contentEl.createEl("p", {
         text: "This version includes improvements and fixes.",
       });
     }
     const changelog = contentEl.createDiv({ cls: "zrr-release-notes-body" });
-    void MarkdownRenderer.renderMarkdown(`[Full changelog](${FULL_CHANGELOG_URL})`, changelog, "", this);
+    void MarkdownRenderer.renderMarkdown(
+      `[Full changelog](${FULL_CHANGELOG_URL})`,
+      changelog,
+      "",
+      this.markdownComponent
+    );
 
     const actions = contentEl.createEl("div", { cls: "zrr-release-notes-actions" });
     const closeButton = actions.createEl("button", { text: "Close" });
     closeButton.addEventListener("click", () => this.close());
+  }
+
+  onClose(): void {
+    this.markdownComponent?.unload();
+    this.markdownComponent = null;
+    this.contentEl.empty();
   }
 }
 
