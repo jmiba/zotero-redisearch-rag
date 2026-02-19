@@ -26,10 +26,11 @@ fi
 cp -R "${ROOT_DIR}/tools" "${DIST_DIR}/${PLUGIN_ID}/"
 find "${DIST_DIR}/${PLUGIN_ID}/tools" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
 find "${DIST_DIR}/${PLUGIN_ID}/tools" -type f -name "*.pyc" -delete 2>/dev/null || true
+find "${DIST_DIR}/${PLUGIN_ID}" -type f -name ".DS_Store" -delete 2>/dev/null || true
 
 (
   cd "${DIST_DIR}"
-  zip -r "${PLUGIN_ID}.zip" "${PLUGIN_ID}" > /dev/null
+  zip -r "${PLUGIN_ID}.zip" "${PLUGIN_ID}" -x "*/.DS_Store" > /dev/null
 )
 
 echo "Release package created at ${DIST_DIR}/${PLUGIN_ID}.zip"

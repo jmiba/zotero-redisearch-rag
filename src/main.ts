@@ -47,7 +47,6 @@ import {
   ConfirmPurgeRedisOrphansModal,
   ConfirmRebuildIndexModal,
   LanguageSuggestModal,
-  MetadataConflictModal,
   MetadataConflictBatchModal,
   OutputModal,
   ReleaseNotesModal,
@@ -469,25 +468,27 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
 
-    const entries = this.getReleaseNotesEntries(currentVersion);
+    const markdown = this.getReleaseNotesMarkdown(currentVersion);
     this.settings.lastSeenReleaseNotesVersion = currentVersion;
     await this.saveSettings();
-    new ReleaseNotesModal(this.app, currentVersion, entries).open();
+    new ReleaseNotesModal(this.app, currentVersion, markdown).open();
   }
 
-  private getReleaseNotesEntries(version: string): string[] {
-    const normalizedVersion = String(version || "").trim();
+  private getReleaseNotesMarkdown(version: string): string {
+    const normalize = (value: string): string =>
+      String(value || "")
+        .trim()
+        .replace(/^refs\/tags\//, "")
+        .replace(/^v/, "");
+    const normalizedVersion = normalize(version);
     if (!normalizedVersion) {
-      return [];
+      return "";
     }
-    const entries = RELEASE_NOTES[normalizedVersion];
-    if (!Array.isArray(entries)) {
-      return [];
+    const bundledVersion = normalize(RELEASE_NOTES.version || "");
+    if (!bundledVersion || bundledVersion !== normalizedVersion) {
+      return "";
     }
-    return entries
-      .map((entry) => String(entry || "").trim())
-      .filter((entry) => entry.length > 0)
-      .slice(0, 12);
+    return String(RELEASE_NOTES.markdown || "").trim();
   }
 
   private async importZoteroItem(): Promise<void> {
@@ -6047,42 +6048,6 @@ export default class ZoteroRagPlugin extends Plugin {
     };
   }
 
-  private async promptMetadataDecision(
-    field: keyof NoteMetadataFields,
-    noteValue: string | string[],
-    zoteroValue: string | string[]
-  ): Promise<MetadataDecision> {
-    const fieldLabels: Record<keyof NoteMetadataFields, string> = {
-      title: "Title",
-      short_title: "Short title",
-      citekey: "Citekey",
-      date: "Date",
-      abstract: "Abstract",
-      doi: "DOI",
-      publisher: "Publisher",
-      place: "Place",
-      issue: "Issue",
-      volume: "Volume",
-      pages: "Pages",
-      item_type: "Item type",
-      tags: "Tags",
-      authors: "Authors",
-      editors: "Editors",
-    };
-    const labels = this.getMetadataDecisionLabels(field, noteValue, zoteroValue, fieldLabels);
-    return new Promise((resolve) => {
-      new MetadataConflictModal(
-        this.app,
-        labels.fieldLabel,
-        labels.noteLabel,
-        labels.zoteroLabel,
-        this.formatMetadataValue(noteValue),
-        this.formatMetadataValue(zoteroValue),
-        resolve
-      ).open();
-    });
-  }
-
   private async promptMetadataBatchDecision(
     conflicts: Array<{
       field: keyof NoteMetadataFields;
@@ -7901,23 +7866,6 @@ export default class ZoteroRagPlugin extends Plugin {
       return `[PDF](${zoteroLink})`;
     }
     return this.buildPdfLinkFromSourcePath(sourcePdf);
-  }
-
-  private buildVaultPdfCitationLink(
-    sourcePdf: string,
-    pageStart?: string,
-    label?: string
-  ): string {
-    if (!sourcePdf) {
-      return "";
-    }
-    const relative = this.toVaultRelativePath(sourcePdf);
-    if (!relative) {
-      return "";
-    }
-    const pageSuffix = pageStart ? `#page=${pageStart}` : "";
-    const safeLabel = label || relative;
-    return `[[${relative}${pageSuffix}|${safeLabel}]]`;
   }
 
   private async maybeCreateOcrLayeredPdf(

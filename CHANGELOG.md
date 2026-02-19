@@ -1,4 +1,14 @@
 # Changelog
+## 0.8.2 (Patch Release)
+
+- Generate bundled **What's New** content automatically from the GitHub Release body during the release workflow.
+- Render **What's New** content as Markdown so release notes formatting is preserved.
+- Store only the current release's bundled notes instead of maintaining a full in-repo version history map.
+- Package cleanup:
+  - exclude `.DS_Store` from release archives,
+  - remove tracked Python `__pycache__` artifacts,
+  - remove obsolete root `ocr_wordlist.txt`.
+
 ## 0.8.1 (Patch Release)
 
 - Add an automatic **What's New** splash modal shown once after plugin version updates, backed by bundled versioned release notes.

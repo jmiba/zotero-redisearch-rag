@@ -6,7 +6,7 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
-import { App, Modal, Notice, SuggestModal, setIcon } from "obsidian";
+import { App, MarkdownRenderer, Modal, Notice, SuggestModal, setIcon } from "obsidian";
 import type { MetadataDecision, ZoteroLocalItem } from "./types";
 import {
   extractYearFromItem,
@@ -215,12 +215,12 @@ export class TextPromptModal extends Modal {
 
 export class ReleaseNotesModal extends Modal {
   private version: string;
-  private entries: string[];
+  private markdown: string;
 
-  constructor(app: App, version: string, entries: string[]) {
+  constructor(app: App, version: string, markdown: string) {
     super(app);
     this.version = version;
-    this.entries = entries;
+    this.markdown = markdown;
   }
 
   onOpen(): void {
@@ -229,14 +229,13 @@ export class ReleaseNotesModal extends Modal {
     contentEl.addClass("zrr-release-notes-modal");
     contentEl.createEl("h3", { text: `What's new in v${this.version}` });
 
-    if (this.entries.length > 0) {
-      const list = contentEl.createEl("ul", { cls: "zrr-release-notes-list" });
-      for (const entry of this.entries) {
-        list.createEl("li", { text: entry });
-      }
+    const markdown = String(this.markdown || "").trim();
+    if (markdown) {
+      const body = contentEl.createDiv({ cls: "zrr-release-notes-body" });
+      void MarkdownRenderer.renderMarkdown(markdown, body, "", this);
     } else {
       contentEl.createEl("p", {
-        text: "This version includes improvements and fixes. See CHANGELOG.md in the plugin folder for details.",
+        text: "This version includes improvements and fixes.",
       });
     }
 
@@ -809,86 +808,6 @@ export class ConfirmPurgeRedisOrphansModal extends Modal {
   onClose(): void {
     if (!this.resolved) {
       this.onResolve(false);
-    }
-  }
-}
-
-export class MetadataConflictModal extends Modal {
-  private fieldLabel: string;
-  private noteLabel: string;
-  private zoteroLabel: string;
-  private noteValue: string;
-  private zoteroValue: string;
-  private onResolve: (decision: MetadataDecision) => void;
-  private resolved = false;
-
-  constructor(
-    app: App,
-    fieldLabel: string,
-    noteLabel: string,
-    zoteroLabel: string,
-    noteValue: string,
-    zoteroValue: string,
-    onResolve: (decision: MetadataDecision) => void
-  ) {
-    super(app);
-    this.fieldLabel = fieldLabel;
-    this.noteLabel = noteLabel;
-    this.zoteroLabel = zoteroLabel;
-    this.noteValue = noteValue;
-    this.zoteroValue = zoteroValue;
-    this.onResolve = onResolve;
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: `Resolve metadata conflict: ${this.fieldLabel}` });
-    const grid = contentEl.createEl("div");
-    grid.style.display = "grid";
-    grid.style.gap = "0.5rem";
-
-    grid.createEl("div", { text: "Note value" });
-    const noteBox = grid.createEl("textarea", {
-      attr: { readonly: "true", rows: "4" },
-    });
-    noteBox.style.width = "100%";
-    noteBox.value = this.noteValue || "(empty)";
-
-    grid.createEl("div", { text: "Zotero value" });
-    const zoteroBox = grid.createEl("textarea", {
-      attr: { readonly: "true", rows: "4" },
-    });
-    zoteroBox.style.width = "100%";
-    zoteroBox.value = this.zoteroValue || "(empty)";
-
-    const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-    const keepNote = actions.createEl("button", { text: this.noteLabel });
-    const keepZotero = actions.createEl("button", { text: this.zoteroLabel });
-    const skip = actions.createEl("button", { text: "Skip" });
-    keepNote.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve("note");
-    });
-    keepZotero.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve("zotero");
-    });
-    skip.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onResolve("skip");
-    });
-  }
-
-  onClose(): void {
-    if (!this.resolved) {
-      this.onResolve("skip");
     }
   }
 }

@@ -17,6 +17,11 @@ jobs:
           node-version: "20"
           cache: "npm"
       - run: npm ci
+      - name: Generate bundled release notes from GitHub release body
+        env:
+          GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          GITHUB_RELEASE_BODY: ${{ github.event.release.body }}
+        run: node scripts/generate-release-notes.mjs
       - run: npm run build
       - run: npm run package-release
       - uses: softprops/action-gh-release@v2

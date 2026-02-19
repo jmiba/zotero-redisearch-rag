@@ -1,8 +1,17 @@
 # Changelog
+## 0.8.2 (Patch Release)
+
+- Generate bundled **What's New** content automatically from the GitHub Release body during the release workflow.
+- Render **What's New** content as Markdown so release notes formatting is preserved.
+- Store only the current release's bundled notes instead of maintaining a full in-repo version history map.
+- Package cleanup:
+  - exclude `.DS_Store` from release archives,
+  - remove tracked Python `__pycache__` artifacts,
+  - remove obsolete root `ocr_wordlist.txt`.
+
 ## 0.8.1 (Patch Release)
 
-- Make the **What's New** splash source robust by using bundled, structured release notes per version instead of parsing `CHANGELOG.md`.
-- Keep showing the splash once per plugin version update via the persisted `lastSeenReleaseNotesVersion` marker.
+- Add an automatic **What's New** splash modal shown once after plugin version updates, backed by bundled versioned release notes.
 
 ## 0.8.0 (Minor Release)
 
@@ -14,7 +23,6 @@
 - Add agentic controls in settings (`Enable agentic retrieval`, `Agentic max iterations`).
 - Extend RAG tool output with `agentic_mode` and `agentic_trace` for debugging and tuning.
 - Add an animated **Thinking** indicator in the assistant bubble before streaming starts.
-- Add an automatic **What's New** splash modal shown once after plugin version updates, backed by bundled versioned release notes.
 - Update docs for retrieval tuning and chat panel behavior.
 
 ## 0.7.0 (Minor Release)
