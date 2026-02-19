@@ -1,4 +1,13 @@
 # Changelog
+## 0.8.4 (Bugfix Release)
+
+- Fix the **What's New** splash title and layout:
+  - use a generic `What's new` header,
+  - keep a single visible version heading (`vX.Y.Z`) without duplicate internal release-title lines.
+- Fix release-notes sanitization so `Full Changelog` lines are removed even when formatted as markdown links or styled text.
+- Fix `ReleaseNotesModal` markdown rendering type-safety by using an Obsidian `Component` lifecycle owner instead of passing the modal instance.
+- Move **Maintenance -> Release Notes** to the end of the Maintenance settings section.
+
 ## 0.8.3 (Patch Release)
 
 - Add a versioned bundled release-notes log and show all changes between the previously seen plugin version and the current version.
