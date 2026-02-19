@@ -2,5 +2,5 @@
 // This file is overwritten in GitHub release workflow builds.
 export const RELEASE_NOTES: { version: string; markdown: string } = {
   "version": "0.8.2",
-  "markdown": "- Generate bundled What's New content from GitHub Release notes during release builds.\n- Render the What's New modal as Markdown to preserve formatting.\n- Keep only current release notes in the bundled file.\n- Exclude .DS_Store and remove tracked Python __pycache__ files from release packaging."
+  "markdown": "test"
 };

@@ -18,6 +18,8 @@ jobs:
           cache: "npm"
       - run: npm ci
       - name: Generate bundled release notes from GitHub release body
+        if: ${{ hashFiles('scripts/generate-release-notes.mjs') != '' && hashFiles('src/releaseNotes.ts') != '' }}
+        continue-on-error: true
         env:
           GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
           GITHUB_RELEASE_BODY: ${{ github.event.release.body }}
