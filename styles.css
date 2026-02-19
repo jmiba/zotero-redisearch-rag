@@ -140,6 +140,67 @@
   -webkit-user-select: text;
 }
 
+.zrr-chat-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-muted);
+}
+
+.zrr-chat-thinking-spinner {
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid var(--background-modifier-border);
+  border-top-color: var(--interactive-accent);
+  border-radius: 999px;
+  animation: zrr-chat-thinking-spin 0.9s linear infinite;
+}
+
+.zrr-chat-thinking-text {
+  font-style: italic;
+}
+
+.zrr-chat-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.zrr-chat-thinking-dots span {
+  width: 0.2rem;
+  height: 0.2rem;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.35;
+  animation: zrr-chat-thinking-pulse 1s ease-in-out infinite;
+}
+
+.zrr-chat-thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.zrr-chat-thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes zrr-chat-thinking-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes zrr-chat-thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 0.85;
+    transform: translateY(-1px);
+  }
+}
+
 .zrr-chat-citations {
   margin-top: 0.6rem;
   font-size: var(--font-ui-small);

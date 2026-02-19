@@ -48,7 +48,7 @@ If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-
 - **Chat**: Model selection, temperature, history size, panel location.
 - **Cleanup**: Model and thresholds for OCR cleanup.
 - **Tagging**: Optional LLM‑generated chunk tags.
-- **Retrieval tuning**: Query expansion, reranking, RRF, max‑per‑doc caps.
+- **Retrieval tuning**: Agentic planner mode, query expansion, reranking, RRF, max‑per‑doc caps.
 
 ## Maintenance
 - **Reindex Redis from cache**: Rebuild index without re‑OCR.

@@ -87,6 +87,8 @@ export interface ZoteroRagSettings {
   chatModel: string;
   chatTemperature: number;
   chatHistoryMessages: number;
+  enableAgenticRag: boolean;
+  agenticMaxIters: number;
   enableQueryExpansion: boolean;
   queryExpansionCount: number;
   enableCrossEncoderRerank: boolean;
@@ -276,6 +278,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
   chatPaneLocation: "right",
+  enableAgenticRag: false,
+  agenticMaxIters: 2,
   enableQueryExpansion: false,
   queryExpansionCount: 3,
   enableCrossEncoderRerank: false,
@@ -1954,6 +1958,34 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       tabEl.createEl("h2", { text: "Retrieval" });
+
+      new Setting(tabEl)
+        .setName("Enable agentic retrieval")
+        .setDesc(
+          "Use a small planner step that can trigger expansion retry or full-document retrieval before answering."
+        )
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableAgenticRag).onChange(async (value) => {
+            this.plugin.settings.enableAgenticRag = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(tabEl)
+        .setName("Agentic max iterations")
+        .setDesc("Maximum number of planner steps per query.")
+        .addText((text) =>
+          text
+            .setPlaceholder("2")
+            .setValue(String(this.plugin.settings.agenticMaxIters))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.agenticMaxIters = Number.isFinite(parsed)
+                ? Math.max(1, parsed)
+                : 2;
+              await this.plugin.saveSettings();
+            })
+        );
 
       new Setting(tabEl)
         .setName("Enable query expansion")

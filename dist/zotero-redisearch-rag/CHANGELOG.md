@@ -1,4 +1,16 @@
 # Changelog
+## 0.8.0 (Minor Release)
+
+- Add optional **agentic retrieval** mode with a lightweight planner step before answer generation.
+- Add agentic retrieval actions:
+  - keep current context,
+  - run an expansion retry retrieval pass,
+  - pull full-document chunks for whole-document synthesis queries.
+- Add agentic controls in settings (`Enable agentic retrieval`, `Agentic max iterations`).
+- Extend RAG tool output with `agentic_mode` and `agentic_trace` for debugging and tuning.
+- Add an animated **Thinking** indicator in the assistant bubble before streaming starts.
+- Update docs for retrieval tuning and chat panel behavior.
+
 ## 0.7.0 (Minor Release)
 
 - Add Python worker runtime architecture as the recommended path, with Redis and Python running as separate compose services.

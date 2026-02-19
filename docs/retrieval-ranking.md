@@ -13,6 +13,10 @@ Results from both are combined using **RRF (Reciprocal Rank Fusion)**, which bal
 ## Retrieval fallback (auto‑broadening)
 If the first search looks weak (too few chunks, too little text, or weak scores), the plugin automatically broadens the search and tries again with more candidates.
 
+## Optional agentic planner
+You can enable **agentic retrieval** to run a lightweight planner step before answer generation. The planner can keep the current context, retry with expanded retrieval, or pull a full document when whole-document synthesis is needed.
+Use **Agentic max iterations** to cap planner loops per query.
+
 ## Optional query expansion
 You can enable **query expansion** to generate a few alternative queries for short or ambiguous questions. This can improve recall when the exact wording isn’t present in the PDFs.
 

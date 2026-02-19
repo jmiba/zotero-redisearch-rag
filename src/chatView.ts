@@ -58,6 +58,7 @@ export class ZoteroChatView extends ItemView {
   private activeSessionId = "default";
   private messageEls = new Map<string, MessageEls>();
   private pendingRender = new Map<string, number>();
+  private pendingThinking = new Set<string>();
   private busy = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: ZoteroRagPlugin) {
@@ -241,6 +242,12 @@ export class ZoteroChatView extends ItemView {
   private async renderAll(): Promise<void> {
     this.messagesEl.empty();
     this.messageEls.clear();
+    const validIds = new Set(this.messages.map((message) => message.id));
+    for (const messageId of Array.from(this.pendingThinking)) {
+      if (!validIds.has(messageId)) {
+        this.pendingThinking.delete(messageId);
+      }
+    }
     for (const message of this.messages) {
       await this.renderMessage(message);
     }
@@ -325,6 +332,7 @@ export class ZoteroChatView extends ItemView {
       window.clearTimeout(pending);
       this.pendingRender.delete(messageId);
     }
+    this.pendingThinking.delete(messageId);
     await this.saveHistory();
   }
 
@@ -345,6 +353,19 @@ export class ZoteroChatView extends ItemView {
     if (!els) {
       return;
     }
+    const isThinking =
+      message.role === "assistant"
+      && !message.content.trim()
+      && this.pendingThinking.has(message.id);
+    if (isThinking) {
+      if (els.content.dataset.lastRendered !== "__thinking__") {
+        els.content.empty();
+        this.renderThinkingIndicator(els.content);
+        els.content.dataset.lastRendered = "__thinking__";
+      }
+      els.citations.empty();
+      return;
+    }
     // Only update if content actually changed to reduce flicker
     const newContent = await this.plugin.formatInlineCitations(
       message.content || "",
@@ -361,6 +382,18 @@ export class ZoteroChatView extends ItemView {
     // Always update citations (they may change at end)
     els.citations.empty();
     await this.renderCitations(els.citations, message.citations ?? []);
+  }
+
+  private renderThinkingIndicator(container: HTMLElement): void {
+    const indicator = container.createEl("div", { cls: "zrr-chat-thinking" });
+    indicator.setAttr("role", "status");
+    indicator.setAttr("aria-live", "polite");
+    indicator.createEl("span", { cls: "zrr-chat-thinking-spinner" });
+    indicator.createEl("span", { cls: "zrr-chat-thinking-text", text: "Thinking" });
+    const dots = indicator.createEl("span", { cls: "zrr-chat-thinking-dots" });
+    dots.createEl("span");
+    dots.createEl("span");
+    dots.createEl("span");
   }
 
   private hookInternalLinks(container: HTMLElement): void {
@@ -456,6 +489,7 @@ export class ZoteroChatView extends ItemView {
       createdAt: new Date().toISOString(),
     };
     this.messages.push(assistantMessage);
+    this.pendingThinking.add(assistantMessage.id);
     await this.renderMessage(assistantMessage);
     this.scrollToBottom();
 
@@ -465,11 +499,13 @@ export class ZoteroChatView extends ItemView {
       await this.plugin.runRagQueryStreaming(
         query,
         (delta) => {
+          this.pendingThinking.delete(assistantMessage.id);
           sawDelta = true;
           assistantMessage.content += delta;
           this.scheduleRender(assistantMessage);
         },
         (finalPayload) => {
+          this.pendingThinking.delete(assistantMessage.id);
           if (!sawDelta && finalPayload?.answer) {
             assistantMessage.content = finalPayload.answer;
           } else if (finalPayload?.answer) {
@@ -487,9 +523,11 @@ export class ZoteroChatView extends ItemView {
       );
     } catch (error) {
       console.error(error);
+      this.pendingThinking.delete(assistantMessage.id);
       assistantMessage.content = "Failed to fetch answer. See console for details.";
       this.scheduleRender(assistantMessage);
     } finally {
+      this.pendingThinking.delete(assistantMessage.id);
       this.busy = false;
       this.sendButton.disabled = false;
       await this.saveHistory();

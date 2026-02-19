@@ -544,6 +544,9 @@ _MIN_CONTENT_FOR_RATIO = 4
 _RERANK_MAX_CHARS_DEFAULT = 2000
 _RRF_K = 60
 _ANNOTATION_K_DEFAULT = 3
+_AGENTIC_FULL_DOC_MAX_CHUNKS_DEFAULT = 48
+_AGENTIC_FULL_DOC_MAX_CHARS_DEFAULT = 32000
+_AGENTIC_DOC_SUMMARY_TOP_N = 6
 
 
 def retrieve_chunks(
@@ -1005,6 +1008,216 @@ def retrieve_with_broadening(
             eprint(f"Fallback retrieval failed: {exc}")
     return retrieved, metrics
 
+
+def sum_retrieved_chars(retrieved: Sequence[Dict[str, Any]]) -> int:
+    return sum(len(str(chunk.get("text", "") or "")) for chunk in retrieved)
+
+
+def escape_tag_value(value: str) -> str:
+    text = str(value or "")
+    return re.sub(r'([,\.<>{}\[\]"\'\:;!@#$%^&*()\-+=~\\/| ])', r'\\\1', text)
+
+
+def parse_json_object(raw: str) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", text)
+        text = re.sub(r"\n```$", "", text)
+        text = text.strip()
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def summarize_retrieved_docs(
+    retrieved: Sequence[Dict[str, Any]],
+    top_n: int = _AGENTIC_DOC_SUMMARY_TOP_N,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for chunk in retrieved:
+        doc_id = str(chunk.get("doc_id", "") or "").strip()
+        if not doc_id:
+            continue
+        entry = grouped.get(doc_id)
+        if not entry:
+            entry = {
+                "doc_id": doc_id,
+                "source_pdf": str(chunk.get("source_pdf", "") or ""),
+                "chunk_count": 0,
+                "page_min": None,
+                "page_max": None,
+            }
+            grouped[doc_id] = entry
+        entry["chunk_count"] = int(entry["chunk_count"]) + 1
+        page_start = chunk.get("page_start")
+        page_end = chunk.get("page_end")
+        try:
+            p_start = int(page_start)
+            entry["page_min"] = p_start if entry["page_min"] is None else min(int(entry["page_min"]), p_start)
+        except Exception:
+            pass
+        try:
+            p_end = int(page_end)
+            entry["page_max"] = p_end if entry["page_max"] is None else max(int(entry["page_max"]), p_end)
+        except Exception:
+            pass
+
+    docs = list(grouped.values())
+    docs.sort(key=lambda item: (-int(item.get("chunk_count", 0)), str(item.get("doc_id", ""))))
+    if top_n > 0:
+        docs = docs[:top_n]
+    return docs
+
+
+def choose_top_doc_id(retrieved: Sequence[Dict[str, Any]]) -> str:
+    docs = summarize_retrieved_docs(retrieved, top_n=1)
+    if not docs:
+        return ""
+    return str(docs[0].get("doc_id", "") or "")
+
+
+def dedupe_by_doc_and_chunk(items: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Set[Tuple[str, str]] = set()
+    deduped: List[Dict[str, Any]] = []
+    for item in items:
+        key = (str(item.get("doc_id", "") or ""), str(item.get("chunk_id", "") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def retrieval_signature(
+    chunks: Sequence[Dict[str, Any]],
+    limit: int = 24,
+) -> Tuple[Tuple[str, str], ...]:
+    rows: List[Tuple[str, str]] = []
+    for chunk in chunks[:max(1, limit)]:
+        rows.append((
+            str(chunk.get("doc_id", "") or ""),
+            str(chunk.get("chunk_id", "") or ""),
+        ))
+    return tuple(rows)
+
+
+def trim_chunks_to_char_budget(
+    chunks: Sequence[Dict[str, Any]],
+    max_chars: int,
+) -> List[Dict[str, Any]]:
+    if max_chars <= 0:
+        return list(chunks)
+    kept: List[Dict[str, Any]] = []
+    used = 0
+    for chunk in chunks:
+        text = str(chunk.get("text", "") or "")
+        text_len = len(text)
+        if kept and used + text_len > max_chars:
+            break
+        kept.append(chunk)
+        used += text_len
+    return kept
+
+
+def retrieve_full_document_chunks(
+    client: redis.Redis,
+    index: str,
+    doc_id: str,
+    max_chunks: int,
+) -> List[Dict[str, Any]]:
+    clean_doc_id = str(doc_id or "").strip()
+    if not clean_doc_id:
+        return []
+    query = f"@doc_id:{{{escape_tag_value(clean_doc_id)}}}"
+    raw = client.execute_command(
+        "FT.SEARCH",
+        index,
+        query,
+        "SORTBY",
+        "page_start",
+        "ASC",
+        "LIMIT",
+        "0",
+        str(max(1, max_chunks)),
+        "RETURN",
+        "12",
+        "doc_id",
+        "chunk_id",
+        "is_annotation",
+        "attachment_key",
+        "source_pdf",
+        "page_start",
+        "page_end",
+        "annotation_page_label",
+        "section",
+        "text",
+        "tags",
+        "chunk_tags",
+        "DIALECT",
+        "2",
+    )
+    chunks = parse_results(raw)
+    return [chunk for chunk in chunks if str(chunk.get("text", "") or "").strip()]
+
+
+def plan_agentic_action(
+    base_url: str,
+    api_key: str,
+    model: str,
+    query: str,
+    retrieved: Sequence[Dict[str, Any]],
+    step: int,
+    max_steps: int,
+) -> Dict[str, Any]:
+    if not base_url or not model:
+        return {"action": "answer_with_current_context", "reason": "planner_unavailable"}
+    chars = sum_retrieved_chars(retrieved)
+    docs = summarize_retrieved_docs(retrieved, top_n=_AGENTIC_DOC_SUMMARY_TOP_N)
+    planner_input = {
+        "query": query,
+        "step": step,
+        "max_steps": max_steps,
+        "retrieved_chunk_count": len(retrieved),
+        "retrieved_chars": chars,
+        "candidate_docs": docs,
+    }
+    system_prompt = (
+        "You are a retrieval planner for RAG. "
+        "Choose exactly one action: answer_with_current_context, expand_retry, or full_document. "
+        "Use full_document only when the user likely asks for whole-document synthesis/comparison "
+        "or when retrieved context is clearly too sparse. "
+        "Return only JSON object: "
+        "{\"action\":\"...\",\"doc_id\":\"optional\",\"reason\":\"short reason\"}."
+    )
+    user_prompt = "Planner input JSON:\n" + json.dumps(planner_input, ensure_ascii=False)
+    try:
+        raw = request_chat(base_url, api_key, model, 0.0, system_prompt, user_prompt)
+    except Exception as exc:
+        eprint(f"Agentic planner failed: {exc}")
+        return {"action": "answer_with_current_context", "reason": "planner_error"}
+    plan = parse_json_object(raw)
+    action = str(plan.get("action", "")).strip().lower()
+    if action not in {"answer_with_current_context", "expand_retry", "full_document"}:
+        return {"action": "answer_with_current_context", "reason": "planner_invalid_action"}
+    output = {"action": action, "reason": str(plan.get("reason", "") or "").strip()}
+    doc_id = str(plan.get("doc_id", "") or "").strip()
+    if doc_id:
+        output["doc_id"] = doc_id
+    return output
+
 def build_context(retrieved: List[Dict[str, Any]]) -> str:
     blocks = []
     for chunk in retrieved:
@@ -1124,6 +1337,10 @@ def main() -> int:
     parser.add_argument("--rrf-log-top", type=int, default=0)
     parser.add_argument("--max-per-doc", type=int, default=0)
     parser.add_argument("--annotation-k", type=int, default=_ANNOTATION_K_DEFAULT)
+    parser.add_argument("--agentic", choices=["off", "basic"], default="off")
+    parser.add_argument("--agentic-max-iters", type=int, default=2)
+    parser.add_argument("--agentic-full-doc-chunks", type=int, default=_AGENTIC_FULL_DOC_MAX_CHUNKS_DEFAULT)
+    parser.add_argument("--agentic-full-doc-max-chars", type=int, default=_AGENTIC_FULL_DOC_MAX_CHARS_DEFAULT)
     args = parser.parse_args()
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
@@ -1136,6 +1353,14 @@ def main() -> int:
     rrf_log_top = max(0, int(args.rrf_log_top or 0))
     max_per_doc = max(0, int(args.max_per_doc or 0))
     annotation_k = max(0, int(args.annotation_k or 0))
+    base_k = max(1, int(args.k))
+    if is_short_query(raw_query):
+        base_k = max(base_k, 12)
+    agentic_mode = str(args.agentic or "off").strip().lower()
+    agentic_max_iters = max(1, int(args.agentic_max_iters or 1))
+    agentic_full_doc_chunks = max(1, int(args.agentic_full_doc_chunks or _AGENTIC_FULL_DOC_MAX_CHUNKS_DEFAULT))
+    agentic_full_doc_max_chars = max(0, int(args.agentic_full_doc_max_chars or _AGENTIC_FULL_DOC_MAX_CHARS_DEFAULT))
+    strategy_trace: List[Dict[str, Any]] = []
 
     def embed_query(query_text: str) -> bytes:
         nonlocal client, index_dim_cache
@@ -1160,9 +1385,6 @@ def main() -> int:
         if expanded_queries:
             query_for_display = expanded_queries[0]
         candidate_multiplier = max(1, int(args.rerank_candidates or 1))
-        base_k = max(1, int(args.k))
-        if is_short_query(raw_query):
-            base_k = max(base_k, 12)
         candidate_k = max(base_k * candidate_multiplier, base_k)
         query_variants = [raw_query] + expanded_queries
         candidates_map: Dict[str, Dict[str, Any]] = {}
@@ -1232,9 +1454,6 @@ def main() -> int:
             eprint(f"Failed to embed query: {exc}")
             return 2
         keywords = extract_keywords(raw_query)
-        base_k = args.k
-        if is_short_query(raw_query):
-            base_k = max(base_k, 12)
         try:
             retrieved, _ = retrieve_with_broadening(
                 client,
@@ -1262,6 +1481,150 @@ def main() -> int:
                 retrieved = merge_annotation_chunks(retrieved, annotations, annotation_k)
             except Exception as exc:
                 eprint(f"Annotation retrieval failed: {exc}")
+
+    if agentic_mode == "basic":
+        for step in range(1, agentic_max_iters + 1):
+            plan = plan_agentic_action(
+                args.chat_base_url,
+                args.chat_api_key,
+                args.chat_model,
+                raw_query,
+                retrieved,
+                step,
+                agentic_max_iters,
+            )
+            action = str(plan.get("action", "answer_with_current_context") or "answer_with_current_context")
+            reason = str(plan.get("reason", "") or "")
+            step_trace: Dict[str, Any] = {
+                "step": step,
+                "action": action,
+                "reason": reason,
+                "before_chunks": len(retrieved),
+                "before_chars": sum_retrieved_chars(retrieved),
+            }
+            strategy_trace.append(step_trace)
+            if action == "answer_with_current_context":
+                break
+
+            before_sig = retrieval_signature(retrieved)
+            if action == "expand_retry":
+                retry_expanded = expand_query(
+                    args.chat_base_url,
+                    args.chat_api_key,
+                    args.chat_model,
+                    raw_query,
+                    max(1, int(args.expand_count or 0)),
+                )
+                step_trace["expanded_queries"] = retry_expanded
+                query_variants = [raw_query] + retry_expanded
+                candidate_multiplier = max(2, int(args.rerank_candidates or 1))
+                candidate_k = max(base_k * candidate_multiplier, base_k)
+                candidates_map: Dict[str, Dict[str, Any]] = {}
+                try:
+                    for variant in query_variants:
+                        vec = embed_query(variant)
+                        keywords = extract_keywords(variant)
+                        retrieved_variant, _ = retrieve_with_broadening(
+                            client,
+                            args.index,
+                            vec,
+                            candidate_k,
+                            keywords,
+                            rrf_k=rrf_k,
+                            rrf_log_top=rrf_log_top,
+                            max_per_doc=0,
+                            annotation_k=0,
+                        )
+                        for item in retrieved_variant:
+                            key = chunk_key(item)
+                            if not key:
+                                continue
+                            existing = candidates_map.get(key)
+                            if not existing:
+                                candidates_map[key] = item
+                                continue
+                            score_new = parse_score(item.get("score"))
+                            score_old = parse_score(existing.get("score"))
+                            if score_new is not None and (score_old is None or score_new < score_old):
+                                candidates_map[key] = item
+                except Exception as exc:
+                    step_trace["status"] = "error"
+                    step_trace["error"] = str(exc)
+                    break
+
+                candidates = list(candidates_map.values())
+                if args.rerank:
+                    reranker = load_reranker(args.rerank_model)
+                    reranked = rerank_candidates(
+                        reranker,
+                        query_for_display or raw_query,
+                        candidates,
+                        max(200, int(args.rerank_max_chars or _RERANK_MAX_CHARS_DEFAULT)),
+                    )
+                    updated = apply_doc_cap(reranked, max_per_doc)[:base_k]
+                else:
+                    ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
+                    updated = apply_doc_cap(ordered, max_per_doc)[:base_k]
+                if annotation_k > 0 and updated:
+                    try:
+                        vec = embed_query(raw_query)
+                        keywords = extract_keywords(raw_query)
+                        annotations = retrieve_annotation_chunks(
+                            client,
+                            args.index,
+                            vec,
+                            annotation_k,
+                            keywords,
+                        )
+                        updated = merge_annotation_chunks(updated, annotations, annotation_k)
+                    except Exception as exc:
+                        step_trace["annotation_error"] = str(exc)
+                if updated:
+                    retrieved = updated
+                    seen_expansions = {str(item).lower() for item in expanded_queries}
+                    for item in retry_expanded:
+                        key = str(item).lower()
+                        if key in seen_expansions:
+                            continue
+                        seen_expansions.add(key)
+                        expanded_queries.append(item)
+                    if expanded_queries:
+                        query_for_display = expanded_queries[0]
+                else:
+                    step_trace["status"] = "no_results"
+                    break
+
+            elif action == "full_document":
+                target_doc_id = str(plan.get("doc_id", "") or "").strip() or choose_top_doc_id(retrieved)
+                step_trace["doc_id"] = target_doc_id
+                if not target_doc_id:
+                    step_trace["status"] = "skipped_no_doc_id"
+                    break
+                try:
+                    full_chunks = retrieve_full_document_chunks(
+                        client,
+                        args.index,
+                        target_doc_id,
+                        agentic_full_doc_chunks,
+                    )
+                except Exception as exc:
+                    step_trace["status"] = "error"
+                    step_trace["error"] = str(exc)
+                    break
+                if not full_chunks:
+                    step_trace["status"] = "no_results"
+                    break
+                full_chunks = trim_chunks_to_char_budget(full_chunks, agentic_full_doc_max_chars)
+                merged = dedupe_by_doc_and_chunk(full_chunks + list(retrieved))
+                retrieved = trim_chunks_to_char_budget(merged, agentic_full_doc_max_chars)
+                step_trace["full_doc_chunks"] = len(full_chunks)
+
+            after_sig = retrieval_signature(retrieved)
+            step_trace["after_chunks"] = len(retrieved)
+            step_trace["after_chars"] = sum_retrieved_chars(retrieved)
+            if after_sig == before_sig:
+                step_trace["status"] = "no_change"
+                break
 
     context = build_context(retrieved)
 
@@ -1326,6 +1689,8 @@ def main() -> int:
         "expanded_queries": expanded_queries,
         "rerank_used": bool(args.rerank),
         "rerank_model": args.rerank_model if args.rerank else "",
+        "agentic_mode": agentic_mode,
+        "agentic_trace": strategy_trace,
         "answer": answer,
         "citations": citations,
         "retrieved": retrieved,

@@ -1315,6 +1315,15 @@ export default class ZoteroRagPlugin extends Plugin {
         String(Math.max(1, Math.trunc(this.settings.maxChunksPerDoc)))
       );
     }
+    if (this.settings.enableAgenticRag) {
+      args.push("--agentic", "basic");
+      if (Number.isFinite(this.settings.agenticMaxIters) && this.settings.agenticMaxIters > 0) {
+        args.push(
+          "--agentic-max-iters",
+          String(Math.max(1, Math.trunc(this.settings.agenticMaxIters)))
+        );
+      }
+    }
 
     const historyPayload = this.buildChatHistoryPayload(historyMessages);
     const historyFile = await this.writeChatHistoryTemp(historyPayload);

@@ -17,6 +17,7 @@ Zotero is your source of truth for references, and Obsidian is where you think. 
 - Incremental reindexing: edits update only the affected chunks.
 - Citations link back to the exact chunk in the note (or Zotero if you prefer).
 - Chat sessions saved and exportable to notes.
+- Optional agentic retrieval planner (expansion retry or full-document pull when needed).
 
 ![Chat in the right sidebar](assets/image.png)
 
@@ -292,6 +293,7 @@ Key settings:
 - Chat LLM
    - Chat provider profile or manual base URL/API key
    - Chat model (select via Refresh), temperature, history size, panel location
+   - Optional retrieval tuning: agentic retrieval, query expansion, cross-encoder reranking
 - Docling / OCR cleanup
    - OCR mode and quality threshold; chunking mode
    - OCR engine selection (Tesseract/local Paddle/PaddleOCR API) and Paddle OCR API key (get a free key at https://aistudio.baidu.com/paddleocr)
