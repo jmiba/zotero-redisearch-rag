@@ -1,8 +1,12 @@
 {
   "manifest_version": 2,
   "name": "Zotero Redis RAG Companion",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local HTTP endpoint for Zotero annotation images",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
   "applications": {
     "zotero": {
       "id": "zrr-companion@zotero-redisearch-rag",

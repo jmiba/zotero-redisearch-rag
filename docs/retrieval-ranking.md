@@ -13,9 +13,22 @@ Results from both are combined using **RRF (Reciprocal Rank Fusion)**, which bal
 ## Retrieval fallback (auto‑broadening)
 If the first search looks weak (too few chunks, too little text, or weak scores), the plugin automatically broadens the search and tries again with more candidates.
 
-## Optional agentic planner
-You can enable **agentic retrieval** to run a lightweight planner step before answer generation. The planner can keep the current context, retry with expanded retrieval, or pull a full document when whole-document synthesis is needed.
-Use **Agentic max iterations** to cap planner loops per query.
+## Optional agentic RAG planner
+You can enable **agentic retrieval** to run a lightweight planner step before answer generation.
+
+Agentic mode chooses among three actions:
+
+- **Keep context**: proceed with the current retrieved set.
+- **Expansion retry**: run another retrieval pass with broader candidate generation.
+- **Full-document pull**: fetch additional chunks from a selected document for whole-document synthesis questions.
+
+Control loop depth with **Agentic max iterations** (caps planner steps per query).
+
+Notes:
+
+- Agentic mode runs on top of the same retrieval stack (vector + lexical + RRF).
+- If query expansion and reranking are enabled, the planner can use them in retry passes.
+- Agentic mode usually improves hard-query recall, but may increase latency and token usage.
 
 ## Optional query expansion
 You can enable **query expansion** to generate a few alternative queries for short or ambiguous questions. This can improve recall when the exact wording isn’t present in the PDFs.
