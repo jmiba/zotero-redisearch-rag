@@ -1,12 +1,12 @@
 # Python Setup
 
-This guide explains how Python is provided for Docling tools in Zotero Redis RAG.
+This guide explains how Python is provided for Docling tools in Zotero Research Assistant.
 
 ## Recommended mode: Python worker container
 
 The plugin now supports a dedicated `python-worker` service (separate from Redis).
 
-1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
+1. Open **Settings → Community plugins → Zotero Research Assistant → Prerequisites**.
 2. Keep **Advanced Python runtime options** disabled (default).
 3. Ensure **Docker/Podman path** is correct.
 4. Click **Start Redis stack now**.

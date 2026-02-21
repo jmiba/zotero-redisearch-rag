@@ -7,6 +7,13 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.1",
+    markdown: `- Rebrand the plugin display name to **Zotero Research Assistant** across Obsidian UI labels and user-facing docs.
+- Rename chat UI labels and command text to match the new product name.
+- Rebrand the Zotero add-on package to **Zotero Research Assistant Companion** in the add-on manifest and preferences pane.
+- Publish companion add-on update \`0.1.4\` and refresh \`zotero-companion/updates.json\` hash for update distribution.`,
+  },
+  {
     version: "0.9.0",
     markdown: `- Make Python worker runtime the graceful default path for legacy installs, with one-time migration and preserved local settings.
 - Fix runtime-specific stack startup so **Start Redis stack** brings up only services required by the selected runtime.

@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.1 (Patch Release)
+
+- Rebrand the plugin display name to **Zotero Research Assistant** across Obsidian UI labels and user-facing docs.
+- Rename chat UI labels and command text to match the new product name.
+- Rebrand the Zotero add-on package to **Zotero Research Assistant Companion** in the add-on manifest and preferences pane.
+- Publish companion add-on update `0.1.4` and refresh `zotero-companion/updates.json` hash for update distribution.
+
 ## 0.9.0 (Minor Release)
 
 - Make Python worker runtime the graceful default path for legacy installs:

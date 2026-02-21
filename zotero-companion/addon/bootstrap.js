@@ -181,7 +181,7 @@ function registerPreferencePane(rootURI) {
         src: rootURI + "content/preferences.xhtml",
         scripts: [rootURI + "content/preferences.js"],
         stylesheets: [rootURI + "content/preferences.css"],
-        label: "Zotero Redis RAG Companion",
+        label: "Zotero Research Assistant Companion",
       });
       log("Preference pane registered");
     } else {

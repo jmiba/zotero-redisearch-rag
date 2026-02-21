@@ -1,6 +1,6 @@
 # Templating Reference
 
-This page is the complete reference for note templating in Zotero Redis RAG.
+This page is the complete reference for note templating in Zotero Research Assistant.
 
 ## Where templating is configured
 

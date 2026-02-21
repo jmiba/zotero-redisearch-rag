@@ -9,7 +9,7 @@ This page lists the main commands and what they do.
   - Ask a question and get an answer with citations.
 
 ## Chat panel
-- **Open Zotero RAG chat panel**
+- **Open Zotero Research Assistant chat panel**
   - Opens the chat view and session controls.
 
 ## Rebuild and reindex

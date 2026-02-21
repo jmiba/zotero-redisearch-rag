@@ -53,7 +53,7 @@ Then enable it in **Settings → Appearance → CSS snippets**.
 ## 3) Optional: use a callout customization plugin
 
 If you prefer UI-driven editing instead of CSS, use an Obsidian community plugin that manages callout styles/icons.  
-The Zotero Redis RAG plugin only emits standard callout syntax, so it works with any callout-styling approach.
+The Zotero Research Assistant plugin only emits standard callout syntax, so it works with any callout-styling approach.
 
 ## Tips
 

@@ -72,7 +72,7 @@ export class ZoteroChatView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Zotero RAG Chat";
+    return "Zotero Research Assistant Chat";
   }
 
   getIcon(): string {
@@ -85,7 +85,7 @@ export class ZoteroChatView extends ItemView {
     containerEl.addClass("zrr-chat-view");
 
     const header = containerEl.createEl("div", { cls: "zrr-chat-header" });
-    header.createEl("div", { cls: "zrr-chat-title", text: "Zotero RAG Chat" });
+    header.createEl("div", { cls: "zrr-chat-title", text: "Zotero Research Assistant Chat" });
     const controls = header.createEl("div", { cls: "zrr-chat-controls" });
     const selectRow = controls.createEl("div", { cls: "zrr-chat-controls-row" });
     this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" }) as HTMLSelectElement;

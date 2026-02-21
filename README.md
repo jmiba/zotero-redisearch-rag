@@ -1,10 +1,10 @@
-# Zotero Redisearch RAG for Obsidian
+# Zotero Research Assistant for Obsidian
 
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18341648-blue)](https://doi.org/10.5281/zenodo.18341648)
 
 Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis Stack, and returns answers with citations that jump straight to the relevant chunk in your note.
 
-**Documentation:** [Zotero Redis RAG docs](https://jmiba.github.io/zotero-redisearch-rag/)
+**Documentation:** [Zotero Research Assistant docs](https://jmiba.github.io/zotero-redisearch-rag/)
 
 ## Why this plugin exists
 
@@ -276,7 +276,7 @@ Optional (for faster native rebuilds):
 - If you see a Paddle warning about missing `ccache`, install it (macOS: `brew install ccache`).
 
 ### 6) Configure the plugin
-Obsidian -> Settings -> Community plugins -> Zotero Redis RAG
+Obsidian -> Settings -> Community plugins -> Zotero Research Assistant
 
 Key settings:
 - Prerequisites
@@ -316,7 +316,7 @@ Key settings:
 
 1) Command palette -> "Import Zotero item and index (Docling -> RedisSearch)"
 2) Command palette -> "Ask my Zotero library (RAG via RedisSearch)"
-3) Command palette -> "Open Zotero RAG chat panel"
+3) Command palette -> "Open Zotero Research Assistant chat panel"
 
 Answers are generated from retrieved text only and include citations.
 

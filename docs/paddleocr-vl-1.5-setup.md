@@ -1,6 +1,6 @@
 # PaddleOCR-VL 1.5 Setup
 
-This guide shows how to configure PaddleOCR-VL 1.5 API mode in Zotero Redis RAG.
+This guide shows how to configure PaddleOCR-VL 1.5 API mode in Zotero Research Assistant.
 Be aware that if you configure the plugin to use OCR via API, PDF document data will be sent to Baidu's servers for processing and is not processed locally.
 
 ## 1) Create/get your API token

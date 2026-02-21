@@ -1,4 +1,4 @@
-# Zotero Redis RAG Companion
+# Zotero Research Assistant Companion
 
 This companion plugin exposes a local HTTP endpoint for cached Zotero annotation images.
 It is intended to be used by the Obsidian plugin in this repo.
@@ -25,7 +25,7 @@ If a token is set, requests must include `Authorization: Bearer <token>` or `X-Z
 
 ## Settings UI
 
-Open Zotero's settings dialog and scroll to the "Zotero Redis RAG Companion" section.
+Open Zotero's settings dialog and scroll to the "Zotero Research Assistant Companion" section.
 
 ## Updates
 

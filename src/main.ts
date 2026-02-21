@@ -337,7 +337,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     this.addCommand({
       id: "open-zotero-chat",
-      name: "Open Zotero RAG chat panel",
+      name: "Open Zotero Research Assistant chat panel",
       callback: () => this.openChatView(true),
     });
 
@@ -3625,7 +3625,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     const chatButton = this.addRibbonIcon(
       "zrr-chat",
-      "Open Zotero RAG chat",
+      "Open Zotero Research Assistant chat",
       () => this.openChatView(true)
     );
     chatButton.addClass("zrr-ribbon-chat");
