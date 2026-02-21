@@ -1,4 +1,4 @@
-site_name: Zotero Redis RAG
+site_name: Zotero Research Assistant
 site_description: Ask questions across your Zotero library inside Obsidian.
 repo_url: https://github.com/jmiba/zotero-redisearch-rag
 repo_name: jmiba/zotero-redisearch-rag
