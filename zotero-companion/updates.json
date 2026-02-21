@@ -5,7 +5,7 @@
         {
           "version": "0.1.3",
           "update_link": "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi",
-          "update_hash": "sha256:2c36bcd5369ae631e4931f7fe8d94ef638ef591ccbff6e7a5cff89cdd51d03cc",
+          "update_hash": "sha256:68bde0b22b70bc69c2adc3f7baa4dc0324d9941e6f3f9a374d5d4fe78e7e56a8",
           "applications": {
             "zotero": {
               "strict_min_version": "7.0",
