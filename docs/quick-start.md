@@ -59,7 +59,7 @@ Cloud options:
 Default (recommended):
 
 1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
-2. Set **Python runtime** to **Python worker container (recommended)**.
+2. Keep **Advanced Python runtime options** disabled (default).
 3. Click **Start Redis stack now**.
 4. Wait for startup to finish (first run may take longer while worker dependencies install).
 
@@ -71,12 +71,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+If you need local mode, use **Settings → Maintenance → Python Runtime → Use local runtime (legacy)** first.
+
 For full details, see [Python Setup](python-setup.md).
 
 ## 6) Configure the plugin
 Open **Settings → Community plugins → Zotero Redis RAG** and set:
 
-- **Prerequisites**: Python runtime, Docker/Podman path, Redis URL
+- **Prerequisites**: Docker/Podman path, Redis URL, and (optional) advanced local runtime controls
 - **LLM provider profiles** (optional but recommended)
 - **Embeddings** and **Chat** models
 - **Output folders** (PDFs, notes, chats)

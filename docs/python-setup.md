@@ -7,10 +7,14 @@ This guide explains how Python is provided for Docling tools in Zotero Redis RAG
 The plugin now supports a dedicated `python-worker` service (separate from Redis).
 
 1. Open **Settings → Community plugins → Zotero Redis RAG → Prerequisites**.
-2. Set **Python runtime** to **Python worker container (recommended)**.
+2. Keep **Advanced Python runtime options** disabled (default).
 3. Ensure **Docker/Podman path** is correct.
 4. Click **Start Redis stack now**.
 5. Wait until startup finishes (first run can take longer while Python deps are installed in the worker venv).
+
+Migration note:
+- Legacy installs that previously used implicit local runtime defaults are migrated to worker mode automatically.
+- Existing local settings are preserved and can be restored with **Use local runtime (legacy)**.
 
 In this mode:
 
@@ -31,10 +35,14 @@ Prerequisites:
 
 In settings:
 
-1. Set **Python runtime** to **Local interpreter/venv**.
-2. (Optional) Set **Python path** if auto-detection is wrong.
-3. Choose **Python env location** (`Shared user cache` recommended).
-4. Click **Python environment → Create/Update**.
+1. Enable **Settings → Prerequisites → Advanced Python runtime options**.
+2. Set **Python runtime** to **Local interpreter/venv**.
+3. (Optional) Set **Python path** if auto-detection is wrong.
+4. Choose **Python env location** (`Shared user cache` recommended).
+5. Click **Python environment → Create/Update**.
+
+Alternative shortcut:
+- **Settings → Maintenance → Python Runtime → Use local runtime (legacy)**.
 
 Terminal fallback:
 

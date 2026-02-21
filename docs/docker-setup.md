@@ -36,7 +36,7 @@ If file sharing is missing, Redis startup usually fails with mount errors (for e
 In **Settings → Prerequisites**:
 
 - **Docker/Podman path**: set the CLI binary (`docker`/`podman` or full path).
-- **Python runtime**: set to **Python worker container (recommended)**.
+- **Advanced Python runtime options**: keep disabled (default) for worker runtime.
 - **Redis URL**: keep default unless you run your own Redis.
 - **Auto-assign Redis port**: recommended to avoid port conflicts across vaults.
 - **Auto-start Redis stack**: enable if you want automatic startup when needed.

@@ -3,14 +3,15 @@
 This page summarizes the main settings tabs and what they control.
 
 ## Prerequisites
-- **Python runtime**: Choose `Python worker container` (recommended) or `Local interpreter/venv`.
-- **Python path**: Local mode only. Interpreter used for Docling tools.
-- **Python env location**: Local mode only. Store the venv in a shared cache or inside the plugin folder.
+- **Advanced Python runtime options**: OFF by default. Enables legacy local runtime controls.
+- **Python runtime**: Defaults to `Python worker container` (recommended). Editable when advanced options are enabled.
+- **Python path**: Local mode only (shown in advanced mode). Interpreter used for Docling tools.
+- **Python env location**: Local mode only (shown in advanced mode). Store the venv in a shared cache or inside the plugin folder.
 - **Docker/Podman path**: CLI path used to start Redis Stack and Python worker.
 - **Redis URL**: Connection string for Redis Stack.
 - **Auto‑assign Redis port**: Pick a free local port when starting Redis.
 - **Auto‑start Redis stack**: Start Redis automatically when needed.
-- **Start Redis stack now**: Manual start/restart button (also starts Python worker in worker mode).
+- **Start Redis stack now**: Manual start/restart button (starts only services required by the selected runtime).
 
 Step-by-step setup guides:
 - [Python Setup](python-setup.md)
@@ -51,6 +52,7 @@ If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-
 - **Retrieval tuning**: Agentic planner mode, query expansion, reranking, RRF, max‑per‑doc caps.
 
 ## Maintenance
+- **Use local runtime (legacy)**: One-click switch to local interpreter/venv mode and enables advanced runtime settings.
 - **Reindex Redis from cache**: Rebuild index without re‑OCR.
 - **Recreate missing notes**: Restore notes from cached data.
 - **Rebuild doc index**: Refresh the index metadata cache.

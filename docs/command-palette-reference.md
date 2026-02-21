@@ -50,6 +50,10 @@ This page lists the main commands and what they do.
 - **Clear log file**
   - Reset the log file.
 
+## Runtime switch
+- **Switch Python runtime to local (legacy)**
+  - Switch to local interpreter/venv mode and reveal advanced local runtime settings.
+
 ## Chunk actions
 - **Toggle ZRR chunk exclude at cursor**
   - Exclude or include the current chunk from indexing.

@@ -38,7 +38,7 @@ If OCR output is noisy or incomplete:
 For scanned PDFs:
 
 - Worker runtime: Tesseract + Poppler are already in the worker image.
-- Local runtime: installing Tesseract + Poppler on the host improves OCR accuracy.
+- Local runtime (legacy/advanced mode): installing Tesseract + Poppler on the host improves OCR accuracy.
 
 ## Redis Stack start failures
 

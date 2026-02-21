@@ -19,13 +19,13 @@ If the local PDF path is unavailable, the plugin temporarily copies the PDF into
 When OCR is used (cf. [OCR section](settings-reference.md#ocr)), you can optionally create an OCR‑layered PDF. This writes a new, searchable PDF with a text layer.
 
 - Worker runtime (recommended/default): Tesseract + Poppler are included in the `python-worker` image.
-- Local runtime: install Tesseract + Poppler on your host system.
+- Local runtime (legacy/advanced mode): install Tesseract + Poppler on your host system.
 
 - Works only when **Copy PDFs to vault** is enabled.
 - The OCR‑layered PDF replaces the vault copy so citations can open the searchable file.
 
 ### Install Tesseract + Poppler
-Only needed for **local runtime**.
+Only needed for **local runtime (legacy/advanced mode)**.
 
 - macOS (Homebrew):
 

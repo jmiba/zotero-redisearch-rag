@@ -60,6 +60,7 @@ export class ZoteroChatView extends ItemView {
   private pendingRender = new Map<string, number>();
   private pendingThinking = new Set<string>();
   private busy = false;
+  private cancelPending = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: ZoteroRagPlugin) {
     super(leaf);
@@ -132,12 +133,20 @@ export class ZoteroChatView extends ItemView {
       cls: "zrr-chat-textarea",
       attr: { placeholder: "Ask your Zotero library..." },
     }) as HTMLTextAreaElement;
-    this.sendButton = inputWrap.createEl("button", { cls: "zrr-chat-send", text: "Send" });
-    this.sendButton.addEventListener("click", () => this.handleSend());
+    this.sendButton = inputWrap.createEl("button", {
+      cls: "zrr-chat-send",
+      attr: { "aria-label": "Send message", title: "Send message" },
+    });
+    this.updateSendButtonState();
+    this.sendButton.addEventListener("click", () => {
+      void this.handleSendButtonClick();
+    });
     this.inputEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        this.handleSend();
+        if (!this.busy) {
+          void this.handleSend();
+        }
       }
     });
 
@@ -452,6 +461,52 @@ export class ZoteroChatView extends ItemView {
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
+  private updateSendButtonState(): void {
+    if (!this.sendButton) {
+      return;
+    }
+    if (this.busy) {
+      this.sendButton.disabled = this.cancelPending;
+      setIcon(this.sendButton, this.cancelPending ? "loader-2" : "square");
+      this.sendButton.setAttr("aria-label", this.cancelPending ? "Canceling..." : "Cancel response");
+      this.sendButton.setAttr("title", this.cancelPending ? "Canceling..." : "Cancel response");
+      return;
+    }
+    this.sendButton.disabled = false;
+    setIcon(this.sendButton, "send");
+    this.sendButton.setAttr("aria-label", "Send message");
+    this.sendButton.setAttr("title", "Send message");
+  }
+
+  private isCancellationError(error: unknown): boolean {
+    const text = error instanceof Error ? error.message : String(error ?? "");
+    const lowered = text.toLowerCase();
+    return (
+      lowered.includes("request canceled") ||
+      lowered.includes("request cancelled") ||
+      lowered.includes("request aborted") ||
+      lowered.includes("python worker request aborted") ||
+      lowered.includes("client_disconnected")
+    );
+  }
+
+  private async handleSendButtonClick(): Promise<void> {
+    if (this.busy) {
+      if (this.cancelPending) {
+        return;
+      }
+      this.cancelPending = true;
+      this.updateSendButtonState();
+      const canceled = this.plugin.cancelActiveRagQuery();
+      if (!canceled) {
+        this.cancelPending = false;
+        this.updateSendButtonState();
+      }
+      return;
+    }
+    await this.handleSend();
+  }
+
   private async handleSend(): Promise<void> {
     if (this.busy) {
       return;
@@ -468,7 +523,8 @@ export class ZoteroChatView extends ItemView {
 
     this.inputEl.value = "";
     this.busy = true;
-    this.sendButton.disabled = true;
+    this.cancelPending = false;
+    this.updateSendButtonState();
 
     const userMessage: ChatMessage = {
       id: this.generateId(),
@@ -494,6 +550,7 @@ export class ZoteroChatView extends ItemView {
     this.scrollToBottom();
 
     let sawDelta = false;
+    let wasCanceled = false;
     const historyMessages = this.plugin.getRecentChatHistory(this.messages.slice(0, -2));
     try {
       await this.plugin.runRagQueryStreaming(
@@ -506,6 +563,17 @@ export class ZoteroChatView extends ItemView {
         },
         (finalPayload) => {
           this.pendingThinking.delete(assistantMessage.id);
+          if (finalPayload?.canceled) {
+            wasCanceled = true;
+            if (!sawDelta && !assistantMessage.content.trim()) {
+              assistantMessage.content =
+                typeof finalPayload?.answer === "string" && finalPayload.answer.trim()
+                  ? finalPayload.answer
+                  : "Request canceled.";
+            }
+            this.scheduleRender(assistantMessage);
+            return;
+          }
           if (!sawDelta && finalPayload?.answer) {
             assistantMessage.content = finalPayload.answer;
           } else if (finalPayload?.answer) {
@@ -524,12 +592,19 @@ export class ZoteroChatView extends ItemView {
     } catch (error) {
       console.error(error);
       this.pendingThinking.delete(assistantMessage.id);
-      assistantMessage.content = "Failed to fetch answer. See console for details.";
+      if (wasCanceled || this.isCancellationError(error)) {
+        if (!sawDelta && !assistantMessage.content.trim()) {
+          assistantMessage.content = "Request canceled.";
+        }
+      } else {
+        assistantMessage.content = "Failed to fetch answer. See console for details.";
+      }
       this.scheduleRender(assistantMessage);
     } finally {
       this.pendingThinking.delete(assistantMessage.id);
       this.busy = false;
-      this.sendButton.disabled = false;
+      this.cancelPending = false;
+      this.updateSendButtonState();
       await this.saveHistory();
     }
   }

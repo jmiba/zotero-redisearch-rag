@@ -111,9 +111,16 @@ const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
 const REDIS_STACK_SERVICE = "redis-stack";
 const PYTHON_WORKER_SERVICE = "python-worker";
-const PYTHON_WORKER_VENV_PYTHON = "/workspace/cache/venv/bin/python";
 const PYTHON_WORKER_PLUGIN_ROOT = "/workspace/plugin";
 const PYTHON_WORKER_VAULT_ROOT = "/workspace/vault";
+const PYTHON_WORKER_API_HOST = "127.0.0.1";
+const PYTHON_WORKER_DEFAULT_API_PORT = 7379;
+const PYTHON_WORKER_API_PORT_OFFSET = 1000;
+const RAG_AGENTIC_FULL_DOC_CHUNKS_BUDGET = 48;
+const RAG_AGENTIC_FULL_DOC_MAX_CHARS_BUDGET = 32000;
+const RAG_WORKER_BASE_TIMEOUT_SEC = 180;
+const RAG_WORKER_RERANK_TIMEOUT_SEC = 120;
+const RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC = 90;
 const MAX_CITATION_TITLE_LENGTH = 80;
 const ANNOTATION_SYNC_GRACE_MS = 120000;
 const ZRR_ANNOTATIONS_START_RE = /<!--\s*zrr:annotations-start\b[^>]*-->/i;
@@ -235,6 +242,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private lastContainerNotice: string | null = null;
   private lastZoteroApiNotice: string | null = null;
   private lastRedisNotice: string | null = null;
+  private pythonWorkerRequestSeq = 0;
   private noteSyncTimers = new Map<string, number>();
   private noteSyncInFlight = new Set<string>();
   private noteSyncPending = new Set<string>();
@@ -256,6 +264,8 @@ export default class ZoteroRagPlugin extends Plugin {
   private recreateMissingNotesAbort = false;
   private recreateMissingNotesProcess: ChildProcess | null = null;
   private reindexCacheActive = false;
+  private activeChatQueryProcess: ChildProcess | null = null;
+  private activeChatQueryCancelRequested = false;
   private lastReindexFailure:
     | "busy"
     | "tools_error"
@@ -267,6 +277,7 @@ export default class ZoteroRagPlugin extends Plugin {
     | null = null;
   private lastRedisSearchTerm = "";
   private hadSavedSettingsData = false;
+  private pendingPythonRuntimeMigrationNotice: string | null = null;
   private pdfSidebar!: PdfSidebarController;
 
   async onload(): Promise<void> {
@@ -373,6 +384,12 @@ export default class ZoteroRagPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "switch-python-runtime-local-legacy",
+      name: "Switch Python runtime to local (legacy)",
+      callback: () => this.switchPythonRuntimeToLocalLegacy(),
+    });
+
+    this.addCommand({
       id: "open-docling-log",
       name: "Open log file",
       callback: () => this.openLogFile(),
@@ -427,6 +444,10 @@ export default class ZoteroRagPlugin extends Plugin {
 
     void this.maybeShowReleaseNotesModal();
     void this.autoDetectContainerCliOnLoad();
+    if (this.pendingPythonRuntimeMigrationNotice) {
+      new Notice(this.pendingPythonRuntimeMigrationNotice, 9000);
+      this.pendingPythonRuntimeMigrationNotice = null;
+    }
 
     if (this.settings.autoStartRedis) {
       void this.startRedisStack(true);
@@ -437,8 +458,35 @@ export default class ZoteroRagPlugin extends Plugin {
     const data = (await this.loadData()) ?? {};
     this.hadSavedSettingsData = Object.keys(data).length > 0;
     const settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    if ((data as any).pythonRuntime === undefined) {
-      settings.pythonRuntime = "local";
+    const runtimeRaw = (data as any).pythonRuntime;
+    const runtimeMissing = runtimeRaw === undefined || runtimeRaw === null || runtimeRaw === "";
+    const runtimeInvalid = !runtimeMissing && runtimeRaw !== "worker" && runtimeRaw !== "local";
+    const runtimeMigrationDone = Boolean((data as any).pythonRuntimeMigrationV1Done);
+    let migratedToWorker = false;
+
+    if (runtimeMissing || runtimeInvalid) {
+      settings.pythonRuntime = "worker";
+      migratedToWorker = true;
+    } else if (!runtimeMigrationDone && runtimeRaw === "local") {
+      const pythonPathRaw = String((data as any).pythonPath ?? "").trim();
+      const envLocationRaw = String((data as any).pythonEnvLocation ?? "").trim();
+      const likelyLegacyLocalDefault = !pythonPathRaw && (!envLocationRaw || envLocationRaw === "shared");
+      if (likelyLegacyLocalDefault) {
+        settings.pythonRuntime = "worker";
+        migratedToWorker = true;
+      }
+    }
+    settings.pythonRuntimeMigrationV1Done = true;
+
+    if (migratedToWorker) {
+      this.pendingPythonRuntimeMigrationNotice =
+        "Python runtime was migrated to worker mode. Legacy local runtime settings were kept and can still be re-enabled in Settings.";
+    } else {
+      this.pendingPythonRuntimeMigrationNotice = null;
+    }
+    const advancedRuntimeFlagMissing = (data as any).showAdvancedPythonRuntimeOptions === undefined;
+    if (advancedRuntimeFlagMissing && settings.pythonRuntime === "local") {
+      settings.showAdvancedPythonRuntimeOptions = true;
     }
     if (
       settings.preferObsidianNoteForCitations === undefined &&
@@ -447,10 +495,27 @@ export default class ZoteroRagPlugin extends Plugin {
       settings.preferObsidianNoteForCitations = (data as any).preferVaultPdfForCitations;
     }
     this.settings = settings;
+    if (!runtimeMigrationDone || runtimeMissing || runtimeInvalid || advancedRuntimeFlagMissing) {
+      await this.saveData(this.settings);
+    }
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  public async switchPythonRuntimeToLocalLegacy(): Promise<void> {
+    const alreadyLocal = this.settings.pythonRuntime === "local";
+    this.settings.pythonRuntime = "local";
+    this.settings.showAdvancedPythonRuntimeOptions = true;
+    await this.saveSettings();
+    if (alreadyLocal) {
+      new Notice("Local Python runtime is already active.");
+      return;
+    }
+    new Notice(
+      "Switched to local Python runtime (legacy). Open Settings > Prerequisites and run Python environment > Create/Update."
+    );
   }
 
   private async maybeShowReleaseNotesModal(): Promise<void> {
@@ -1431,12 +1496,67 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.renameChatSession(sessionId, name);
   }
 
+  private getRagWorkerTimeoutSec(): number {
+    let timeoutSec = RAG_WORKER_BASE_TIMEOUT_SEC;
+    if (this.settings.enableCrossEncoderRerank) {
+      timeoutSec += RAG_WORKER_RERANK_TIMEOUT_SEC;
+    }
+    if (this.settings.enableAgenticRag) {
+      const iters = Number.isFinite(this.settings.agenticMaxIters)
+        ? Math.max(1, Math.trunc(this.settings.agenticMaxIters))
+        : 2;
+      timeoutSec += Math.max(RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC, iters * RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC);
+    }
+    return Math.min(3600, Math.max(60, timeoutSec));
+  }
+
+  private isRagQueryCancellationMessage(message: string): boolean {
+    const text = (message || "").toLowerCase();
+    return (
+      text.includes("python worker request aborted") ||
+      text.includes("request aborted") ||
+      text.includes("request canceled") ||
+      text.includes("request cancelled") ||
+      text.includes("canceled_while_waiting_rag_slot") ||
+      text.includes("cancelled_while_waiting_rag_slot") ||
+      text.includes("client_disconnected") ||
+      text.includes("error: canceled") ||
+      text.includes("error: cancelled")
+    );
+  }
+
+  public cancelActiveRagQuery(): boolean {
+    this.activeChatQueryCancelRequested = true;
+    const child = this.activeChatQueryProcess;
+    if (!child) {
+      return false;
+    }
+    if (child.killed) {
+      return true;
+    }
+    try {
+      child.kill("SIGTERM");
+      return true;
+    } catch (error) {
+      console.warn("Failed to cancel active RAG query with SIGTERM", error);
+      try {
+        child.kill();
+        return true;
+      } catch (fallbackError) {
+        console.warn("Failed to cancel active RAG query", fallbackError);
+        return false;
+      }
+    }
+  }
+
   async runRagQueryStreaming(
     query: string,
     onDelta: (delta: string) => void,
     onFinal: (payload: any) => void,
     historyMessages: ChatMessage[] = []
   ): Promise<void> {
+    this.activeChatQueryProcess = null;
+    this.activeChatQueryCancelRequested = false;
     await this.ensureBundledTools();
     if (!(await this.ensureRedisAvailable("chat query"))) {
       onFinal({ answer: "Redis is not reachable. Please start Redis Stack and try again." });
@@ -1509,6 +1629,12 @@ export default class ZoteroRagPlugin extends Plugin {
           String(Math.max(1, Math.trunc(this.settings.agenticMaxIters)))
         );
       }
+      args.push(
+        "--agentic-full-doc-chunks",
+        String(RAG_AGENTIC_FULL_DOC_CHUNKS_BUDGET),
+        "--agentic-full-doc-max-chars",
+        String(RAG_AGENTIC_FULL_DOC_MAX_CHARS_BUDGET)
+      );
     }
 
     const historyPayload = this.buildChatHistoryPayload(historyMessages);
@@ -1518,6 +1644,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
+      const ragTimeoutSec = this.getRagWorkerTimeoutSec();
       const runQuery = async (): Promise<void> => {
         await this.runPythonStreaming(
           ragScript,
@@ -1525,6 +1652,10 @@ export default class ZoteroRagPlugin extends Plugin {
           (payload) => {
             if (payload?.type === "delta" && typeof payload.content === "string") {
               onDelta(payload.content);
+              return;
+            }
+            if (payload?.type === "phase") {
+              this.logPythonWorkerTiming("rag-phase", payload);
               return;
             }
             if (payload?.type === "final") {
@@ -1535,16 +1666,37 @@ export default class ZoteroRagPlugin extends Plugin {
               onFinal(payload);
             }
           },
-          onFinal
+          onFinal,
+          undefined,
+          "rag_query_redisearch",
+          (child) => {
+            this.activeChatQueryProcess = child;
+            if (this.activeChatQueryCancelRequested && !child.killed) {
+              try {
+                child.kill("SIGTERM");
+              } catch (error) {
+                console.warn("Failed to cancel queued chat request", error);
+              }
+            }
+          },
+          ragTimeoutSec
         );
       };
       let attemptedRebuild = false;
       while (true) {
+        if (this.activeChatQueryCancelRequested) {
+          onFinal({ canceled: true, answer: "Request canceled." });
+          return;
+        }
         try {
           await runQuery();
           break;
         } catch (error) {
           const message = this.getPythonErrorMessage(error);
+          if (this.activeChatQueryCancelRequested || this.isRagQueryCancellationMessage(message)) {
+            onFinal({ canceled: true, answer: "Request canceled." });
+            return;
+          }
           const classification = this.classifyIndexingError(message);
           if (classification === "embed_dim_mismatch") {
             if (attemptedRebuild) {
@@ -1602,6 +1754,8 @@ export default class ZoteroRagPlugin extends Plugin {
           console.warn("Failed to remove chat history temp file", error);
         }
       }
+      this.activeChatQueryProcess = null;
+      this.activeChatQueryCancelRequested = false;
     }
   }
 
@@ -10054,6 +10208,78 @@ export default class ZoteroRagPlugin extends Plugin {
     return path.join(this.getVaultBasePath(), CACHE_ROOT, "python-worker-cache");
   }
 
+  private getPythonWorkerApiPort(redisPort?: number): number {
+    const effectiveRedisPort = Number.isFinite(redisPort ?? NaN)
+      ? Number(redisPort)
+      : this.getRedisPortFromUrl();
+    const candidate = effectiveRedisPort + PYTHON_WORKER_API_PORT_OFFSET;
+    if (candidate >= 1024 && candidate <= 65535) {
+      return candidate;
+    }
+    return PYTHON_WORKER_DEFAULT_API_PORT;
+  }
+
+  private getPythonWorkerApiBaseUrl(port?: number): string {
+    const effectivePort = Number.isFinite(port ?? NaN)
+      ? Number(port)
+      : this.getPythonWorkerApiPort();
+    return `http://${PYTHON_WORKER_API_HOST}:${effectivePort}`;
+  }
+
+  private getPythonWorkerApiPortFromContext(context: ComposeProjectContext): number {
+    const envValue = Number.parseInt(String(context.composeEnv.ZRR_WORKER_PORT || ""), 10);
+    if (Number.isFinite(envValue) && envValue > 0) {
+      return envValue;
+    }
+    return this.getPythonWorkerApiPort();
+  }
+
+  private nextPythonWorkerRequestId(toolName: string): string {
+    this.pythonWorkerRequestSeq += 1;
+    const safeTool = toolName.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    return `${Date.now().toString(36)}-${this.pythonWorkerRequestSeq.toString(36)}-${safeTool}`;
+  }
+
+  private logPythonWorkerTiming(event: string, details: Record<string, unknown>): void {
+    console.info("[zrr-python-worker]", event, details);
+  }
+
+  private async isPythonWorkerApiHealthy(
+    context: ComposeProjectContext,
+    timeoutMs = 1500
+  ): Promise<boolean> {
+    const url = `${this.getPythonWorkerApiBaseUrl(this.getPythonWorkerApiPortFromContext(context))}/health`;
+    try {
+      const response = await this.requestLocalApiRaw(url, {
+        headers: { Accept: "application/json" },
+        timeoutMs,
+      });
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return false;
+      }
+      const payload = JSON.parse(response.body.toString("utf8"));
+      return Boolean(payload?.ok);
+    } catch {
+      return false;
+    }
+  }
+
+  private getWorkerToolName(scriptPath: string): string | null {
+    const toolsDir = path.resolve(this.getPluginDir(), "tools");
+    const resolved = path.resolve(scriptPath);
+    if (path.dirname(resolved) !== toolsDir) {
+      return null;
+    }
+    const basename = path.basename(resolved);
+    if (!basename.endsWith(".py")) {
+      return null;
+    }
+    if (basename.includes(path.sep)) {
+      return null;
+    }
+    return basename;
+  }
+
   private getComposeServiceNamesForCurrentRuntime(): string[] {
     if (this.usePythonWorker()) {
       return [REDIS_STACK_SERVICE, PYTHON_WORKER_SERVICE];
@@ -10715,8 +10941,10 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const dataDir = options?.dataDir || this.getRedisDataDir();
     const redisPort = options?.redisPort ?? this.getRedisPortFromUrl();
+    const workerPort = this.getPythonWorkerApiPort(redisPort);
     composeEnv.ZRR_DATA_DIR = dataDir;
     composeEnv.ZRR_PORT = String(redisPort);
+    composeEnv.ZRR_WORKER_PORT = String(workerPort);
     composeEnv.ZRR_VAULT_DIR = this.getVaultBasePath();
     composeEnv.ZRR_PLUGIN_DIR = this.getPluginDir();
     composeEnv.ZRR_WORKER_CACHE_DIR = this.getPythonWorkerCacheDir();
@@ -10750,24 +10978,6 @@ export default class ZoteroRagPlugin extends Plugin {
       composeEnv,
       project: this.getDockerProjectName(),
     };
-  }
-
-  private buildComposeExecArgs(
-    context: ComposeProjectContext,
-    service: string,
-    commandArgs: string[]
-  ): string[] {
-    return [
-      ...context.composeCommand.argsPrefix,
-      "-p",
-      context.project,
-      "-f",
-      context.composePath,
-      "exec",
-      "-T",
-      service,
-      ...commandArgs,
-    ];
   }
 
   private async autoDetectContainerCliOnLoad(): Promise<void> {
@@ -11199,6 +11409,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (this.usePythonWorker()) {
         upArgs.push("--build");
       }
+      upArgs.push(...requiredServices);
       await this.runCommand(composeCommand.command, upArgs, {
         cwd: path.dirname(composePath),
         env: composeEnv,
@@ -11220,20 +11431,11 @@ export default class ZoteroRagPlugin extends Plugin {
   ): Promise<void> {
     const startedAt = Date.now();
     const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    const checkArgs = this.buildComposeExecArgs(context, PYTHON_WORKER_SERVICE, [
-      PYTHON_WORKER_VENV_PYTHON,
-      "--version",
-    ]);
     while (Date.now() - startedAt < timeoutMs) {
-      try {
-        await this.runCommand(context.composeCommand.command, checkArgs, {
-          cwd: path.dirname(context.composePath),
-          env: context.composeEnv,
-        });
+      if (await this.isPythonWorkerApiHealthy(context)) {
         return;
-      } catch {
-        await delay(2000);
       }
+      await delay(2000);
     }
     throw new Error(
       "Python worker is still starting. Check compose logs for the python-worker service."
@@ -11630,54 +11832,36 @@ export default class ZoteroRagPlugin extends Plugin {
     return env;
   }
 
-  private async resolvePythonScriptInvocation(
+  private getLocalPythonInvocation(
     scriptPath: string,
-    args: string[],
-    startIfStopped: boolean
-  ): Promise<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> {
-    if (!this.usePythonWorker()) {
-      const pythonPath = this.resolvePythonPath();
-      return {
-        command: pythonPath,
-        args: [scriptPath, ...args],
-        cwd: path.dirname(scriptPath),
-        env: this.buildPythonEnv(),
-      };
-    }
-
-    const context = await this.ensurePythonWorkerContext(startIfStopped);
-    const mappedScript = this.mapPathForPythonWorker(scriptPath);
-    if (mappedScript === scriptPath) {
-      throw new Error(
-        `Python worker cannot access script '${scriptPath}'. Keep plugin files under your vault or plugin directory.`
-      );
-    }
-    const mappedArgs = this.mapPythonArgsForWorker(args);
-    const composeArgs = this.buildComposeExecArgs(context, PYTHON_WORKER_SERVICE, [
-      PYTHON_WORKER_VENV_PYTHON,
-      mappedScript,
-      ...mappedArgs,
-    ]);
+    args: string[]
+  ): { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv } {
+    const pythonPath = this.resolvePythonPath();
     return {
-      command: context.composeCommand.command,
-      args: composeArgs,
-      cwd: path.dirname(context.composePath),
-      env: context.composeEnv,
+      command: pythonPath,
+      args: [scriptPath, ...args],
+      cwd: path.dirname(scriptPath),
+      env: this.buildPythonEnv(),
     };
   }
 
   private async runPython(scriptPath: string, args: string[]): Promise<void> {
-    let invocation: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
-    try {
-      invocation = await this.resolvePythonScriptInvocation(
-        scriptPath,
+    if (this.usePythonWorker()) {
+      const workerToolName = this.getWorkerToolName(scriptPath);
+      if (!workerToolName) {
+        throw new Error(
+          `Python worker can only run bundled tools under '${path.join(this.getPluginDir(), "tools")}'.`
+        );
+      }
+      await this.runPythonToolWithOutputViaWorkerApi(
+        workerToolName,
         args,
         this.settings.autoStartRedis
       );
-    } catch (error) {
-      this.handlePythonProcessError(String(error));
-      throw error;
+      return;
     }
+
+    const invocation = this.getLocalPythonInvocation(scriptPath, args);
     return new Promise((resolve, reject) => {
       const child = spawn(invocation.command, invocation.args, {
         cwd: invocation.cwd,
@@ -11747,19 +11931,31 @@ export default class ZoteroRagPlugin extends Plugin {
     onFallbackFinal: (payload: any) => void,
     stderrLogPath?: string | null,
     stderrLogLabel = "docling_extract",
-    onSpawn?: (child: ChildProcess) => void
+    onSpawn?: (child: ChildProcess) => void,
+    timeoutSec?: number
   ): Promise<void> {
-    let invocation: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
-    try {
-      invocation = await this.resolvePythonScriptInvocation(
-        scriptPath,
+    if (this.usePythonWorker()) {
+      const workerToolName = this.getWorkerToolName(scriptPath);
+      if (!workerToolName) {
+        throw new Error(
+          `Python worker can only run bundled tools under '${path.join(this.getPluginDir(), "tools")}'.`
+        );
+      }
+      await this.runPythonStreamingViaWorkerApi(
+        workerToolName,
         args,
-        this.settings.autoStartRedis
+        onPayload,
+        onFallbackFinal,
+        stderrLogPath,
+        stderrLogLabel,
+        this.settings.autoStartRedis,
+        onSpawn,
+        timeoutSec
       );
-    } catch (error) {
-      this.handlePythonProcessError(String(error));
-      throw error;
+      return;
     }
+
+    const invocation = this.getLocalPythonInvocation(scriptPath, args);
     return new Promise((resolve, reject) => {
       const child = spawn(invocation.command, invocation.args, {
         cwd: invocation.cwd,
@@ -11874,6 +12070,262 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
+  private async requestPythonWorkerCancel(
+    parsedUrl: URL,
+    requestId: string,
+    timeoutMs = 2000
+  ): Promise<void> {
+    const cancelUrl = `${parsedUrl.protocol}//${parsedUrl.host}/cancel`;
+    try {
+      await this.requestLocalApiRaw(cancelUrl, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-ZRR-Request-Id": requestId,
+        },
+        body: JSON.stringify({ request_id: requestId }),
+        timeoutMs,
+      });
+      this.logPythonWorkerTiming("cancel-request", { requestId, cancelUrl });
+    } catch (error) {
+      this.logPythonWorkerTiming("cancel-request-error", {
+        requestId,
+        cancelUrl,
+        error: String(error),
+      });
+    }
+  }
+
+  private async runPythonStreamingViaWorkerApi(
+    toolName: string,
+    args: string[],
+    onPayload: (payload: any) => void,
+    onFallbackFinal: (payload: any) => void,
+    stderrLogPath?: string | null,
+    stderrLogLabel = "docling_extract",
+    startIfStopped = true,
+    onSpawn?: (child: ChildProcess) => void,
+    timeoutSec?: number
+  ): Promise<void> {
+    const requestId = this.nextPythonWorkerRequestId(toolName);
+    const startedAt = Date.now();
+    const context = await this.ensurePythonWorkerContext(startIfStopped);
+    const contextReadyAt = Date.now();
+    const mappedArgs = this.mapPythonArgsForWorker(args);
+    const url = `${this.getPythonWorkerApiBaseUrl(this.getPythonWorkerApiPortFromContext(context))}/run-stream`;
+    const parsed = new URL(url);
+    const effectiveTimeoutSec = Number.isFinite(timeoutSec ?? NaN)
+      ? Math.max(1, Math.trunc(Number(timeoutSec)))
+      : 600;
+    const body = JSON.stringify({
+      tool: toolName,
+      args: mappedArgs,
+      timeout_sec: effectiveTimeoutSec,
+    });
+    this.logPythonWorkerTiming("stream-start", {
+      requestId,
+      tool: toolName,
+      argsCount: mappedArgs.length,
+      ensureContextMs: contextReadyAt - startedAt,
+      port: this.getPythonWorkerApiPortFromContext(context),
+      timeoutSec: effectiveTimeoutSec,
+    });
+
+    return new Promise((resolve, reject) => {
+      let ndjsonBuffer = "";
+      let diagnostic = "";
+      let lastPayload: any = null;
+      let sawFinal = false;
+      let doneEvent: any = null;
+      let toolTimingLogged = false;
+      let responseOpenedAt: number | null = null;
+      let firstStdoutEventAt: number | null = null;
+      let stdoutEvents = 0;
+
+      let requestKilled = false;
+      const markRequestKilled = (): void => {
+        requestKilled = true;
+      };
+
+      const request = http.request(
+        {
+          method: "POST",
+          hostname: parsed.hostname,
+          port: parsed.port || undefined,
+          path: `${parsed.pathname}${parsed.search}`,
+          headers: {
+            Accept: "application/x-ndjson",
+            "Content-Type": "application/json",
+            "Content-Length": String(Buffer.byteLength(body)),
+            "X-ZRR-Request-Id": requestId,
+          },
+        },
+        (response) => {
+          responseOpenedAt = Date.now();
+          const handleToolLine = (line: string): void => {
+            if (!line.trim()) {
+              return;
+            }
+            try {
+              const payload = JSON.parse(line);
+              lastPayload = payload;
+              if (payload?.type === "final" || payload?.answer) {
+                sawFinal = true;
+                if (!toolTimingLogged && payload?.timing && typeof payload.timing === "object") {
+                  toolTimingLogged = true;
+                  this.logPythonWorkerTiming("stream-tool-timing", {
+                    requestId,
+                    tool: toolName,
+                    timing: payload.timing,
+                  });
+                }
+              }
+              onPayload(payload);
+            } catch {
+              diagnostic += `${line}\n`;
+            }
+          };
+
+          const handleEventLine = (line: string): void => {
+            if (!line.trim()) {
+              return;
+            }
+            try {
+              const event = JSON.parse(line);
+              if (event?.type === "stdout") {
+                stdoutEvents += 1;
+                if (firstStdoutEventAt === null) {
+                  firstStdoutEventAt = Date.now();
+                }
+                handleToolLine(String(event.line ?? ""));
+                return;
+              }
+              if (event?.type === "done") {
+                doneEvent = event;
+                return;
+              }
+              diagnostic += `${line}\n`;
+            } catch {
+              diagnostic += `${line}\n`;
+            }
+          };
+
+          if ((response.statusCode ?? 0) >= 400) {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+            response.on("end", () => {
+              markRequestKilled();
+              const details = Buffer.concat(chunks).toString("utf8");
+              this.logPythonWorkerTiming("stream-http-error", {
+                requestId,
+                tool: toolName,
+                statusCode: response.statusCode ?? 0,
+                durationMs: Date.now() - startedAt,
+              });
+              reject(
+                new Error(
+                  `Python worker API request failed (${response.statusCode}): ${details || "no response body"}`
+                )
+              );
+            });
+            return;
+          }
+
+          response.on("data", (chunk) => {
+            ndjsonBuffer += chunk.toString();
+            const lines = ndjsonBuffer.split(/\r?\n/);
+            ndjsonBuffer = lines.pop() ?? "";
+            for (const line of lines) {
+              handleEventLine(line);
+            }
+          });
+
+          response.on("end", () => {
+            markRequestKilled();
+            if (ndjsonBuffer.trim()) {
+              handleEventLine(ndjsonBuffer);
+            }
+
+            const stderr = String(doneEvent?.stderr ?? "");
+            const doneError = String(doneEvent?.error ?? "").trim();
+            const exitCode = Number.parseInt(String(doneEvent?.exit_code ?? 1), 10);
+            if (!sawFinal && lastPayload) {
+              onFallbackFinal(lastPayload);
+            }
+            if (stderrLogPath && stderr) {
+              void this.appendToLogFile(stderrLogPath, stderr, stderrLogLabel, "STDERR");
+            }
+            this.logPythonWorkerTiming("stream-done", {
+              requestId,
+              tool: toolName,
+              exitCode: Number.isFinite(exitCode) ? exitCode : 1,
+              totalMs: Date.now() - startedAt,
+              responseOpenMs: responseOpenedAt ? responseOpenedAt - startedAt : null,
+              firstStdoutMs: firstStdoutEventAt ? firstStdoutEventAt - startedAt : null,
+              stdoutEvents,
+              stderrBytes: stderr.length,
+              doneError,
+            });
+            if (Number.isFinite(exitCode) && exitCode === 0) {
+              resolve();
+              return;
+            }
+            if (/^(canceled|cancelled|client_disconnected)$/i.test(doneError)) {
+              reject(new Error(`Python worker request canceled: ${doneError}`));
+              return;
+            }
+            const diagnosticText = stderr.trim() ? stderr : doneError || diagnostic;
+            this.handlePythonProcessError(diagnosticText);
+            reject(
+              new Error(
+                stderr ||
+                  doneError ||
+                  `Process exited with code ${Number.isFinite(exitCode) ? exitCode : 1}`
+              )
+            );
+          });
+        }
+      );
+
+      const abortHandle = {
+        get killed(): boolean {
+          return requestKilled;
+        },
+        kill: (_signal?: NodeJS.Signals | number): boolean => {
+          if (requestKilled) {
+            return false;
+          }
+          markRequestKilled();
+          void this.requestPythonWorkerCancel(parsed, requestId);
+          request.destroy(new Error("Python worker request aborted"));
+          return true;
+        },
+      } as unknown as ChildProcess;
+
+      if (onSpawn) {
+        onSpawn(abortHandle);
+      }
+
+      request.setTimeout((effectiveTimeoutSec + 30) * 1000, () => {
+        request.destroy(new Error("Python worker streaming request timed out"));
+      });
+      request.on("error", (error) => {
+        markRequestKilled();
+        this.logPythonWorkerTiming("stream-request-error", {
+          requestId,
+          tool: toolName,
+          durationMs: Date.now() - startedAt,
+          error: String(error),
+        });
+        this.handlePythonProcessError(String(error));
+        reject(error);
+      });
+      request.write(body);
+      request.end();
+    });
+  }
+
   private handlePythonProcessError(raw: string): void {
     if (!raw) {
       return;
@@ -11890,6 +12342,12 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     if (/Cannot connect to the Docker daemon|docker desktop is not running|podman machine/i.test(raw)) {
       this.notifyContainerOnce("Container runtime is not available. Start Docker Desktop or Podman.");
+      return;
+    }
+    if (/Python worker API request failed|Python worker streaming request timed out|ECONNREFUSED 127\.0\.0\.1/i.test(raw)) {
+      this.notifyContainerOnce(
+        "Python worker API is not reachable. Start Redis stack now or check python-worker container logs."
+      );
       return;
     }
     const missingModule = raw.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/);
@@ -12100,23 +12558,112 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private async runPythonToolWithOutputViaWorkerApi(
+    toolName: string,
+    args: string[],
+    startIfStopped: boolean,
+    stderrLogPath?: string | null,
+    stderrLogLabel = "docling_extract",
+    timeoutSec?: number
+  ): Promise<string> {
+    if (!this.usePythonWorker()) {
+      throw new Error("Worker API is only available in worker runtime mode.");
+    }
+    const requestId = this.nextPythonWorkerRequestId(toolName);
+    const startedAt = Date.now();
+    const context = await this.ensurePythonWorkerContext(startIfStopped);
+    const contextReadyAt = Date.now();
+    const mappedArgs = this.mapPythonArgsForWorker(args);
+    const url = `${this.getPythonWorkerApiBaseUrl(this.getPythonWorkerApiPortFromContext(context))}/run`;
+    const effectiveTimeoutSec = Number.isFinite(timeoutSec ?? NaN)
+      ? Math.max(1, Math.trunc(Number(timeoutSec)))
+      : 600;
+    const body = JSON.stringify({
+      tool: toolName,
+      args: mappedArgs,
+      timeout_sec: effectiveTimeoutSec,
+    });
+    const response = await this.requestLocalApiRaw(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-ZRR-Request-Id": requestId,
+      },
+      body,
+      timeoutMs: (effectiveTimeoutSec + 30) * 1000,
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      const details = response.body.toString("utf8");
+      this.logPythonWorkerTiming("run-http-error", {
+        requestId,
+        tool: toolName,
+        statusCode: response.statusCode,
+        totalMs: Date.now() - startedAt,
+        ensureContextMs: contextReadyAt - startedAt,
+      });
+      throw new Error(
+        `Python worker API request failed (${response.statusCode}): ${details || "no response body"}`
+      );
+    }
+    const payload = JSON.parse(response.body.toString("utf8") || "{}");
+    const stdout = String(payload?.stdout ?? "");
+    const stderr = String(payload?.stderr ?? "");
+    if (payload?.timing && typeof payload.timing === "object") {
+      this.logPythonWorkerTiming("run-tool-timing", {
+        requestId,
+        tool: toolName,
+        timing: payload.timing,
+      });
+    }
+    if (stderrLogPath && stderr) {
+      await this.appendToLogFile(stderrLogPath, stderr, stderrLogLabel, "STDERR");
+    }
+    const exitCode = Number.parseInt(String(payload?.exit_code ?? 1), 10);
+    this.logPythonWorkerTiming("run-done", {
+      requestId,
+      tool: toolName,
+      exitCode: Number.isFinite(exitCode) ? exitCode : 1,
+      totalMs: Date.now() - startedAt,
+      ensureContextMs: contextReadyAt - startedAt,
+      requestMs: Date.now() - contextReadyAt,
+      stdoutBytes: stdout.length,
+      stderrBytes: stderr.length,
+      timeoutSec: effectiveTimeoutSec,
+    });
+    if (!Number.isFinite(exitCode) || exitCode !== 0) {
+      const diagnostic = stderr.trim() ? stderr : stdout;
+      this.handlePythonProcessError(diagnostic);
+      throw new Error(stderr || `Process exited with code ${Number.isFinite(exitCode) ? exitCode : 1}`);
+    }
+    return stdout.trim();
+  }
+
   private async runPythonWithOutput(
     scriptPath: string,
     args: string[],
     stderrLogPath?: string | null,
-    stderrLogLabel = "docling_extract"
+    stderrLogLabel = "docling_extract",
+    timeoutSec?: number
   ): Promise<string> {
-    let invocation: { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
-    try {
-      invocation = await this.resolvePythonScriptInvocation(
-        scriptPath,
+    if (this.usePythonWorker()) {
+      const workerToolName = this.getWorkerToolName(scriptPath);
+      if (!workerToolName) {
+        throw new Error(
+          `Python worker can only run bundled tools under '${path.join(this.getPluginDir(), "tools")}'.`
+        );
+      }
+      return this.runPythonToolWithOutputViaWorkerApi(
+        workerToolName,
         args,
-        this.settings.autoStartRedis
+        this.settings.autoStartRedis,
+        stderrLogPath,
+        stderrLogLabel,
+        timeoutSec
       );
-    } catch (error) {
-      this.handlePythonProcessError(String(error));
-      throw error;
     }
+
+    const invocation = this.getLocalPythonInvocation(scriptPath, args);
     return new Promise((resolve, reject) => {
       const child = spawn(invocation.command, invocation.args, {
         cwd: invocation.cwd,

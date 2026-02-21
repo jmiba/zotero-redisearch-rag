@@ -13,12 +13,13 @@ const tools = [
   { name: "redis_diagnostics.py", path: "tools/redis_diagnostics.py" },
   { name: "purge_redis_orphans.py", path: "tools/purge_redis_orphans.py" },
   { name: "batch_index_pyzotero.py", path: "tools/batch_index_pyzotero.py" },
-  { name: "utils_embedding.py", path: "tools/utils_embedding.py" }, // <-- Add this line
+  { name: "utils_embedding.py", path: "tools/utils_embedding.py" },
   { name: "ocr_wordlist.txt", path: "tools/ocr_wordlist.txt" },
   { name: "requirements.txt", path: "requirements.txt" },
   { name: "docker-compose.yml", path: "docker-compose.yml" },
   { name: "python-worker.Dockerfile", path: "tools/python-worker.Dockerfile" },
   { name: "python-worker-entrypoint.sh", path: "tools/python-worker-entrypoint.sh" },
+  { name: "python-worker-api.py", path: "tools/python-worker-api.py" },
   { name: "redis-stack.conf", path: "redis-stack.conf" },
 ];
 

@@ -37,4 +37,4 @@ ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 ENV DISABLE_MODEL_SOURCE_CHECK=True
 
 ENTRYPOINT ["/usr/local/bin/python-worker-entrypoint.sh"]
-CMD ["sleep", "infinity"]
+CMD ["/workspace/cache/venv/bin/python", "/workspace/plugin/tools/python-worker-api.py"]

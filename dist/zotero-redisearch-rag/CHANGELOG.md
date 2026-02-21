@@ -1,4 +1,34 @@
 # Changelog
+## 0.9.0 (Minor Release)
+
+- Make Python worker runtime the graceful default path for legacy installs:
+  - migrate missing/invalid runtime configs to `worker`,
+  - run a one-time migration for likely legacy implicit-local defaults,
+  - persist migration state with `pythonRuntimeMigrationV1Done`,
+  - keep existing local settings intact and show a migration notice.
+- Fix runtime-specific stack startup so `Start Redis stack` brings up only required services for the selected runtime.
+- Refactor RAG reranking execution for worker mode performance:
+  - run `rag_query_redisearch.py` in-process inside `python-worker` for streaming requests,
+  - keep cross-encoder reranker models warm across requests via in-worker cache (instead of per-request subprocess reload),
+  - add phase/timing events for reranker load/score and end-to-end stream timings.
+- Improve RAG streaming control path in worker mode:
+  - add worker API cancel endpoint and request-id based cancellation,
+  - wire chat cancel to worker request cancel for long-running retrieval/rerank operations.
+- Improve reranker model configuration UX:
+  - add multilingual cross-encoder presets (`BAAI/bge-reranker-v2-m3`, `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, `jinaai/jina-reranker-v2-base-multilingual`),
+  - support explicit `Custom` model selection in settings.
+- Add advanced gating for local runtime controls:
+  - new `Advanced Python runtime options` toggle in Prerequisites,
+  - hide/disable local-only fields by default,
+  - auto-switch to worker if advanced options are turned off while local runtime is active.
+- Add explicit legacy-local opt-in paths:
+  - new Maintenance action `Use local runtime (legacy)`,
+  - new command palette command `Switch Python runtime to local (legacy)`.
+- Update docs and README for worker-first runtime UX:
+  - document advanced/legacy local runtime flow,
+  - document migration behavior,
+  - update settings, quick start, Python setup, Docker setup, troubleshooting, and command reference pages.
+
 ## 0.8.4 (Bugfix Release)
 
 - Fix the **What's New** splash title and layout:

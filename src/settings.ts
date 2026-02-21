@@ -36,9 +36,27 @@ export const METADATA_SNAPSHOT_PATH = `${CACHE_ROOT}/metadata_snapshots.json`;
 export const ANNOTATION_SNAPSHOT_PATH = `${CACHE_ROOT}/annotation_snapshots.json`;
 const COMPANION_XPI_URL =
   "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi";
+const DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3";
+const CUSTOM_RERANK_MODEL_VALUE = "__custom__";
+const RERANK_MODEL_PRESETS: Array<{ value: string; label: string }> = [
+  {
+    value: "BAAI/bge-reranker-v2-m3",
+    label: "BAAI/bge-reranker-v2-m3 (Best quality, heaviest)",
+  },
+  {
+    value: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    label: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 (Fast multilingual)",
+  },
+  {
+    value: "jinaai/jina-reranker-v2-base-multilingual",
+    label: "jinaai/jina-reranker-v2-base-multilingual (Balanced multilingual)",
+  },
+];
 
 export interface ZoteroRagSettings {
   pythonRuntime: "worker" | "local";
+  pythonRuntimeMigrationV1Done: boolean;
+  showAdvancedPythonRuntimeOptions: boolean;
   zoteroBaseUrl: string;
   zoteroUserId: string;
   webApiBaseUrl: string;
@@ -131,6 +149,8 @@ type SettingsTabId = "prerequisites" | "zotero-import" | "annotations" | "ocr" |
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   // Prerequisites
   pythonRuntime: "worker",
+  pythonRuntimeMigrationV1Done: false,
+  showAdvancedPythonRuntimeOptions: false,
   pythonPath: "",
   pythonEnvLocation: "shared",
   dockerPath: "docker",
@@ -285,7 +305,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   enableQueryExpansion: false,
   queryExpansionCount: 3,
   enableCrossEncoderRerank: false,
-  rerankModel: "BAAI/bge-reranker-v2-m3",
+  rerankModel: DEFAULT_RERANK_MODEL,
   rerankCandidateMultiplier: 4,
   rrfK: 60,
   rrfLogTop: 0,
@@ -320,6 +340,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     checkZoteroCompanionHealth: () => Promise<void>;
     openZoteroAddons: () => Promise<void>;
     openReleaseNotesModal: () => Promise<void>;
+    switchPythonRuntimeToLocalLegacy: () => Promise<void>;
     manifest: { dir?: string };
   };
   private activeTab: SettingsTabId = "prerequisites";
@@ -345,6 +366,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       checkZoteroCompanionHealth: () => Promise<void>;
       openZoteroAddons: () => Promise<void>;
       openReleaseNotesModal: () => Promise<void>;
+      switchPythonRuntimeToLocalLegacy: () => Promise<void>;
       manifest: { dir?: string };
     }
   ) {
@@ -375,6 +397,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     const renderPrerequisites = (tabEl: HTMLElement) => {
       tabEl.createEl("h2", { text: "Prerequisites" });
 
+      let pythonRuntimeSetting: Setting | null = null;
+      let pythonRuntimeDropdown: DropdownComponent | null = null;
       let pythonPathSetting: Setting | null = null;
       let pythonEnvSetting: Setting | null = null;
       let pythonEnvLocationSetting: Setting | null = null;
@@ -395,17 +419,34 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         }
       };
 
-      const refreshPythonRuntimeState = (): void => {
-        const localMode = this.plugin.settings.pythonRuntime === "local";
-        pythonPathText?.setDisabled(!localMode);
-        pythonEnvLocationDropdown?.setDisabled(!localMode);
-        pythonEnvButtonComponent?.setDisabled(!localMode);
-        if (pythonEnvButton) {
-          pythonEnvButton.disabled = !localMode;
+      const setSettingVisibility = (setting: Setting | null, visible: boolean): void => {
+        if (!setting) {
+          return;
         }
-        applyDisabledSettingState(pythonPathSetting, !localMode);
-        applyDisabledSettingState(pythonEnvSetting, !localMode);
-        applyDisabledSettingState(pythonEnvLocationSetting, !localMode);
+        setting.settingEl.style.display = visible ? "" : "none";
+      };
+
+      const refreshPythonRuntimeState = (): void => {
+        const advancedMode = Boolean(this.plugin.settings.showAdvancedPythonRuntimeOptions);
+        const localMode = this.plugin.settings.pythonRuntime === "local";
+        const localControlsEnabled = advancedMode && localMode;
+
+        pythonRuntimeDropdown?.setDisabled(!advancedMode);
+        applyDisabledSettingState(pythonRuntimeSetting, !advancedMode);
+
+        setSettingVisibility(pythonPathSetting, advancedMode);
+        setSettingVisibility(pythonEnvSetting, advancedMode);
+        setSettingVisibility(pythonEnvLocationSetting, advancedMode);
+
+        pythonPathText?.setDisabled(!localControlsEnabled);
+        pythonEnvLocationDropdown?.setDisabled(!localControlsEnabled);
+        pythonEnvButtonComponent?.setDisabled(!localControlsEnabled);
+        if (pythonEnvButton) {
+          pythonEnvButton.disabled = !localControlsEnabled;
+        }
+        applyDisabledSettingState(pythonPathSetting, !localControlsEnabled);
+        applyDisabledSettingState(pythonEnvSetting, !localControlsEnabled);
+        applyDisabledSettingState(pythonEnvLocationSetting, !localControlsEnabled);
       };
 
       new Setting(tabEl)
@@ -426,11 +467,31 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
+        .setName("Advanced Python runtime options")
+        .setDesc(
+          "Show legacy local interpreter/venv controls. Recommended to keep this disabled."
+        )
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.showAdvancedPythonRuntimeOptions)
+            .onChange(async (value) => {
+              this.plugin.settings.showAdvancedPythonRuntimeOptions = value;
+              if (!value && this.plugin.settings.pythonRuntime === "local") {
+                this.plugin.settings.pythonRuntime = "worker";
+                new Notice("Switched Python runtime to worker mode.");
+              }
+              await this.plugin.saveSettings();
+              refreshPythonRuntimeState();
+            })
+        );
+
+      pythonRuntimeSetting = new Setting(tabEl)
         .setName("Python runtime")
         .setDesc(
-          "Recommended: Worker container (Docker/Podman Compose). Local interpreter mode is optional."
+          "Worker runtime is recommended. Enable advanced options to expose local interpreter/venv mode."
         )
         .addDropdown((dropdown: DropdownComponent) => {
+          pythonRuntimeDropdown = dropdown;
           dropdown.addOption("worker", "Python worker container (recommended)");
           dropdown.addOption("local", "Local interpreter/venv");
           dropdown
@@ -2029,18 +2090,64 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      const rerankPresetValues = new Set(RERANK_MODEL_PRESETS.map((entry) => entry.value));
+      const currentRerankModel = (this.plugin.settings.rerankModel || "").trim() || DEFAULT_RERANK_MODEL;
+      let rerankPresetSelection = rerankPresetValues.has(currentRerankModel)
+        ? currentRerankModel
+        : CUSTOM_RERANK_MODEL_VALUE;
+      let rerankModelInput: TextComponent | null = null;
+      const syncRerankModelInputState = () => {
+        if (!rerankModelInput) {
+          return;
+        }
+        const customSelected = rerankPresetSelection === CUSTOM_RERANK_MODEL_VALUE;
+        const disabled = !customSelected;
+        rerankModelInput.setDisabled(disabled);
+        rerankModelInput.inputEl.disabled = disabled;
+        rerankModelInput.inputEl.readOnly = disabled;
+        rerankModelInput.inputEl.classList.toggle("is-disabled", disabled);
+        rerankModelInput.inputEl.setAttribute("aria-disabled", String(disabled));
+      };
+
+      const rerankModelSetting = new Setting(tabEl)
         .setName("Cross-encoder model")
-        .setDesc("Local reranker model name or path.")
-        .addText((text) =>
+        .setDesc("Choose a multilingual preset, or select Custom to edit the model id.");
+
+      rerankModelSetting
+        .addDropdown((dropdown) => {
+          for (const option of RERANK_MODEL_PRESETS) {
+            dropdown.addOption(option.value, option.label);
+          }
+          dropdown.addOption(CUSTOM_RERANK_MODEL_VALUE, "Custom");
+          dropdown.setValue(rerankPresetSelection);
+          dropdown.onChange(async (value) => {
+            rerankPresetSelection = value;
+            if (value !== CUSTOM_RERANK_MODEL_VALUE) {
+              this.plugin.settings.rerankModel = value;
+            } else if (!(this.plugin.settings.rerankModel || "").trim()) {
+              this.plugin.settings.rerankModel = DEFAULT_RERANK_MODEL;
+            }
+            await this.plugin.saveSettings();
+            rerankModelInput?.setValue(this.plugin.settings.rerankModel || DEFAULT_RERANK_MODEL);
+            syncRerankModelInputState();
+          });
+        });
+
+      rerankModelSetting
+        .addText((text) => {
+          rerankModelInput = text;
           text
-            .setPlaceholder("BAAI/bge-reranker-v2-m3")
-            .setValue(this.plugin.settings.rerankModel)
+            .setPlaceholder(DEFAULT_RERANK_MODEL)
+            .setValue(currentRerankModel)
             .onChange(async (value) => {
-              this.plugin.settings.rerankModel = value.trim() || "BAAI/bge-reranker-v2-m3";
+              if (rerankPresetSelection !== CUSTOM_RERANK_MODEL_VALUE) {
+                return;
+              }
+              this.plugin.settings.rerankModel = value.trim() || DEFAULT_RERANK_MODEL;
               await this.plugin.saveSettings();
-            })
-        );
+            });
+          syncRerankModelInputState();
+        });
 
       new Setting(tabEl)
         .setName("Rerank candidate multiplier")
@@ -2104,6 +2211,19 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderMaintenance = (tabEl: HTMLElement) => {
+      tabEl.createEl("h2", { text: "Python Runtime" });
+
+      new Setting(tabEl)
+        .setName("Use local runtime (legacy)")
+        .setDesc(
+          "Switch to local interpreter/venv mode and enable advanced runtime settings."
+        )
+        .addButton((button) =>
+          button.setButtonText("Switch").onClick(async () => {
+            await this.plugin.switchPythonRuntimeToLocalLegacy();
+          })
+        );
+
       tabEl.createEl("h2", { text: "Logging" });
 
       new Setting(tabEl)

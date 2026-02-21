@@ -7,7 +7,9 @@ from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
 import re
 import struct
 import sys
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import redis
 import requests
@@ -15,6 +17,11 @@ import requests
 
 def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
+
+
+class AbortRequested(RuntimeError):
+    pass
+
 
 def is_temperature_unsupported(message: str) -> bool:
     lowered = message.lower()
@@ -35,7 +42,12 @@ def request_chat(
     temperature: float,
     system_prompt: str,
     user_prompt: str,
+    timing: Optional[Dict[str, Any]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> str:
+    started_at = time.perf_counter()
+    if should_abort is not None and should_abort():
+        raise AbortRequested("Request aborted before non-stream chat request.")
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -52,11 +64,15 @@ def request_chat(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120)
+    response_open_ms = int((time.perf_counter() - started_at) * 1000)
     response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
+            if should_abort is not None and should_abort():
+                raise AbortRequested("Request aborted before non-stream retry.")
             response = requests.post(url, json=base_payload, headers=headers, timeout=120)
+            response_open_ms = int((time.perf_counter() - started_at) * 1000)
             response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
@@ -71,6 +87,12 @@ def request_chat(
     content = message.get("content")
     if not content:
         raise RuntimeError("Chat response missing content")
+    if timing is not None:
+        timing["chat_mode"] = "non_stream"
+        timing["chat_response_open_ms"] = response_open_ms
+        timing["chat_first_token_ms"] = response_open_ms
+        timing["chat_total_ms"] = int((time.perf_counter() - started_at) * 1000)
+        timing["chat_fallback_to_non_stream"] = bool(timing.get("chat_fallback_to_non_stream", False))
     return content
 
 
@@ -82,7 +104,12 @@ def request_chat_stream(
     system_prompt: str,
     user_prompt: str,
     on_delta,
+    timing: Optional[Dict[str, Any]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> str:
+    started_at = time.perf_counter()
+    if should_abort is not None and should_abort():
+        raise AbortRequested("Request aborted before stream chat request.")
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -100,11 +127,15 @@ def request_chat_stream(
     payload["temperature"] = temperature
 
     response = requests.post(url, json=payload, headers=headers, timeout=120, stream=True)
+    response_open_ms = int((time.perf_counter() - started_at) * 1000)
     response.encoding = "utf-8"
     if response.status_code >= 400:
         error_text = response.text
         if is_temperature_unsupported(error_text):
+            if should_abort is not None and should_abort():
+                raise AbortRequested("Request aborted before stream retry.")
             response = requests.post(url, json=base_payload, headers=headers, timeout=120, stream=True)
+            response_open_ms = int((time.perf_counter() - started_at) * 1000)
             response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise RuntimeError(f"Chat request failed: {response.status_code} {response.text}")
@@ -112,7 +143,10 @@ def request_chat_stream(
             raise RuntimeError(f"Chat request failed: {response.status_code} {error_text}")
 
     content_parts: List[str] = []
+    first_token_ms: Optional[int] = None
     for raw_line in response.iter_lines(decode_unicode=True):
+        if should_abort is not None and should_abort():
+            raise AbortRequested("Request aborted while waiting for stream tokens.")
         if not raw_line:
             continue
         line = raw_line.strip()
@@ -132,9 +166,17 @@ def request_chat_stream(
         piece = delta.get("content")
         if not piece:
             continue
+        if first_token_ms is None:
+            first_token_ms = int((time.perf_counter() - started_at) * 1000)
         content_parts.append(piece)
         on_delta(piece)
 
+    if timing is not None:
+        timing["chat_mode"] = "stream"
+        timing["chat_response_open_ms"] = response_open_ms
+        timing["chat_first_token_ms"] = first_token_ms
+        timing["chat_total_ms"] = int((time.perf_counter() - started_at) * 1000)
+        timing["chat_fallback_to_non_stream"] = False
     return "".join(content_parts)
 
 
@@ -170,6 +212,7 @@ def expand_query(
     model: str,
     query: str,
     count: int,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> List[str]:
     if not base_url or not model or not query or count <= 0:
         return []
@@ -183,7 +226,15 @@ def expand_query(
         f"Return {count} expanded queries as a JSON array of strings."
     )
     try:
-        response = request_chat(base_url, api_key, model, 0.0, system_prompt, user_prompt)
+        response = request_chat(
+            base_url,
+            api_key,
+            model,
+            0.0,
+            system_prompt,
+            user_prompt,
+            should_abort=should_abort,
+        )
         expanded = parse_json_list(response)
     except Exception as exc:
         eprint(f"Query expansion failed: {exc}")
@@ -205,6 +256,27 @@ def expand_query(
 
 
 def load_reranker(model_name: str):
+    key = str(model_name or "").strip()
+    if not key:
+        return None
+    cached = _RERANKER_CACHE.get(key, _RERANKER_NOT_SET)
+    if cached is not _RERANKER_NOT_SET:
+        return cached
+    with _RERANKER_CACHE_LOCK:
+        cached_locked = _RERANKER_CACHE.get(key, _RERANKER_NOT_SET)
+        if cached_locked is not _RERANKER_NOT_SET:
+            return cached_locked
+        reranker = _load_reranker_uncached(key)
+        _RERANKER_CACHE[key] = reranker
+        return reranker
+
+
+_RERANKER_NOT_SET = object()
+_RERANKER_CACHE: Dict[str, Any] = {}
+_RERANKER_CACHE_LOCK = threading.Lock()
+
+
+def _load_reranker_uncached(model_name: str):
     try:
         from sentence_transformers import CrossEncoder  # type: ignore
     except Exception as exc:
@@ -1312,7 +1384,7 @@ def build_citations(retrieved: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return citations
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Query RedisSearch and answer with RAG.")
     parser.add_argument("--query", required=True)
     parser.add_argument("--k", type=int, default=10)
@@ -1341,7 +1413,39 @@ def main() -> int:
     parser.add_argument("--agentic-max-iters", type=int, default=2)
     parser.add_argument("--agentic-full-doc-chunks", type=int, default=_AGENTIC_FULL_DOC_MAX_CHUNKS_DEFAULT)
     parser.add_argument("--agentic-full-doc-max-chars", type=int, default=_AGENTIC_FULL_DOC_MAX_CHARS_DEFAULT)
-    args = parser.parse_args()
+    return parser
+
+
+def run_with_args(
+    args: argparse.Namespace,
+    emit_json: Optional[Callable[[Dict[str, Any]], None]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> int:
+    run_started_at = time.perf_counter()
+    phase_ms: Dict[str, int] = {}
+    phase_counts: Dict[str, int] = {}
+    chat_timing: Dict[str, Any] = {}
+
+    def record_phase(name: str, started_at: float) -> None:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        phase_ms[name] = phase_ms.get(name, 0) + elapsed_ms
+        phase_counts[name] = phase_counts.get(name, 0) + 1
+
+    def check_abort(stage: str) -> None:
+        if should_abort is not None and should_abort():
+            raise AbortRequested(f"Request aborted at stage '{stage}'.")
+
+    def emit_phase(name: str, status: str, **extra: Any) -> None:
+        payload: Dict[str, Any] = {
+            "type": "phase",
+            "name": name,
+            "status": status,
+            "t_ms": int((time.perf_counter() - run_started_at) * 1000),
+        }
+        if extra:
+            payload.update(extra)
+        if emit_json is not None:
+            emit_json(payload)
 
     client = redis.Redis.from_url(args.redis_url, decode_responses=False)
     use_combo = bool(args.expand_query or args.rerank)
@@ -1364,24 +1468,35 @@ def main() -> int:
 
     def embed_query(query_text: str) -> bytes:
         nonlocal client, index_dim_cache
-        embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, query_text)
-        embedding_dim = len(embedding)
-        if index_dim_cache is None:
-            index_dim_cache = get_index_vector_dim(client, args.index)
-        if index_dim_cache and index_dim_cache != embedding_dim:
-            raise RuntimeError(f"Embedding dim mismatch: index={index_dim_cache} model={embedding_dim}")
-        embedding = normalize_vector(embedding)
-        return vector_to_bytes(embedding)
+        phase_started_at = time.perf_counter()
+        try:
+            check_abort("embed_query")
+            embedding = request_embedding(args.embed_base_url, args.embed_api_key, args.embed_model, query_text)
+            embedding_dim = len(embedding)
+            if index_dim_cache is None:
+                index_dim_cache = get_index_vector_dim(client, args.index)
+            if index_dim_cache and index_dim_cache != embedding_dim:
+                raise RuntimeError(f"Embedding dim mismatch: index={index_dim_cache} model={embedding_dim}")
+            embedding = normalize_vector(embedding)
+            return vector_to_bytes(embedding)
+        finally:
+            record_phase("embed_query", phase_started_at)
 
     if use_combo:
         if args.expand_query:
+            check_abort("expand_query")
+            emit_phase("expand_query", "start", query=raw_query)
+            phase_started_at = time.perf_counter()
             expanded_queries = expand_query(
                 args.chat_base_url,
                 args.chat_api_key,
                 args.chat_model,
                 raw_query,
                 max(1, int(args.expand_count or 0)),
+                should_abort=should_abort,
             )
+            record_phase("expand_query", phase_started_at)
+            emit_phase("expand_query", "done", count=len(expanded_queries))
         if expanded_queries:
             query_for_display = expanded_queries[0]
         candidate_multiplier = max(1, int(args.rerank_candidates or 1))
@@ -1389,9 +1504,12 @@ def main() -> int:
         query_variants = [raw_query] + expanded_queries
         candidates_map: Dict[str, Dict[str, Any]] = {}
         try:
+            emit_phase("retrieve_candidates", "start", variants=len(query_variants), k=candidate_k)
             for variant in query_variants:
+                check_abort("retrieve_candidates")
                 vec = embed_query(variant)
                 keywords = extract_keywords(variant)
+                phase_started_at = time.perf_counter()
                 retrieved_variant, _ = retrieve_with_broadening(
                     client,
                     args.index,
@@ -1403,6 +1521,7 @@ def main() -> int:
                     max_per_doc=0,
                     annotation_k=0,
                 )
+                record_phase("retrieve_with_broadening", phase_started_at)
                 for item in retrieved_variant:
                     key = chunk_key(item)
                     if not key:
@@ -1415,6 +1534,7 @@ def main() -> int:
                     score_old = parse_score(existing.get("score"))
                     if score_new is not None and (score_old is None or score_new < score_old):
                         candidates_map[key] = item
+            emit_phase("retrieve_candidates", "done", unique_candidates=len(candidates_map))
         except Exception as exc:
             eprint(f"RedisSearch query failed: {exc}")
             return 2
@@ -1422,21 +1542,34 @@ def main() -> int:
         candidates = list(candidates_map.values())
         if args.rerank:
             rerank_query = query_for_display or raw_query
+            check_abort("reranker_load")
+            emit_phase("reranker_load", "start", model=args.rerank_model)
+            phase_started_at = time.perf_counter()
             reranker = load_reranker(args.rerank_model)
+            record_phase("reranker_load", phase_started_at)
+            emit_phase("reranker_load", "done", loaded=reranker is not None)
+            check_abort("rerank_score")
+            emit_phase("rerank_score", "start", candidates=len(candidates))
+            phase_started_at = time.perf_counter()
             reranked = rerank_candidates(
                 reranker,
                 rerank_query,
                 candidates,
                 max(200, int(args.rerank_max_chars or _RERANK_MAX_CHARS_DEFAULT)),
             )
+            record_phase("rerank_score", phase_started_at)
+            emit_phase("rerank_score", "done", reranked=len(reranked))
             retrieved = apply_doc_cap(reranked, max_per_doc)[:base_k]
         else:
             ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
             retrieved = apply_doc_cap(ordered, max_per_doc)[:base_k]
         if annotation_k > 0:
             try:
+                check_abort("retrieve_annotations")
+                emit_phase("retrieve_annotations", "start", k=annotation_k)
                 vec = embed_query(raw_query)
                 keywords = extract_keywords(raw_query)
+                phase_started_at = time.perf_counter()
                 annotations = retrieve_annotation_chunks(
                     client,
                     args.index,
@@ -1444,10 +1577,14 @@ def main() -> int:
                     annotation_k,
                     keywords,
                 )
+                record_phase("retrieve_annotations", phase_started_at)
+                emit_phase("retrieve_annotations", "done", count=len(annotations))
                 retrieved = merge_annotation_chunks(retrieved, annotations, annotation_k)
             except Exception as exc:
                 eprint(f"Annotation retrieval failed: {exc}")
     else:
+        check_abort("retrieve_primary")
+        emit_phase("retrieve_primary", "start", k=base_k)
         try:
             vec = embed_query(raw_query)
         except Exception as exc:
@@ -1455,6 +1592,7 @@ def main() -> int:
             return 2
         keywords = extract_keywords(raw_query)
         try:
+            phase_started_at = time.perf_counter()
             retrieved, _ = retrieve_with_broadening(
                 client,
                 args.index,
@@ -1466,11 +1604,16 @@ def main() -> int:
                 max_per_doc=max_per_doc,
                 annotation_k=0,
             )
+            record_phase("retrieve_with_broadening", phase_started_at)
+            emit_phase("retrieve_primary", "done", count=len(retrieved))
         except Exception as exc:
             eprint(f"RedisSearch query failed: {exc}")
             return 2
         if annotation_k > 0:
             try:
+                check_abort("retrieve_annotations")
+                emit_phase("retrieve_annotations", "start", k=annotation_k)
+                phase_started_at = time.perf_counter()
                 annotations = retrieve_annotation_chunks(
                     client,
                     args.index,
@@ -1478,12 +1621,18 @@ def main() -> int:
                     annotation_k,
                     keywords,
                 )
+                record_phase("retrieve_annotations", phase_started_at)
+                emit_phase("retrieve_annotations", "done", count=len(annotations))
                 retrieved = merge_annotation_chunks(retrieved, annotations, annotation_k)
             except Exception as exc:
                 eprint(f"Annotation retrieval failed: {exc}")
 
     if agentic_mode == "basic":
+        emit_phase("agentic", "start", max_iters=agentic_max_iters)
         for step in range(1, agentic_max_iters + 1):
+            check_abort("agentic_plan")
+            emit_phase("agentic_plan", "start", step=step)
+            phase_started_at = time.perf_counter()
             plan = plan_agentic_action(
                 args.chat_base_url,
                 args.chat_api_key,
@@ -1493,8 +1642,10 @@ def main() -> int:
                 step,
                 agentic_max_iters,
             )
+            record_phase("agentic_plan", phase_started_at)
             action = str(plan.get("action", "answer_with_current_context") or "answer_with_current_context")
             reason = str(plan.get("reason", "") or "")
+            emit_phase("agentic_plan", "done", step=step, action=action, reason=reason)
             step_trace: Dict[str, Any] = {
                 "step": step,
                 "action": action,
@@ -1508,22 +1659,31 @@ def main() -> int:
 
             before_sig = retrieval_signature(retrieved)
             if action == "expand_retry":
+                check_abort("agentic_expand_retry")
+                emit_phase("agentic_expand_retry", "start", step=step)
+                phase_started_at = time.perf_counter()
                 retry_expanded = expand_query(
                     args.chat_base_url,
                     args.chat_api_key,
                     args.chat_model,
                     raw_query,
                     max(1, int(args.expand_count or 0)),
+                    should_abort=should_abort,
                 )
+                record_phase("expand_query", phase_started_at)
+                emit_phase("agentic_expand_retry", "done", step=step, expanded=len(retry_expanded))
                 step_trace["expanded_queries"] = retry_expanded
                 query_variants = [raw_query] + retry_expanded
                 candidate_multiplier = max(2, int(args.rerank_candidates or 1))
                 candidate_k = max(base_k * candidate_multiplier, base_k)
                 candidates_map: Dict[str, Dict[str, Any]] = {}
                 try:
+                    emit_phase("agentic_retrieve", "start", step=step, variants=len(query_variants), k=candidate_k)
                     for variant in query_variants:
+                        check_abort("agentic_retrieve")
                         vec = embed_query(variant)
                         keywords = extract_keywords(variant)
+                        phase_started_at = time.perf_counter()
                         retrieved_variant, _ = retrieve_with_broadening(
                             client,
                             args.index,
@@ -1535,6 +1695,7 @@ def main() -> int:
                             max_per_doc=0,
                             annotation_k=0,
                         )
+                        record_phase("retrieve_with_broadening", phase_started_at)
                         for item in retrieved_variant:
                             key = chunk_key(item)
                             if not key:
@@ -1547,6 +1708,7 @@ def main() -> int:
                             score_old = parse_score(existing.get("score"))
                             if score_new is not None and (score_old is None or score_new < score_old):
                                 candidates_map[key] = item
+                    emit_phase("agentic_retrieve", "done", step=step, unique_candidates=len(candidates_map))
                 except Exception as exc:
                     step_trace["status"] = "error"
                     step_trace["error"] = str(exc)
@@ -1554,21 +1716,34 @@ def main() -> int:
 
                 candidates = list(candidates_map.values())
                 if args.rerank:
+                    check_abort("agentic_reranker_load")
+                    emit_phase("agentic_reranker_load", "start", step=step, model=args.rerank_model)
+                    phase_started_at = time.perf_counter()
                     reranker = load_reranker(args.rerank_model)
+                    record_phase("reranker_load", phase_started_at)
+                    emit_phase("agentic_reranker_load", "done", step=step, loaded=reranker is not None)
+                    check_abort("agentic_rerank_score")
+                    emit_phase("agentic_rerank_score", "start", step=step, candidates=len(candidates))
+                    phase_started_at = time.perf_counter()
                     reranked = rerank_candidates(
                         reranker,
                         query_for_display or raw_query,
                         candidates,
                         max(200, int(args.rerank_max_chars or _RERANK_MAX_CHARS_DEFAULT)),
                     )
+                    record_phase("rerank_score", phase_started_at)
+                    emit_phase("agentic_rerank_score", "done", step=step, reranked=len(reranked))
                     updated = apply_doc_cap(reranked, max_per_doc)[:base_k]
                 else:
                     ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
                     updated = apply_doc_cap(ordered, max_per_doc)[:base_k]
                 if annotation_k > 0 and updated:
                     try:
+                        check_abort("agentic_annotations")
+                        emit_phase("agentic_annotations", "start", step=step, k=annotation_k)
                         vec = embed_query(raw_query)
                         keywords = extract_keywords(raw_query)
+                        phase_started_at = time.perf_counter()
                         annotations = retrieve_annotation_chunks(
                             client,
                             args.index,
@@ -1576,6 +1751,8 @@ def main() -> int:
                             annotation_k,
                             keywords,
                         )
+                        record_phase("retrieve_annotations", phase_started_at)
+                        emit_phase("agentic_annotations", "done", step=step, count=len(annotations))
                         updated = merge_annotation_chunks(updated, annotations, annotation_k)
                     except Exception as exc:
                         step_trace["annotation_error"] = str(exc)
@@ -1595,18 +1772,23 @@ def main() -> int:
                     break
 
             elif action == "full_document":
+                check_abort("agentic_full_document")
                 target_doc_id = str(plan.get("doc_id", "") or "").strip() or choose_top_doc_id(retrieved)
                 step_trace["doc_id"] = target_doc_id
                 if not target_doc_id:
                     step_trace["status"] = "skipped_no_doc_id"
                     break
                 try:
+                    emit_phase("agentic_full_document", "start", step=step, doc_id=target_doc_id)
+                    phase_started_at = time.perf_counter()
                     full_chunks = retrieve_full_document_chunks(
                         client,
                         args.index,
                         target_doc_id,
                         agentic_full_doc_chunks,
                     )
+                    record_phase("retrieve_full_document", phase_started_at)
+                    emit_phase("agentic_full_document", "done", step=step, chunks=len(full_chunks))
                 except Exception as exc:
                     step_trace["status"] = "error"
                     step_trace["error"] = str(exc)
@@ -1625,8 +1807,14 @@ def main() -> int:
             if after_sig == before_sig:
                 step_trace["status"] = "no_change"
                 break
+        emit_phase("agentic", "done", steps=len(strategy_trace))
 
+    check_abort("build_context")
+    emit_phase("build_context", "start", chunks=len(retrieved))
+    phase_started_at = time.perf_counter()
     context = build_context(retrieved)
+    record_phase("build_context", phase_started_at)
+    emit_phase("build_context", "done", context_chars=len(context))
 
     system_prompt = (
         "Use ONLY the provided context for factual claims. If insufficient, say you do not know. "
@@ -1634,7 +1822,15 @@ def main() -> int:
         "Add inline citations using this exact format: [[cite:DOC_ID:PAGE_START-PAGE_END]]. "
         "Example: ... [[cite:ABC123:12-13]]."
     )
-    history_messages = load_history_messages(args.history_file) if args.history_file else []
+    if args.history_file:
+        check_abort("load_history")
+        emit_phase("load_history", "start")
+        phase_started_at = time.perf_counter()
+        history_messages = load_history_messages(args.history_file)
+        record_phase("load_history", phase_started_at)
+        emit_phase("load_history", "done", messages=len(history_messages))
+    else:
+        history_messages = []
     history_block = format_history_block(history_messages)
     if history_block:
         history_block = f"Chat history (for reference only):\n{history_block}\n\n"
@@ -1649,9 +1845,15 @@ def main() -> int:
     streamed = False
     if args.stream:
         def emit(obj: Dict[str, Any]) -> None:
-            print(json.dumps(obj, ensure_ascii=False), flush=True)
+            if emit_json is not None:
+                emit_json(obj)
+            else:
+                print(json.dumps(obj, ensure_ascii=False), flush=True)
 
         try:
+            check_abort("chat_stream")
+            emit_phase("chat_stream", "start", model=args.chat_model)
+            phase_started_at = time.perf_counter()
             answer = request_chat_stream(
                 args.chat_base_url,
                 args.chat_api_key,
@@ -1660,10 +1862,16 @@ def main() -> int:
                 system_prompt,
                 user_prompt,
                 lambda chunk: emit({"type": "delta", "content": chunk}),
+                timing=chat_timing,
+                should_abort=should_abort,
             )
+            record_phase("chat_request", phase_started_at)
+            emit_phase("chat_stream", "done", chars=len(answer))
             streamed = True
         except Exception as exc:
             if is_stream_unsupported(str(exc)):
+                chat_timing["chat_fallback_to_non_stream"] = True
+                emit_phase("chat_stream", "fallback", reason="stream_unsupported")
                 streamed = False
             else:
                 eprint(f"Chat request failed: {exc}")
@@ -1671,6 +1879,9 @@ def main() -> int:
 
     if not streamed:
         try:
+            check_abort("chat_non_stream")
+            emit_phase("chat_non_stream", "start", model=args.chat_model)
+            phase_started_at = time.perf_counter()
             answer = request_chat(
                 args.chat_base_url,
                 args.chat_api_key,
@@ -1678,10 +1889,22 @@ def main() -> int:
                 args.temperature,
                 system_prompt,
                 user_prompt,
+                timing=chat_timing,
+                should_abort=should_abort,
             )
+            record_phase("chat_request", phase_started_at)
+            emit_phase("chat_non_stream", "done", chars=len(answer))
         except Exception as exc:
             eprint(f"Chat request failed: {exc}")
             return 2
+
+    total_ms = int((time.perf_counter() - run_started_at) * 1000)
+    timing_summary: Dict[str, Any] = {
+        "total_ms": total_ms,
+        "phase_ms": phase_ms,
+        "phase_counts": phase_counts,
+        "chat": chat_timing,
+    }
 
     output = {
         "query": query_for_display,
@@ -1694,13 +1917,27 @@ def main() -> int:
         "answer": answer,
         "citations": citations,
         "retrieved": retrieved,
+        "timing": timing_summary,
     }
 
     if args.stream and streamed:
-        print(json.dumps({"type": "final", **output}, ensure_ascii=False), flush=True)
+        final_payload = {"type": "final", **output}
+        if emit_json is not None:
+            emit_json(final_payload)
+        else:
+            print(json.dumps(final_payload, ensure_ascii=False), flush=True)
     else:
-        print(json.dumps(output, ensure_ascii=False))
+        if emit_json is not None:
+            emit_json(output)
+        else:
+            print(json.dumps(output, ensure_ascii=False))
     return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    return run_with_args(args)
 
 
 if __name__ == "__main__":

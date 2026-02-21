@@ -1,6 +1,6 @@
 {
   "name": "zotero-redisearch-rag",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "Obsidian plugin for Zotero -> Docling -> Redis Stack RAG",
   "main": "main.js",
   "scripts": {

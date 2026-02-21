@@ -114,7 +114,7 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 - Zotero 7 or 8 (desktop)
 - Docker Desktop or Podman (for Redis Stack + Python worker)
 - LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
-- Optional (local runtime mode only): Python 3.11–3.13
+- Optional (advanced legacy local runtime only): Python 3.11–3.13
 
 ## Security and network disclosure
 
@@ -150,8 +150,8 @@ Depending on your configuration, the plugin may interact with:
 The plugin depends on local tools installed on your system:
 
 - Docker Desktop or Podman (for Redis Stack + Python worker startup)
-- Optional (local runtime mode only): Python 3.11–3.13
-- Optional (local runtime mode only): Tesseract and Poppler (worker mode includes these in the `python-worker` image)
+- Optional (advanced legacy local runtime only): Python 3.11–3.13
+- Optional (advanced legacy local runtime only): Tesseract and Poppler (worker mode includes these in the `python-worker` image)
 
 ### API key handling
 
@@ -204,12 +204,14 @@ Recommended: start from the plugin
 - Command palette -> "Start Redis Stack (Docker/Podman Compose)"
 
 Settings related to Redis (Settings → Prerequisites):
-- Python runtime: `Python worker container` (recommended) or `Local interpreter/venv`.
+- Python runtime: defaults to `Python worker container` (recommended).
+- Advanced Python runtime options: OFF by default. Enable only if you need legacy local interpreter mode.
 - Docker/Podman path: path to the CLI (default `docker`; set to `podman` if using Podman).
 - Redis URL: `redis://127.0.0.1:6379` (updated automatically when Auto‑assign is ON).
 - Auto-assign Redis port: OFF by default. When enabled, the plugin picks a free local port and updates Redis URL on start.
 - Auto-start Redis stack: ON by default. The plugin will ensure Redis + worker are running when needed.
 - Start Redis stack now: button in settings to start/restart immediately.
+- Legacy local switch: Settings → Maintenance → Python Runtime → Use local runtime (legacy).
 
 Notes:
 - Docker Desktop or Podman machine must be running (Podman uses `podman compose` or `podman-compose`).
@@ -248,9 +250,13 @@ Cloud options
 ### 5) Python runtime setup (Docling)
 Recommended (worker mode):
 
-1. In **Settings → Prerequisites**, set **Python runtime** to **Python worker container (recommended)**.
+1. Keep **Settings → Prerequisites → Advanced Python runtime options** disabled (default).
 2. Click **Start Redis stack now**.
 3. Wait for first startup to finish (worker venv dependencies are installed on first run).
+
+Migration note:
+- Legacy installs that previously relied on implicit local runtime defaults are migrated to worker mode automatically.
+- Existing local settings are preserved and can be re-enabled with **Use local runtime (legacy)**.
 
 Local fallback mode:
 
@@ -260,7 +266,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 If you use local mode:
-- Set **Python runtime** to `Local interpreter/venv`.
+- Enable **Advanced Python runtime options**, then set **Python runtime** to `Local interpreter/venv`, or use
+  **Settings → Maintenance → Python Runtime → Use local runtime (legacy)**.
 - Use **Python environment → Create/Update** in settings, or the terminal commands above.
 - Set **Python path** if auto-detection is incorrect.
 Optional (for stronger OCR fallback):
@@ -273,8 +280,9 @@ Obsidian -> Settings -> Community plugins -> Zotero Redis RAG
 
 Key settings:
 - Prerequisites
-   - Python runtime: `Python worker container` (recommended)
-   - Python path + Python environment: only needed for local runtime mode
+   - Advanced Python runtime options: keep OFF unless you need local legacy mode
+   - Python runtime: defaults to `Python worker container` (recommended)
+   - Python path + Python environment: shown only when advanced local mode is enabled
    - Docker/Podman path: `docker` (or `podman`)
    - Redis URL: `redis://127.0.0.1:6379` (auto‑updated if Auto‑assign is ON)
    - Auto-assign Redis port: toggle (default OFF)

@@ -7,6 +7,27 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.0",
+    markdown: `- Make Python worker runtime the graceful default path for legacy installs, with one-time migration and preserved local settings.
+- Fix runtime-specific stack startup so **Start Redis stack** brings up only services required by the selected runtime.
+- Refactor RAG reranking performance in worker mode:
+  - run \`rag_query_redisearch.py\` in-process inside \`python-worker\`,
+  - keep cross-encoder reranker models warm across requests via in-worker cache,
+  - add reranker and stream phase/timing telemetry.
+- Improve worker streaming control:
+  - add request-id based worker cancel endpoint,
+  - wire chat cancel to worker request cancel for long-running requests.
+- Improve reranker model setup UX with multilingual presets plus explicit **Custom** model support.
+- Add advanced gating for local runtime controls:
+  - new **Advanced Python runtime options** toggle in Prerequisites,
+  - hide local-only fields by default,
+  - auto-switch back to worker if advanced options are turned off while local runtime is active.
+- Add explicit legacy local opt-in paths:
+  - **Maintenance -> Python Runtime -> Use local runtime (legacy)**,
+  - command palette: **Switch Python runtime to local (legacy)**.
+- Update docs and README for worker-first runtime UX and migration behavior.`,
+  },
+  {
     version: "0.8.4",
     markdown: `- Fix the **What's New** splash title and layout:
   - use a generic \`What's new\` header,

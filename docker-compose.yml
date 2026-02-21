@@ -21,8 +21,12 @@ services:
       - PYTHONUNBUFFERED=1
       - ZRR_WORKER_REQUIREMENTS=${ZRR_WORKER_REQUIREMENTS:-/workspace/plugin/tools/requirements.txt}
       - ZRR_WORKER_VENV_DIR=/workspace/cache/venv
+      - ZRR_WORKER_API_HOST=0.0.0.0
+      - ZRR_WORKER_API_PORT=${ZRR_WORKER_PORT:-7379}
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
       - DISABLE_MODEL_SOURCE_CHECK=True
+    ports:
+      - "${ZRR_WORKER_PORT:-7379}:${ZRR_WORKER_PORT:-7379}"
     volumes:
       - "${ZRR_PLUGIN_DIR:-.}:/workspace/plugin:ro"
       - "${ZRR_VAULT_DIR:-.}:/workspace/vault"
