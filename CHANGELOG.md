@@ -1,4 +1,12 @@
 # Changelog
+## 0.9.4 (Bugfix Release)
+- Follow-up bugfix release to publish the previous patch set under a new tag.
+- Add first-start guidance in README/docs and a one-time startup toast warning that initial Docker/Podman image pulls/build steps may take 10+ minutes.
+- Add a deduplicated Zotero connection-error toast when the configured Zotero Local API is unreachable.
+- Change the default cross-encoder reranker preset to `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (fast multilingual) for new setups.
+- Fix Zotero Web API item search fallback by using `include=data` (the Web API rejects `include=meta` with HTTP 400).
+- Update `citekey` sync for Zotero 8 native citation keys: prefer native `citationKey` on reads, write native `citationKey` plus `Extra`, and auto-retry writes without native `citationKey` when an API rejects that field.
+
 ## 0.9.3 (Bugfix Release)
 - Add first-start guidance in README/docs and a one-time startup toast warning that initial Docker/Podman image pulls/build steps may take 10+ minutes.
 - Add a deduplicated Zotero connection-error toast when the configured Zotero Local API is unreachable.

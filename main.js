@@ -55,7 +55,7 @@ item_json: {{item_json_yaml}}`,tagSanitizeMode:"kebab",noteBodyTemplate:"{{annot
   <path d="M6.2694512 16.288346H17.916711"/>
 </svg>
 `};var me=require("@codemirror/state"),ce=require("@codemirror/view"),K=require("obsidian");var W=g=>{if(typeof g=="string")return g.trim();if(typeof g=="number"&&Number.isFinite(g))return String(g);if(Array.isArray(g))for(let u of g){if(typeof u=="string"&&u.trim())return u.trim();if(typeof u=="number"&&Number.isFinite(u))return String(u)}if(g&&typeof g=="object"){let u=g[0];if(typeof u=="string"&&u.trim())return u.trim();if(typeof u=="number"&&Number.isFinite(u))return String(u)}return""},$t=g=>{let u=[g.key,g.itemKey,g.id,g.citationKey];for(let e of u)if(typeof e=="string"&&e.trim())return e.trim();return null},Vt=g=>{var e,t,n;let u=(n=(t=g.key)!=null?t:(e=g.data)==null?void 0:e.key)!=null?n:"";return typeof u=="string"?u:""},ut=g=>{if(!g)return"";let u=g.match(/\b(\d{4})\b/);return u?u[1]:""},Ut=g=>{var e,t,n,i;let u=(i=(n=(e=g.meta)==null?void 0:e.parsedDate)!=null?n:(t=g.data)==null?void 0:t.date)!=null?i:"";return typeof u!="string"?"":ut(u)},ve=g=>{if(!g||typeof g!="object")return"";if(g.name)return String(g.name);let u=g.firstName?String(g.firstName):"",e=g.lastName?String(g.lastName):"";return[e,u].filter(Boolean).join(", ")||`${u} ${e}`.trim()},We=(g,u)=>{let e=[g.citationKey,g["citation-key"],g.citation_key,u==null?void 0:u.citationKey,u==null?void 0:u["citation-key"],u==null?void 0:u.citation_key,g.citationkey,g.citekey,g.citeKey,g.betterBibtexKey,g.betterbibtexkey,u==null?void 0:u.citationkey,u==null?void 0:u.citekey,u==null?void 0:u.citeKey,u==null?void 0:u.betterBibtexKey,u==null?void 0:u.betterbibtexkey];for(let i of e){let r=W(i);if(r)return r}let t=typeof g.extra=="string"?g.extra:"";if(!t)return"";let n=t.split(/\r?\n/);for(let i of n){let r=i.match(/^\s*biblatexcitekey\s*\[([^\]]+)\]\s*$/i);if(r&&r[1])return r[1].trim();let a=i.match(/^\s*(citation key|citationkey|citekey|citation-key|bibtex key|bibtexkey|bibtex)\s*:\s*(.+)\s*$/i);if(a&&a[2])return a[2].trim()}return""},_t=g=>{if(!g)return"";let u=[g["citation-key"],g.citationKey,g.citationkey,g.citekey,g.citation_key];for(let e of u){let t=W(e);if(t)return t}return""},Zt=g=>{var e,t;if(!g)return"";let u=(t=(e=g["title-short"])!=null?e:g.shortTitle)!=null?t:g.short_title;return typeof u=="string"?u.trim():""},Pe=g=>{let u=W(g.shortTitle);if(u)return u;let e=W(g.short_title);if(e)return e;let t=W(g["title-short"]);return t||""},Bt=g=>{let u=typeof g.extra=="string"?g.extra:"";if(!u)return"";let e=u.split(/\r?\n/);for(let n of e){let i=n.match(/^\s*doi\s*:\s*(.+)\s*$/i);if(i&&i[1])return i[1].trim().replace(/[.,;]+$/,"")}let t=u.match(/\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+\b/i);return t?t[0].replace(/[.,;]+$/,""):""},Gt=g=>{var e;if(!g)return"";let u=(e=g.DOI)!=null?e:g.doi;return typeof u=="string"?u.trim().replace(/[.,;]+$/,""):""},Pn=g=>{if(!g)return[];let u=[g.attachments,g.children,g.items,g.attachment,g.allAttachments],e=[];for(let t of u)t&&(Array.isArray(t)?e.push(...t):typeof t=="object"&&e.push(t));return e},gt=g=>{var t,n,i,r,a,s,o,l,c,d,_,p,f,y,x;if(((s=(a=(i=(t=g==null?void 0:g.contentType)!=null?t:g==null?void 0:g.mimeType)!=null?i:(n=g==null?void 0:g.data)==null?void 0:n.contentType)!=null?a:(r=g==null?void 0:g.data)==null?void 0:r.mimeType)!=null?s:"")==="application/pdf")return!0;let e=(x=(y=(p=(_=(c=(o=g==null?void 0:g.filename)!=null?o:g==null?void 0:g.fileName)!=null?c:(l=g==null?void 0:g.data)==null?void 0:l.filename)!=null?_:(d=g==null?void 0:g.data)==null?void 0:d.fileName)!=null?p:g==null?void 0:g.path)!=null?y:(f=g==null?void 0:g.data)==null?void 0:f.path)!=null?x:"";return!!(typeof e=="string"&&e.toLowerCase().endsWith(".pdf"))},Wt=g=>{var t;let u=Pn(g.data);if(u.length>0)return u.some(i=>gt(i))?"yes":"no";let e=(t=g.meta)==null?void 0:t.numChildren;return typeof e=="number"&&e===0?"no":"unknown"};var An={artwork:"image",audioRecording:"music",bill:"file-text",blogPost:"globe",book:"book",bookSection:"book-open",case:"scale",computerProgram:"code",conferencePaper:"file-text",dataset:"database",dictionaryEntry:"book",document:"file-text",email:"mail",encyclopediaArticle:"book",film:"film",forumPost:"message-circle",hearing:"file-text",interview:"mic",journalArticle:"file-text",letter:"mail",magazineArticle:"file-text",manuscript:"file-text",map:"map",newspaperArticle:"file-text",patent:"award",podcast:"mic",preprint:"file-text",presentation:"file-text",radioBroadcast:"music",report:"file-text",statute:"scale",thesis:"graduation-cap",tvBroadcast:"film",videoRecording:"film",webpage:"globe"},Ht=[{label:"Auto (no hint)",value:""},{label:"English (en)",value:"en"},{label:"German (de)",value:"de"},{label:"German + English (de,en)",value:"de,en"},{label:"French (fr)",value:"fr"},{label:"Spanish (es)",value:"es"},{label:"Italian (it)",value:"it"},{label:"Dutch (nl)",value:"nl"},{label:"Portuguese (pt)",value:"pt"},{label:"Polish (pl)",value:"pl"},{label:"Swedish (sv)",value:"sv"},{label:"Other (custom ISO code)",value:"__custom__"}],Cn="https://github.com/jmiba/zotero-redisearch-rag/blob/main/CHANGELOG.md",Rn=g=>g.includes("STDERR")?"zrr-log-stderr":g.includes("ERROR")?"zrr-log-error":g.includes("WARNING")||g.includes("WARN")?"zrr-log-warning":g.includes("INFO")?"zrr-log-info":null,Kt=g=>{let u=new me.RangeSetBuilder;for(let{from:e,to:t}of g.visibleRanges){let n=e;for(;n<=t;){let i=g.state.doc.lineAt(n),r=Rn(i.text);r&&u.add(i.from,i.from,ce.Decoration.line({class:r})),n=i.to+1}}return u.finish()},Jt=ce.EditorView.theme({".cm-editor":{height:"100%",display:"flex",flexDirection:"column",minHeight:"0"},".cm-scroller":{fontFamily:"var(--font-monospace)",fontSize:"0.85rem",flex:"1",height:"100%",maxHeight:"100%",overflow:"auto"},".zrr-log-error":{color:"var(--text-error)"},".zrr-log-warning":{color:"var(--text-accent)"},".zrr-log-info":{color:"var(--text-muted)"},".zrr-log-stderr":{color:"var(--text-accent)"}}),Xt=ce.ViewPlugin.fromClass(class{constructor(g){this.decorations=Kt(g)}update(g){(g.docChanged||g.viewportChanged)&&(this.decorations=Kt(g.view))}},{decorations:g=>g.decorations}),Se=class extends K.Modal{constructor(u,e,t,n,i="Value cannot be empty."){super(u),this.titleText=e,this.placeholder=t,this.onSubmit=n,this.emptyMessage=i}onOpen(){let{contentEl:u}=this;u.empty(),u.createEl("h3",{text:this.titleText});let e=u.createEl("input",{type:"text",placeholder:this.placeholder});e.style.width="100%",e.focus();let t=u.createEl("button",{text:"Submit"});t.style.marginTop="0.75rem";let n=()=>{let i=e.value.trim();if(!i){new K.Notice(this.emptyMessage);return}this.close(),this.onSubmit(i)};t.addEventListener("click",n),e.addEventListener("keydown",i=>{i.key==="Enter"&&n()})}},Ne=class extends K.Modal{constructor(e,t,n){super(e);this.markdownComponent=null;this.version=t,this.markdown=n}onOpen(){var a;let{contentEl:e}=this;e.empty(),e.addClass("zrr-release-notes-modal"),e.createEl("h3",{text:"What's new"}),(a=this.markdownComponent)==null||a.unload(),this.markdownComponent=new K.Component,this.markdownComponent.load();let t=String(this.markdown||"").trim();if(t){let s=e.createDiv({cls:"zrr-release-notes-body"});K.MarkdownRenderer.renderMarkdown(t,s,"",this.markdownComponent)}else e.createEl("p",{text:"This version includes improvements and fixes."});let n=e.createDiv({cls:"zrr-release-notes-body"});K.MarkdownRenderer.renderMarkdown(`[Full changelog](${Cn})`,n,"",this.markdownComponent),e.createEl("div",{cls:"zrr-release-notes-actions"}).createEl("button",{text:"Close"}).addEventListener("click",()=>this.close())}onClose(){var e;(e=this.markdownComponent)==null||e.unload(),this.markdownComponent=null,this.contentEl.empty()}},He=class extends K.Modal{constructor(u,e,t,n,i){super(u),this.chunkId=e,this.initialTags=t,this.onSubmit=n,this.onRegenerate=i}onOpen(){let{contentEl:u}=this;u.empty(),u.createEl("h3",{text:`Edit tags for ${this.chunkId}`});let e=u.createEl("textarea",{attr:{rows:"3"}});e.style.width="100%",e.placeholder="tag1, tag2, tag3",e.value=this.initialTags.join(", "),e.focus();let t=u.createEl("div");t.style.display="flex",t.style.gap="0.5rem",t.style.marginTop="0.75rem";let n=t.createEl("button",{text:"Save tags"}),i=async()=>{let a=(e.value||"").split(/[,;\n]+/).map(o=>o.trim()).filter(o=>o.length>0),s=Array.from(new Set(a));this.close(),await Promise.resolve(this.onSubmit(s))};if(this.onRegenerate){let r=t.createEl("button",{text:"Regenerate"});r.addEventListener("click",async()=>{var a;r.setAttribute("disabled","true"),n.setAttribute("disabled","true");try{let s=await((a=this.onRegenerate)==null?void 0:a.call(this));s&&s.length>0?(e.value=s.join(", "),await Promise.resolve(this.onSubmit(s))):s&&new K.Notice("No tags were generated.")}finally{r.removeAttribute("disabled"),n.removeAttribute("disabled")}})}n.addEventListener("click",i),e.addEventListener("keydown",r=>{r.key==="Enter"&&(r.metaKey||r.ctrlKey)&&i()})}},Ke=class extends K.Modal{constructor(u,e,t,n=""){super(u),this.titleText=e,this.content=t,this.noteText=n}onOpen(){let{contentEl:u}=this;if(u.empty(),u.createEl("h3",{text:this.titleText}),this.noteText){let t=u.createEl("div",{text:this.noteText});t.className="zrr-indexed-note"}let e=u.createEl("textarea",{attr:{rows:"12",readonly:"true"}});e.style.width="100%",e.value=this.content}},Je=class extends K.Modal{constructor(e,t,n=""){super(e);this.bodyText="";this.plugin=t,this.initialTerm=n}onOpen(){let{contentEl:e}=this;e.empty(),this.modalEl&&(this.modalEl.style.width="80vw",this.modalEl.style.maxWidth="1200px",this.modalEl.style.height="80vh",this.modalEl.style.maxHeight="90vh",this.modalEl.style.resize="both",this.modalEl.style.overflow="hidden"),e.style.display="flex",e.style.flexDirection="column",e.style.height="100%",e.style.overflow="hidden",e.style.minHeight="0";let t=e.createDiv();t.style.display="flex",t.style.alignItems="center",t.style.justifyContent="space-between",t.style.gap="0.5rem",t.createEl("h3",{text:"Redis index search"});let n=t.createEl("button",{text:"Copy All"});n.style.marginLeft="auto",n.addEventListener("click",()=>{this.copyResultsToClipboard()});let i=e.createDiv();i.style.display="flex",i.style.alignItems="center",i.style.gap="0.5rem",i.style.margin="0.5rem 0";let r=i.createEl("input");r.type="text",r.placeholder="Search term",r.value=this.initialTerm,r.style.flex="1",r.style.minWidth="0",this.inputEl=r,i.createEl("button",{text:"Search"}).addEventListener("click",()=>{this.runSearch()}),r.addEventListener("keydown",c=>{c.key==="Enter"&&(c.preventDefault(),this.runSearch())});let s=e.createDiv();s.style.color="var(--text-muted)",s.style.marginBottom="0.5rem",this.statusEl=s;let o=e.createDiv();o.style.flex="1 1 0",o.style.minHeight="0",o.style.border="1px solid var(--background-modifier-border)",o.style.borderRadius="6px",o.style.display="flex",o.style.flexDirection="column",o.style.overflow="auto";let l=me.EditorState.create({doc:this.bodyText,extensions:[Jt,Xt,ce.EditorView.editable.of(!1),me.EditorState.readOnly.of(!0),ce.EditorView.lineWrapping]});this.editorView=new ce.EditorView({state:l,parent:o}),this.initialTerm&&this.runSearch()}onClose(){var e;(e=this.editorView)==null||e.destroy(),this.editorView=void 0}async runSearch(){var n;let e=(((n=this.inputEl)==null?void 0:n.value)||"").trim();if(!e){this.statusEl&&(this.statusEl.textContent="Enter a search term.");return}this.statusEl&&(this.statusEl.textContent="Searching...");let t=await this.plugin.runRedisSearch(e);this.updateEditor(t),this.statusEl&&(this.statusEl.textContent=`Results for "${e}"`)}updateEditor(e){if(!this.editorView)return;let t=this.editorView,n=t.scrollDOM.scrollTop,i=t.state.selection.main,r=e.length,a=Math.min(i.anchor,r),s=Math.min(i.head,r);t.dispatch({changes:{from:0,to:t.state.doc.length,insert:e},selection:{anchor:a,head:s}}),t.scrollDOM.scrollTop=n,this.bodyText=e}copyResultsToClipboard(){let e=this.bodyText||"";if(!e){new K.Notice("Nothing to copy.");return}navigator.clipboard.writeText(e).then(()=>new K.Notice("Results copied to clipboard.")).catch(()=>new K.Notice("Failed to copy results."))}},Ae=class extends K.Modal{constructor(u,e,t,n){super(u),this.titleText=e,this.bodyText=t,this.options=n}onOpen(){var r,a,s,o;let{contentEl:u}=this;u.empty(),this.modalEl&&(this.modalEl.style.width="80vw",this.modalEl.style.maxWidth="1200px",this.modalEl.style.height="80vh",this.modalEl.style.maxHeight="90vh",this.modalEl.style.resize="both",this.modalEl.style.overflow="hidden"),u.style.display="flex",u.style.flexDirection="column",u.style.height="100%",u.style.overflow="hidden",u.style.minHeight="0";let e=u.createDiv();e.style.display="flex",e.style.alignItems="center",e.style.justifyContent="space-between",e.style.gap="0.5rem",e.createEl("h3",{text:this.titleText});let t=e.createDiv();if(t.style.display="flex",t.style.gap="0.5rem",(r=this.options)!=null&&r.onClear){let l=(a=this.options.clearLabel)!=null?a:"Clear log";t.createEl("button",{text:l}).addEventListener("click",async()=>{var d,_;try{await((_=(d=this.options)==null?void 0:d.onClear)==null?void 0:_.call(d))}finally{await this.refreshFromSource()}})}let n=u.createDiv();n.style.flex="1 1 0",n.style.minHeight="0",n.style.border="1px solid var(--background-modifier-border)",n.style.borderRadius="6px",n.style.display="flex",n.style.flexDirection="column",n.style.overflow="auto";let i=me.EditorState.create({doc:this.bodyText,extensions:[Jt,Xt,ce.EditorView.editable.of(!0),me.EditorState.readOnly.of(!1),ce.EditorView.lineWrapping]});if(this.editorView=new ce.EditorView({state:i,parent:n}),this.refreshFromSource(),(s=this.options)!=null&&s.autoRefresh&&this.options.onRefresh){let l=(o=this.options.refreshIntervalMs)!=null?o:2e3;this.refreshTimer=window.setInterval(()=>{this.refreshFromSource()},l)}}onClose(){var u;this.refreshTimer!==void 0&&(window.clearInterval(this.refreshTimer),this.refreshTimer=void 0),(u=this.editorView)==null||u.destroy(),this.editorView=void 0}async refreshFromSource(){var s;if(!((s=this.options)!=null&&s.onRefresh)||!this.editorView)return;let u="";try{u=await this.options.onRefresh()||""}catch(o){return}if(u===this.bodyText)return;let e=this.editorView,t=e.scrollDOM.scrollTop,n=e.state.selection.main,i=u.length,r=Math.min(n.anchor,i),a=Math.min(n.head,i);e.dispatch({changes:{from:0,to:e.state.doc.length,insert:u},selection:{anchor:r,head:a}}),e.scrollDOM.scrollTop=t,this.bodyText=u}},Xe=class extends K.Modal{constructor(e,t,n){super(e);this.resolved=!1;this.filePath=t,this.onResolve=n}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Overwrite existing note?"}),e.createEl("p",{text:`This will overwrite: ${this.filePath}`});let t=e.createEl("div");t.style.display="flex",t.style.gap="0.5rem",t.style.marginTop="0.75rem";let n=t.createEl("button",{text:"Cancel"}),i=t.createEl("button",{text:"Overwrite"});n.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},Ye=class extends K.Modal{constructor(e,t,n,i){super(e);this.resolved=!1;this.notePath=t,this.docId=n,this.onResolve=i}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Delete note and cached data?"}),e.createEl("p",{text:`This will delete the note and cached chunks/items for doc_id ${this.docId}.`}),e.createEl("p",{text:`Note: ${this.notePath}`});let t=e.createEl("div");t.style.display="flex",t.style.gap="0.5rem",t.style.marginTop="0.75rem";let n=t.createEl("button",{text:"Cancel"}),i=t.createEl("button",{text:"Delete"});n.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},Qe=class extends K.Modal{constructor(e,t,n){super(e);this.resolved=!1;this.reason=t,this.onResolve=n}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Rebuild Redis index?"}),e.createEl("p",{text:this.reason}),e.createEl("p",{text:"This will drop the RedisSearch index (and embeddings) and rebuild it from cached chunks."});let t=e.createEl("div");t.style.display="flex",t.style.gap="0.5rem",t.style.marginTop="0.75rem";let n=t.createEl("button",{text:"Cancel"}),i=t.createEl("button",{text:"Drop & rebuild"});n.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},et=class extends K.Modal{constructor(e,t){super(e);this.resolved=!1;this.onResolve=t}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Purge Redis orphaned chunks?"}),e.createEl("p",{text:"This removes Redis chunk keys that have no cached item.json or chunk.json on disk."}),e.createEl("p",{text:"Cache files are not deleted. Use this to clean up stale Redis data."});let t=e.createEl("div");t.style.display="flex",t.style.gap="0.5rem",t.style.marginTop="0.75rem";let n=t.createEl("button",{text:"Cancel"}),i=t.createEl("button",{text:"Purge orphans"});n.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!1)}),i.addEventListener("click",()=>{this.resolved=!0,this.close(),this.onResolve(!0)})}onClose(){this.resolved||this.onResolve(!1)}},tt=class extends K.Modal{constructor(e,t,n){super(e);this.resolved=!1;this.selects=new Map;this.conflicts=t,this.onResolve=n}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Resolve metadata conflicts"}),e.createEl("p",{text:"Choose which values to keep for each field."});let t=e.createEl("div");t.style.display="grid",t.style.gap="0.75rem";for(let l of this.conflicts){let c=t.createEl("div");c.style.display="grid",c.style.gap="0.4rem",c.style.border="1px solid var(--background-modifier-border)",c.style.borderRadius="6px",c.style.padding="0.6rem",c.createEl("div",{text:l.fieldLabel}).style.fontWeight="600";let d=c.createEl("div");d.style.display="grid",d.style.gridTemplateColumns="1fr 1fr",d.style.gap="0.5rem";let _=d.createEl("textarea",{attr:{readonly:"true",rows:"3"}});_.style.width="100%",_.value=l.noteValue||"(empty)";let p=d.createEl("textarea",{attr:{readonly:"true",rows:"3"}});p.style.width="100%",p.value=l.zoteroValue||"(empty)";let f=c.createEl("div");f.style.display="flex",f.style.gap="0.5rem",f.style.alignItems="center",f.createEl("span",{text:"Decision:"});let y=f.createEl("select");y.add(new Option(l.noteLabel,"note")),y.add(new Option(l.zoteroLabel,"zotero")),y.add(new Option("Skip","skip")),y.value="skip",this.selects.set(l.field,y)}let n=e.createEl("div");n.style.display="flex",n.style.flexWrap="wrap",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let i=l=>{for(let c of this.selects.values())c.value=l},r=n.createEl("button",{text:"Use note for all"}),a=n.createEl("button",{text:"Use Zotero for all"}),s=n.createEl("button",{text:"Skip all"}),o=n.createEl("button",{text:"Apply"});r.addEventListener("click",()=>i("note")),a.addEventListener("click",()=>i("zotero")),s.addEventListener("click",()=>i("skip")),o.addEventListener("click",()=>{let l={};for(let[c,d]of this.selects.entries())l[c]=d.value||"skip";this.resolved=!0,this.close(),this.onResolve(l)})}onClose(){if(!this.resolved){let e={};for(let[t,n]of this.selects.entries())e[t]=n.value||"skip";this.onResolve(e)}}},nt=class extends K.Modal{constructor(e,t,n){super(e);this.resolved=!1;this.selects=new Map;this.conflicts=t,this.onResolve=n}onOpen(){let{contentEl:e}=this;e.empty(),e.createEl("h3",{text:"Resolve annotation conflicts"}),e.createEl("p",{text:"Choose which version to keep for each annotation."});let t=e.createEl("div");t.style.display="grid",t.style.gap="0.75rem";for(let l of this.conflicts){let c=t.createEl("div");c.style.display="grid",c.style.gap="0.4rem",c.style.border="1px solid var(--background-modifier-border)",c.style.borderRadius="6px",c.style.padding="0.6rem",c.createEl("div",{text:l.title}).style.fontWeight="600";let d=c.createEl("div");d.style.display="grid",d.style.gridTemplateColumns="1fr 1fr",d.style.gap="0.5rem";let _=d.createEl("textarea",{attr:{readonly:"true",rows:"4"}});_.style.width="100%",_.value=l.noteValue||"(empty)";let p=d.createEl("textarea",{attr:{readonly:"true",rows:"4"}});p.style.width="100%",p.value=l.zoteroValue||"(empty)";let f=c.createEl("div");f.style.display="flex",f.style.gap="0.5rem",f.style.alignItems="center",f.createEl("span",{text:"Decision:"});let y=f.createEl("select");y.add(new Option("Use note","note")),y.add(new Option("Use Zotero","zotero")),y.add(new Option("Skip","skip")),y.value="skip",this.selects.set(l.key,y)}let n=e.createEl("div");n.style.display="flex",n.style.flexWrap="wrap",n.style.gap="0.5rem",n.style.marginTop="0.75rem";let i=l=>{for(let c of this.selects.values())c.value=l},r=n.createEl("button",{text:"Use note for all"}),a=n.createEl("button",{text:"Use Zotero for all"}),s=n.createEl("button",{text:"Skip all"}),o=n.createEl("button",{text:"Apply"});r.addEventListener("click",()=>i("note")),a.addEventListener("click",()=>i("zotero")),s.addEventListener("click",()=>i("skip")),o.addEventListener("click",()=>{let l={};for(let[c,d]of this.selects.entries())l[c]=d.value||"skip";this.resolved=!0,this.close(),this.onResolve(l)})}onClose(){if(!this.resolved){let e={};for(let[t,n]of this.selects.entries())e[t]=n.value||"skip";this.onResolve(e)}}},it=class extends K.SuggestModal{constructor(e,t){super(e);this.resolved=!1;this.resolveSelection=t,this.setPlaceholder("Select a language for OCR/quality...")}getSuggestions(e){let t=e.trim().toLowerCase();return t?Ht.filter(n=>n.label.toLowerCase().includes(t)||n.value.toLowerCase().includes(t)):Ht}renderSuggestion(e,t){t.setText(e.label),t.addEventListener("click",()=>this.handleSelection(e))}onChooseSuggestion(e){this.handleSelection(e)}onClose(){this.resolved||this.resolveSelection(null)}handleSelection(e){if(!this.resolved){if(this.resolved=!0,e.value==="__custom__"){this.close(),new Se(this.app,"Custom language hint","e.g., en, de, fr, de,en",t=>this.resolveSelection(t.trim()),"Language hint cannot be empty.").open();return}this.resolveSelection(e.value),this.close()}}},rt=class extends K.SuggestModal{constructor(e,t,n){super(e);this.lastError=null;this.indexedDocIds=null;this.querySequence=0;this.queryDebounceMs=200;this.minQueryLength=2;this.maxQueryCacheEntries=100;this.queryCache=new Map;this.plugin=t,this.resolveSelection=n,this.setPlaceholder("Search Zotero items...")}async getSuggestions(e){let t=e.trim();if(t.length>0&&t.length<this.minQueryLength)return[];let n=t.toLowerCase(),i=this.queryCache.get(n);if(i)return i;let r=++this.querySequence;try{if(await new Promise(s=>{window.setTimeout(s,this.queryDebounceMs)}),r!==this.querySequence)return[];if(!this.indexedDocIds){let s=await this.plugin.getDocIndex();this.indexedDocIds=new Set(Object.keys(s))}let a=await this.plugin.searchZoteroItems(t);if(r!==this.querySequence)return[];if(this.queryCache.set(n,a),this.queryCache.size>this.maxQueryCacheEntries){let s=this.queryCache.keys().next().value;s!==void 0&&this.queryCache.delete(s)}return a}catch(a){let s=a instanceof Error?a.message:String(a);return this.lastError!==s&&(this.lastError=s,new K.Notice(s)),console.error("Zotero search failed",a),[]}}renderSuggestion(e,t){var x,v,h,k,b,w;let n=(v=(x=e.data)==null?void 0:x.title)!=null?v:"[No title]",i=Ut(e),r=Vt(e),a=r?(h=this.indexedDocIds)==null?void 0:h.has(r):!1,s=Wt(e),o=String((b=(k=e.data)==null?void 0:k.itemType)!=null?b:"").trim();a&&t.addClass("zrr-indexed-item"),s==="no"&&t.addClass("zrr-no-pdf-item");let l=t.createDiv({cls:"zrr-zotero-suggest-row"}),c=l.createSpan({cls:"zrr-zotero-item-icon"}),d=(w=An[o])!=null?w:"file-text";(0,K.setIcon)(c,d);let _=l.createDiv({cls:"zrr-zotero-suggest-text"});_.createEl("div",{text:n,cls:"zrr-zotero-suggest-title"});let p=_.createEl("small",{cls:"zrr-zotero-suggest-meta"}),f=!1,y=()=>{f&&p.createSpan({text:" - "})};i&&(p.createSpan({text:i}),f=!0),a&&(y(),p.createSpan({text:"Indexed",cls:"zrr-indexed-flag"}),f=!0),s==="no"&&(y(),p.createSpan({text:"No PDF attachment",cls:"zrr-no-pdf-flag"}),f=!0),t.addEventListener("click",()=>{this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()})}onChooseSuggestion(e,t){this.resolveSelection&&(this.resolveSelection(e),this.resolveSelection=null),this.close()}onClose(){this.resolveSelection&&(this.resolveSelection(null),this.resolveSelection=null)}};var Yt={"docling_extract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import argparse
 import atexit
 import base64
@@ -5641,7 +5641,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"ocr_paddle.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 from __future__ import annotations
 
 import json
@@ -8860,7 +8860,7 @@ def ocr_pages_with_paddle(
     )
     return pages, {"ocr_confidence_avg": avg_conf}
 `,"ocr_tesseract.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 from __future__ import annotations
 
 import logging
@@ -9165,7 +9165,7 @@ def ocr_pages_with_tesseract(
     )
     return pages, {"ocr_confidence_avg": avg_conf}
 `,"index_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import argparse
 import html
 import json
@@ -10316,7 +10316,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"drop_redis_index.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import argparse
 import sys
 
@@ -10356,7 +10356,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"ocr_layered_pdf.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import argparse
 import io
 import json
@@ -10515,7 +10515,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"rag_query_redisearch.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 
 import argparse
 import json
@@ -12460,7 +12460,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"search_redis.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 
 import argparse
 import json
@@ -12753,7 +12753,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"redis_diagnostics.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 
 import argparse
 import json
@@ -12844,7 +12844,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"purge_redis_orphans.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 
 import argparse
 import json
@@ -12953,7 +12953,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"batch_index_pyzotero.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import argparse
 import json
 import os
@@ -13158,7 +13158,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 `,"utils_embedding.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import math
 import struct
 import requests
@@ -13189,7 +13189,7 @@ def request_embedding(base_url: str, api_key: str, model: str, text: str) -> Lis
     if not embedding:
         raise RuntimeError("Embedding response missing embedding")
     return [float(x) for x in embedding]
-`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.9.3
+`,"ocr_wordlist.txt":`# zotero-redisearch-rag tool version: 0.9.4
 ackley
 afton
 alonso
@@ -13453,7 +13453,7 @@ yeatman
 youghiogheny
 zaiser
 zenodo
-`,"requirements.txt":`# zotero-redisearch-rag tool version: 0.9.3
+`,"requirements.txt":`# zotero-redisearch-rag tool version: 0.9.4
 docling
 langcodes[data]
 markdown
@@ -13476,7 +13476,7 @@ wordfreq
 # Optional for language normalization and spellchecking
 # hunspell  # Disabled: fails to build on macOS/Python 3.13, use spylls fallback
 spylls
-`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.9.3
+`,"docker-compose.yml":`# zotero-redisearch-rag tool version: 0.9.4
 services:
   redis-stack:
     image: docker.io/redis/redis-stack-server@sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a
@@ -13510,7 +13510,7 @@ services:
       - "\${ZRR_PLUGIN_DIR:-.}:/workspace/plugin:ro"
       - "\${ZRR_VAULT_DIR:-.}:/workspace/vault"
       - "\${ZRR_WORKER_CACHE_DIR:-./.zotero-redisearch-rag/python-worker-cache}:/workspace/cache"
-`,"python-worker.Dockerfile":`# zotero-redisearch-rag tool version: 0.9.3
+`,"python-worker.Dockerfile":`# zotero-redisearch-rag tool version: 0.9.4
 FROM python:3.12-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13552,7 +13552,7 @@ ENV DISABLE_MODEL_SOURCE_CHECK=True
 ENTRYPOINT ["/usr/local/bin/python-worker-entrypoint.sh"]
 CMD ["/workspace/cache/venv/bin/python", "/workspace/plugin/tools/python-worker-api.py"]
 `,"python-worker-entrypoint.sh":`#!/bin/sh
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 set -eu
 
 VENV_DIR="\${ZRR_WORKER_VENV_DIR:-/workspace/cache/venv}"
@@ -13595,7 +13595,7 @@ fi
 
 exec "$@"
 `,"python-worker-api.py":`#!/usr/bin/env python3
-# zotero-redisearch-rag tool version: 0.9.3
+# zotero-redisearch-rag tool version: 0.9.4
 import argparse
 import contextlib
 import importlib
@@ -14408,7 +14408,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.9.3
+`,"redis-stack.conf":`# zotero-redisearch-rag tool version: 0.9.4
 # Redis Stack persistence config for local RAG index
 appendonly yes
 appendfsync everysec
