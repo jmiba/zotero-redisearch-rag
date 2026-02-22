@@ -881,7 +881,6 @@ export default class ZoteroRagPlugin extends Plugin {
     let qualityLabel: string | null = null;
 
     try {
-      qualityLabel = await this.readDoclingQualityLabelFromPdf(pdfSourcePath, doclingLanguageHint);
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
       const doclingLogPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       await this.runPythonStreaming(
@@ -9100,7 +9099,6 @@ export default class ZoteroRagPlugin extends Plugin {
     };
 
     try {
-      qualityLabel = await this.readDoclingQualityLabelFromPdf(sourcePdf, doclingLanguageHint);
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
       const doclingLogPath = this.settings.enableFileLogging ? this.getLogFileAbsolutePath() : null;
       await this.runPythonStreaming(
@@ -11085,13 +11083,21 @@ export default class ZoteroRagPlugin extends Plugin {
     const dataDir = options?.dataDir || this.getRedisDataDir();
     const redisPort = options?.redisPort ?? this.getRedisPortFromUrl();
     const workerPort = this.getPythonWorkerApiPort(redisPort);
-    composeEnv.ZRR_DATA_DIR = dataDir;
+    composeEnv.ZRR_DATA_DIR = this.toComposePath(dataDir);
     composeEnv.ZRR_PORT = String(redisPort);
     composeEnv.ZRR_WORKER_PORT = String(workerPort);
-    composeEnv.ZRR_VAULT_DIR = this.getVaultBasePath();
-    composeEnv.ZRR_PLUGIN_DIR = this.getPluginDir();
-    composeEnv.ZRR_WORKER_CACHE_DIR = this.getPythonWorkerCacheDir();
+    composeEnv.ZRR_VAULT_DIR = this.toComposePath(this.getVaultBasePath());
+    composeEnv.ZRR_PLUGIN_DIR = this.toComposePath(this.getPluginDir());
+    composeEnv.ZRR_WORKER_CACHE_DIR = this.toComposePath(this.getPythonWorkerCacheDir());
     return composeEnv;
+  }
+
+  private toComposePath(rawPath: string): string {
+    if (process.platform !== "win32") {
+      return rawPath;
+    }
+    // Docker/Compose on Windows resolves bind mounts more reliably with forward slashes.
+    return rawPath.replace(/\\/g, "/");
   }
 
   private async resolveComposeProjectContext(

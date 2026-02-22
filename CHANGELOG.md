@@ -1,6 +1,7 @@
 # Changelog
 ## 0.9.4 (Bugfix Release)
 - Follow-up bugfix release to publish the previous patch set under a new tag.
+- Fix a Windows import stall where the status bar could stay on `Preparing...` while running an extra preflight Docling quality probe before extraction.
 - Add first-start guidance in README/docs and a one-time startup toast warning that initial Docker/Podman image pulls/build steps may take 10+ minutes.
 - Add a deduplicated Zotero connection-error toast when the configured Zotero Local API is unreachable.
 - Change the default cross-encoder reranker preset to `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (fast multilingual) for new setups.
