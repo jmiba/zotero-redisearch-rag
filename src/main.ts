@@ -10477,12 +10477,21 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!this.isLocalRedisHost(parsed.hostname || "")) {
       return rawValue;
     }
+    if (parsed.protocol === "redis:" && this.settings.autoStartRedis) {
+      // In worker runtime, prefer the compose service network over host loopback.
+      parsed.hostname = REDIS_STACK_SERVICE;
+      parsed.port = "6379";
+      return parsed.toString();
+    }
     parsed.hostname = this.getWorkerHostAlias();
     return parsed.toString();
   }
 
   private mapPythonArgsForWorker(args: string[]): string[] {
-    return args.map((arg) => {
+    return args.map((arg, index) => {
+      if (index > 0 && args[index - 1] === "--redis-url") {
+        return this.mapUrlForPythonWorker(arg);
+      }
       const mappedUrl = this.mapUrlForPythonWorker(arg);
       if (mappedUrl !== arg) {
         return mappedUrl;

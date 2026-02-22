@@ -11,7 +11,10 @@ pypdf
 pytesseract
 pyzotero
 redis
-requests
+requests==2.32.3
+urllib3<3,>=2.2.2
+charset-normalizer<4,>=3.3.2
+chardet<6,>=5.2.0
 sentence-transformers
 stopwordsiso
 tqdm

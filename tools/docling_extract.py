@@ -1933,9 +1933,17 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         aff_url = base_url + aff_name
         dic_url = base_url + dic_name
         out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
-        os.makedirs(out_dir, exist_ok=True)
-        aff_path = os.path.join(out_dir, f"{lang_code}.aff")
-        dic_path = os.path.join(out_dir, f"{lang_code}.dic")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as exc:
+            LOGGER.warning(
+                "Spellchecker: cannot create hunspell cache dir %s (%s); skipping dictionary download",
+                out_dir,
+                exc,
+            )
+            out_dir = ""
+        aff_path = os.path.join(out_dir, f"{lang_code}.aff") if out_dir else ""
+        dic_path = os.path.join(out_dir, f"{lang_code}.dic") if out_dir else ""
         def download(url, out_path):
             try:
                 import urllib.request
@@ -1945,9 +1953,9 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
             except Exception as exc:
                 print(f"Failed to download {url}: {exc}")
                 return False
-        ok_aff = download(aff_url, aff_path)
-        ok_dic = download(dic_url, dic_path)
-        if ok_aff and ok_dic:
+        ok_aff = download(aff_url, aff_path) if aff_path else False
+        ok_dic = download(dic_url, dic_path) if dic_path else False
+        if ok_aff and ok_dic and out_dir:
             print(f"Successfully downloaded Hunspell dictionary for {lang_code} to {out_dir}")
         # Try to resolve again
         pairs = resolve_paths()
@@ -4925,7 +4933,11 @@ def main() -> int:
         aff_url = base_url + aff_name
         dic_url = base_url + dic_name
         out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
-        os.makedirs(out_dir, exist_ok=True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as exc:
+            print(f"Failed to create Hunspell output directory {out_dir}: {exc}")
+            return 1
         aff_path = os.path.join(out_dir, f"{lang_code}.aff")
         dic_path = os.path.join(out_dir, f"{lang_code}.dic")
         def download(url, out_path):

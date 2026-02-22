@@ -7,6 +7,7 @@ RUN set -eux; \
   apt-get update; \
   apt-get install -y --no-install-recommends \
     ca-certificates \
+    ccache \
     gcc \
     g++ \
     libglib2.0-0 \
