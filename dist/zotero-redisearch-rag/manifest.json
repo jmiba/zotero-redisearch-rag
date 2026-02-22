@@ -1,10 +1,10 @@
 {
   "id": "zotero-redisearch-rag",
   "name": "Zotero Research Assistant",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "minAppVersion": "1.5.0",
   "isDesktopOnly": true,
-  "description": "Zotero import, Docling extraction, and Redis Stack indexing for RAG in Obsidian",
+  "description": "Import Zotero PDFs into Obsidian and chat with cited answers using local Redis-powered RAG.",
   "author": "Jens Mittelbach",
   "authorUrl": "https://www.jensmittelbach.de"
 }

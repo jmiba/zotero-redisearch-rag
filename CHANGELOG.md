@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.2 (Patch Release)
+
+- Add metadata auto-create sync so newly populated Zotero metadata fields are written into Obsidian YAML even when the key was previously missing.
+- Add one-sided note -> Zotero auto-sync for newly created core bibliographic fields when Zotero is empty (`title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `authors`, `editors`).
+- Make annotation color changes deterministic in sync by tracking annotation `color_key` in annotation snapshots and forcing note refresh when color changes.
+- Rename docs page `docs/annotations.md` to `docs/metadata-and-annotations.md` and expand documentation with detailed metadata/annotation sync behavior and conflict model.
+
 ## 0.9.1 (Patch Release)
 
 - Rebrand the plugin display name to **Zotero Research Assistant** across Obsidian UI labels and user-facing docs.
