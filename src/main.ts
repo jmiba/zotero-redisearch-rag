@@ -5100,8 +5100,29 @@ export default class ZoteroRagPlugin extends Plugin {
         authors: "authors",
         editors: "editors",
       };
+      const frontmatterPresence = Object.fromEntries(
+        fieldOrder.map((field) => [field, this.hasFrontmatterKey(frontmatter, frontmatterKeys[field])])
+      ) as Record<keyof NoteMetadataFields, boolean>;
+      const autoPushToZoteroFields = new Set<keyof NoteMetadataFields>([
+        "title",
+        "short_title",
+        "citekey",
+        "date",
+        "abstract",
+        "doi",
+        "publisher",
+        "place",
+        "issue",
+        "volume",
+        "pages",
+        "item_type",
+        "authors",
+        "editors",
+      ]);
       const activeFields = fieldOrder.filter((field) =>
-        this.hasFrontmatterKey(frontmatter, frontmatterKeys[field])
+        frontmatterPresence[field]
+        || !this.isMetadataValueEmpty(noteFields[field])
+        || !this.isMetadataValueEmpty(zoteroFields[field])
       );
       if (!activeFields.length) {
         return;
@@ -5131,7 +5152,21 @@ export default class ZoteroRagPlugin extends Plugin {
         if (this.metadataValuesEqual(field, noteValue, zoteroValue)) {
           continue;
         }
+        const noteEmpty = this.isMetadataValueEmpty(noteValue);
+        const zoteroEmpty = this.isMetadataValueEmpty(zoteroValue);
         const snapshotValue = snapshot?.[field];
+        if (snapshotValue === undefined) {
+          if (noteEmpty && !zoteroEmpty) {
+            decisions[field] = "zotero";
+            this.assignMetadataUpdate(noteUpdates, field, zoteroValue);
+            continue;
+          }
+          if (!noteEmpty && zoteroEmpty && autoPushToZoteroFields.has(field)) {
+            decisions[field] = "note";
+            this.assignMetadataUpdate(zoteroUpdates, field, noteValue);
+            continue;
+          }
+        }
         if (snapshotValue !== undefined) {
           const noteChanged = !this.metadataValuesEqual(field, noteValue, snapshotValue);
           const zoteroChanged = !this.metadataValuesEqual(field, zoteroValue, snapshotValue);

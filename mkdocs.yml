@@ -39,7 +39,7 @@ nav:
       - Daily Workflow: daily-workflow.md
       - Chat Panel: chat-panel.md
       - PDF Handling: pdf-handling.md
-      - Annotations: annotations.md
+      - Metadata and Annotations: metadata-and-annotations.md
   - Reference:
       - Retrieval and Ranking: retrieval-ranking.md
       - Settings Reference: settings-reference.md

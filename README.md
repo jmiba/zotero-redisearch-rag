@@ -46,8 +46,29 @@ You can edit chunk text directly in the note. On save, the plugin updates the ca
 ## Zotero sync (metadata + annotations)
 
 The plugin syncs metadata and annotations from your Zotero library when you import or re-sync an item.
-Metadata updates (`title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `tags`, `authors`, `editors`) refresh the note frontmatter. Annotation changes
-update the note body, and any edits you make inside a chunk are preserved unless you remove that chunk.
+
+Metadata fields tracked bidirectionally are:
+- `title`
+- `short_title`
+- `citekey`
+- `date`
+- `abstract`
+- `doi`
+- `publisher`
+- `place`
+- `issue`
+- `volume`
+- `pages`
+- `item_type`
+- `tags`
+- `authors`
+- `editors`
+
+Auto-create behavior for newly populated fields:
+- Zotero -> Obsidian: if a tracked field is missing in YAML and Zotero has a value, the field is created in note frontmatter.
+- Obsidian -> Zotero: if a tracked core bibliographic field is newly created in the note and Zotero is empty, it is pushed to Zotero (`title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `authors`, `editors`).
+
+Annotation changes update the note body, and any edits you make inside a chunk are preserved unless you remove that chunk.
 
 For `citekey`, Zotero -> note sync always applies (including Better BibTeX-generated keys). Note -> Zotero sync writes `Citation Key: ...` to Zotero `Extra`, so editing `citekey` in Obsidian updates the Zotero item.
 

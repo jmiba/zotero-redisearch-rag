@@ -12,7 +12,7 @@ The notes it creates are normal Obsidian notes that you can edit. Sync markers a
 - [Daily Workflow](daily-workflow.md)
 - [Chat Panel](chat-panel.md)
 - [PDF Handling](pdf-handling.md)
-- [Annotations](annotations.md)
+- [Metadata and Annotations](metadata-and-annotations.md)
 - [Retrieval and Ranking](retrieval-ranking.md)
 - [Settings Reference](settings-reference.md)
 - [Templating Reference](templating-reference.md)
