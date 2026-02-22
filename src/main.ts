@@ -10471,13 +10471,13 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch {
       return rawValue;
     }
-    if (!["http:", "https:", "redis:", "rediss:"].includes(parsed.protocol)) {
+    if (!["http:", "https:", "redis:", "rediss:", "redis+tls:"].includes(parsed.protocol)) {
       return rawValue;
     }
     if (!this.isLocalRedisHost(parsed.hostname || "")) {
       return rawValue;
     }
-    if (parsed.protocol === "redis:" && this.settings.autoStartRedis) {
+    if (parsed.protocol === "redis:" || parsed.protocol === "rediss:" || parsed.protocol === "redis+tls:") {
       // In worker runtime, prefer the compose service network over host loopback.
       parsed.hostname = REDIS_STACK_SERVICE;
       parsed.port = "6379";
@@ -10491,6 +10491,10 @@ export default class ZoteroRagPlugin extends Plugin {
     return args.map((arg, index) => {
       if (index > 0 && args[index - 1] === "--redis-url") {
         return this.mapUrlForPythonWorker(arg);
+      }
+      if (arg.startsWith("--redis-url=")) {
+        const value = arg.slice("--redis-url=".length);
+        return `--redis-url=${this.mapUrlForPythonWorker(value)}`;
       }
       const mappedUrl = this.mapUrlForPythonWorker(arg);
       if (mappedUrl !== arg) {
@@ -11643,6 +11647,55 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
+  private async ensureWorkerRedisService(
+    context: ComposeProjectContext,
+    startIfStopped: boolean
+  ): Promise<void> {
+    if (!this.settings.autoStartRedis) {
+      return;
+    }
+    if (!this.isLocalRedisHost(this.getRedisHostFromUrl())) {
+      return;
+    }
+    const isRunning = await this.isComposeProjectRunning(
+      context.composeCommand.command,
+      context.composeCommand.argsPrefix,
+      context.composePath,
+      context.project,
+      context.composeEnv,
+      [REDIS_STACK_SERVICE]
+    );
+    if (!isRunning && startIfStopped) {
+      const upArgs = [
+        ...context.composeCommand.argsPrefix,
+        "-p",
+        context.project,
+        "-f",
+        context.composePath,
+        "up",
+        "-d",
+        REDIS_STACK_SERVICE,
+      ];
+      await this.runCommand(context.composeCommand.command, upArgs, {
+        cwd: path.dirname(context.composePath),
+        env: context.composeEnv,
+      });
+    }
+    const confirmed = await this.isComposeProjectRunning(
+      context.composeCommand.command,
+      context.composeCommand.argsPrefix,
+      context.composePath,
+      context.project,
+      context.composeEnv,
+      [REDIS_STACK_SERVICE]
+    );
+    if (!confirmed) {
+      throw new Error(
+        "Redis service is not running. Start Redis stack now or enable Auto-start Redis stack."
+      );
+    }
+  }
+
   private async ensurePythonWorkerContext(startIfStopped: boolean): Promise<ComposeProjectContext> {
     const dataDir = this.getRedisDataDir();
     await fs.mkdir(dataDir, { recursive: true });
@@ -11680,6 +11733,7 @@ export default class ZoteroRagPlugin extends Plugin {
         "Python worker is not running. Start Redis stack now or enable Auto-start Redis stack."
       );
     }
+    await this.ensureWorkerRedisService(context, startIfStopped);
     await this.waitForPythonWorkerReady(context);
     return context;
   }

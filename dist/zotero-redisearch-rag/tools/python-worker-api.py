@@ -12,6 +12,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 TOOLS_ROOT = Path("/workspace/plugin/tools").resolve()
 MAX_BODY_BYTES = int(os.environ.get("ZRR_WORKER_MAX_BODY_BYTES", "1048576"))
@@ -77,6 +78,60 @@ def parse_rag_args(module: Any, args: List[str]) -> argparse.Namespace:
         raise ValueError(f"Invalid arguments for {RAG_TOOL_NAME} (exit={code}).") from exc
 
 
+def _is_local_redis_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"localhost", "0.0.0.0", "::1"}:
+        return True
+    return normalized.startswith("127.")
+
+
+def _rewrite_worker_redis_url(raw_url: str) -> str:
+    trimmed = (raw_url or "").strip()
+    if not trimmed:
+        return raw_url
+    try:
+        parsed = urlsplit(trimmed)
+    except Exception:
+        return raw_url
+    if parsed.scheme not in {"redis", "rediss", "redis+tls"}:
+        return raw_url
+    if not _is_local_redis_host(parsed.hostname or ""):
+        return raw_url
+    # Worker container must use compose service DNS instead of local loopback.
+    netloc = parsed.netloc
+    if "@" in netloc:
+        userinfo, _host = netloc.rsplit("@", 1)
+        new_netloc = f"{userinfo}@redis-stack:6379"
+    else:
+        new_netloc = "redis-stack:6379"
+    rewritten = urlunsplit((parsed.scheme, new_netloc, parsed.path, parsed.query, parsed.fragment))
+    return rewritten or raw_url
+
+
+def rewrite_redis_args_for_worker(args: List[str]) -> Tuple[List[str], List[Tuple[str, str]]]:
+    rewritten: List[str] = []
+    changes: List[Tuple[str, str]] = []
+    previous = ""
+    for arg in args:
+        updated = arg
+        if previous == "--redis-url":
+            candidate = _rewrite_worker_redis_url(arg)
+            if candidate != arg:
+                changes.append((arg, candidate))
+            updated = candidate
+        elif arg.startswith("--redis-url="):
+            original_value = arg.split("=", 1)[1]
+            updated_value = _rewrite_worker_redis_url(original_value)
+            if updated_value != original_value:
+                changes.append((original_value, updated_value))
+            updated = f"--redis-url={updated_value}"
+        rewritten.append(updated)
+        previous = arg
+    return rewritten, changes
+
+
 def parse_run_request(payload: Dict[str, Any]) -> Tuple[Path, List[str], int]:
     tool = payload.get("tool")
     if not isinstance(tool, str) or not tool.strip():
@@ -96,6 +151,7 @@ def parse_run_request(payload: Dict[str, Any]) -> Tuple[Path, List[str], int]:
     if not isinstance(raw_args, list):
         raise ValueError("'args' must be a JSON array.")
     args = [str(value) for value in raw_args]
+    args, _changes = rewrite_redis_args_for_worker(args)
 
     timeout_sec = payload.get("timeout_sec")
     if timeout_sec is None:

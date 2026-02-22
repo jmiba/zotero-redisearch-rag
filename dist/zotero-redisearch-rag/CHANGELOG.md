@@ -1,7 +1,13 @@
 # Changelog
+## 0.9.6 (Bugfix Release)
+- Fix worker-mode Redis `Connection refused` failures on Windows by hardening Redis URL rewriting in worker requests, including `redis://`, `rediss://`, and `redis+tls://` loopback URLs.
+- Add support for both `--redis-url <url>` and `--redis-url=<url>` argument styles when mapping worker Redis endpoints.
+- Add a defensive Redis URL rewrite inside `python-worker-api.py` so local loopback Redis URLs are remapped to `redis-stack:6379` before tool execution.
+
 ## 0.9.5 (Bugfix Release)
 - Fix worker-mode Docling failure on read-only plugin mounts (e.g., Windows containers) by skipping on-demand Hunspell dictionary downloads when `tools/hunspell` is not writable.
 - Fix worker-mode Redis indexing on Windows by mapping local `redis://127.0.0.1/...` URLs to the internal compose service (`redis-stack:6379`) when auto-started stack is used.
+- Ensure worker-mode auto-start also brings up the `redis-stack` compose service before Python-worker indexing operations.
 - Reduce noisy worker dependency warnings by pinning a compatible `requests` HTTP stack and installing `ccache` in the Python worker image.
 
 ## 0.9.4 (Bugfix Release)
