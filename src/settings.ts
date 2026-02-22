@@ -36,16 +36,16 @@ export const METADATA_SNAPSHOT_PATH = `${CACHE_ROOT}/metadata_snapshots.json`;
 export const ANNOTATION_SNAPSHOT_PATH = `${CACHE_ROOT}/annotation_snapshots.json`;
 const COMPANION_XPI_URL =
   "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi";
-const DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3";
+const DEFAULT_RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1";
 const CUSTOM_RERANK_MODEL_VALUE = "__custom__";
 const RERANK_MODEL_PRESETS: Array<{ value: string; label: string }> = [
   {
-    value: "BAAI/bge-reranker-v2-m3",
-    label: "BAAI/bge-reranker-v2-m3 (Best quality, heaviest)",
-  },
-  {
     value: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
     label: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 (Fast multilingual)",
+  },
+  {
+    value: "BAAI/bge-reranker-v2-m3",
+    label: "BAAI/bge-reranker-v2-m3 (Best quality, heaviest)",
   },
   {
     value: "jinaai/jina-reranker-v2-base-multilingual",
@@ -67,6 +67,7 @@ export interface ZoteroRagSettings {
   pythonEnvLocation: "shared" | "plugin";
   dockerPath: string;
   autoStartRedis: boolean;
+  firstContainerStartupNoticeShown: boolean;
   copyPdfToVault: boolean;
   frontmatterTemplate: string;
   noteBodyTemplate: string;
@@ -159,6 +160,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   redisDataDirOverride: "",
   redisProjectName: "",
   autoStartRedis: true,
+  firstContainerStartupNoticeShown: false,
 
   // Zotero Local API
   zoteroBaseUrl: "http://127.0.0.1:23119/api",

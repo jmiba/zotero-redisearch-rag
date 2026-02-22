@@ -14,7 +14,7 @@ Metadata and annotations are refreshed automatically when you **open** or **save
 
 Synced metadata fields: `title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `tags`, `authors`, `editors`.
 
-`citekey` from Zotero always updates the note (including Better BibTeX-generated keys). Editing `citekey` in the note writes `Citation Key: ...` into Zotero `Extra`.
+`citekey` from Zotero always updates the note (including Better BibTeX-generated keys). Editing `citekey` in the note writes native Zotero `citationKey` and also updates `Citation Key: ...` in `Extra` for compatibility.
 
 If you want a full refresh (including text extraction), re‑run the import command on the same item. The plugin will update the cached files and the index.
 

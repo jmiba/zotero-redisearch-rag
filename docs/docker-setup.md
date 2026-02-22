@@ -43,6 +43,11 @@ In **Settings → Prerequisites**:
 
 Then click **Start Redis stack now** once to validate setup.
 
+Important first-start note:
+
+- The first startup can take several minutes because Docker/Podman may need to pull base images and build worker dependencies.
+- On slower connections or machines, this can take 10+ minutes.
+
 Optional: customize OCR language packs baked into the worker image with `ZRR_TESSERACT_LANG_PACKS`.
 Default is `eng deu fra spa ita nld por pol swe`.
 

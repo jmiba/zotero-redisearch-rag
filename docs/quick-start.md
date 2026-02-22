@@ -42,6 +42,7 @@ In Obsidian, run:
 - **Command palette → Start Redis Stack (Docker/Podman Compose)**
 
 If Docker or Podman isn’t running, start it first.
+First startup can be slow because Docker/Podman may need to pull images and build worker dependencies. On slower networks/machines this can take 10+ minutes.
 
 ## 4) Start a model provider
 Use any OpenAI‑compatible local server or a cloud provider.
@@ -61,7 +62,7 @@ Default (recommended):
 1. Open **Settings → Community plugins → Zotero Research Assistant → Prerequisites**.
 2. Keep **Advanced Python runtime options** disabled (default).
 3. Click **Start Redis stack now**.
-4. Wait for startup to finish (first run may take longer while worker dependencies install).
+4. Wait for startup to finish (first run may take 10+ minutes while images and worker dependencies are prepared).
 
 Fallback (terminal, local runtime mode only):
 

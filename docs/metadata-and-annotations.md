@@ -32,7 +32,7 @@ Bidirectional metadata fields:
 - `authors`
 - `editors`
 
-`citekey` note -> Zotero writes to Zotero `Extra` as `Citation Key: ...`.
+`citekey` note -> Zotero writes Zotero's native `citationKey` and also updates `Extra` as `Citation Key: ...` for compatibility.
 
 ## Metadata key matching in YAML
 

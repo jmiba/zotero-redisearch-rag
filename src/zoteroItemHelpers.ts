@@ -77,20 +77,24 @@ export const formatCreatorName = (creator: any): string => {
 
 export const extractCitekey = (values: ZoteroItemValues, meta?: Record<string, any>): string => {
   const candidates = [
-    meta?.["citation-key"],
-    meta?.citationKey,
-    meta?.citationkey,
-    meta?.citekey,
-    meta?.citeKey,
-    meta?.betterBibtexKey,
-    meta?.betterbibtexkey,
-    values["citation-key"],
+    // Prefer Zotero's native citation-key field variants first.
     values.citationKey,
+    values["citation-key"],
+    values.citation_key,
+    meta?.citationKey,
+    meta?.["citation-key"],
+    meta?.citation_key,
+    // Then fall back to compatibility fields (e.g. Better BibTeX payloads).
     values.citationkey,
     values.citekey,
     values.citeKey,
     values.betterBibtexKey,
     values.betterbibtexkey,
+    meta?.citationkey,
+    meta?.citekey,
+    meta?.citeKey,
+    meta?.betterBibtexKey,
+    meta?.betterbibtexkey,
   ];
   for (const candidate of candidates) {
     const resolved = coerceString(candidate);

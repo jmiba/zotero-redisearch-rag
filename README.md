@@ -70,7 +70,7 @@ Auto-create behavior for newly populated fields:
 
 Annotation changes update the note body, and any edits you make inside a chunk are preserved unless you remove that chunk.
 
-For `citekey`, Zotero -> note sync always applies (including Better BibTeX-generated keys). Note -> Zotero sync writes `Citation Key: ...` to Zotero `Extra`, so editing `citekey` in Obsidian updates the Zotero item.
+For `citekey`, Zotero -> note sync always applies (including Better BibTeX-generated keys). Note -> Zotero sync writes Zotero's native `citationKey` and also updates `Citation Key: ...` in `Extra` for compatibility.
 
 **Note:** Edits inside chunks are preserved, but deleting a chunk marker removes its sync target!
 
@@ -223,6 +223,7 @@ Then copy the plugin folder to your vault as above.
 ### 3) Start Redis Stack
 Recommended: start from the plugin
 - Command palette -> "Start Redis Stack (Docker/Podman Compose)"
+- First startup can be slow: Docker/Podman may need to pull images and build worker dependencies. This can take several minutes, and on slower networks/machines can take 10+ minutes.
 
 Settings related to Redis (Settings → Prerequisites):
 - Python runtime: defaults to `Python worker container` (recommended).
@@ -273,7 +274,7 @@ Recommended (worker mode):
 
 1. Keep **Settings → Prerequisites → Advanced Python runtime options** disabled (default).
 2. Click **Start Redis stack now**.
-3. Wait for first startup to finish (worker venv dependencies are installed on first run).
+3. Wait for first startup to finish (container image pulls/build steps run on first start and may take 10+ minutes).
 
 Migration note:
 - Legacy installs that previously relied on implicit local runtime defaults are migrated to worker mode automatically.

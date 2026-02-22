@@ -43,6 +43,7 @@ For scanned PDFs:
 ## Redis Stack start failures
 
 Docker/Podman will **pull** the image (if missing) and then create a container.
+On first startup, this can take several minutes, and on slower networks/machines can take 10+ minutes.
 If no Redis container appears (or it exits immediately), or the Python worker fails to come up, common causes to check:
 
 - **Missing file sharing configuration**: Docker Desktop/Podman Desktop must allow mounting your vault path (and plugin/tools path if separate). Typical errors include `Mounts denied` or `operation not permitted`.

@@ -3823,7 +3823,8 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async searchZoteroItemsWeb(query: string): Promise<ZoteroLocalItem[]> {
     const trimmedQuery = query.trim();
-    const includeOptions = ["data,meta"];
+    // Web API does not accept `meta` in `include` for item listings.
+    const includeOptions = ["data"];
     for (const include of includeOptions) {
       const params = new URLSearchParams();
       params.set("itemType", "-attachment");
@@ -4024,17 +4025,82 @@ export default class ZoteroRagPlugin extends Plugin {
     values: ZoteroItemValues,
     updates: Partial<ZoteroItemValues>
   ): Promise<void> {
+    const retryWithoutNativeCitationKey = async (
+      updater: (nextUpdates: Partial<ZoteroItemValues>) => Promise<void>,
+      error: unknown
+    ): Promise<boolean> => {
+      const fallbackUpdates = this.buildCitationKeyFallbackUpdates(updates);
+      if (!fallbackUpdates || !this.isCitationKeyFieldUnsupportedError(error)) {
+        return false;
+      }
+      console.info("Retrying Zotero metadata update without native citationKey field", { itemKey });
+      await updater(fallbackUpdates);
+      return true;
+    };
+
     try {
       await this.updateZoteroItemFieldsLocal(itemKey, values, updates);
       return;
     } catch (error) {
+      if (
+        await retryWithoutNativeCitationKey(
+          (nextUpdates) => this.updateZoteroItemFieldsLocal(itemKey, values, nextUpdates),
+          error
+        )
+      ) {
+        return;
+      }
       if (!this.canUseWebApi()) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
       console.info("Local Zotero write failed; trying Web API", { itemKey, reason: message });
-      await this.updateZoteroItemFieldsWeb(itemKey, values, updates);
+      try {
+        await this.updateZoteroItemFieldsWeb(itemKey, values, updates);
+      } catch (webError) {
+        if (
+          await retryWithoutNativeCitationKey(
+            (nextUpdates) => this.updateZoteroItemFieldsWeb(itemKey, values, nextUpdates),
+            webError
+          )
+        ) {
+          return;
+        }
+        throw webError;
+      }
     }
+  }
+
+  private buildCitationKeyFallbackUpdates(
+    updates: Partial<ZoteroItemValues>
+  ): Partial<ZoteroItemValues> | null {
+    if (!Object.prototype.hasOwnProperty.call(updates, "citationKey")) {
+      return null;
+    }
+    const fallback = { ...updates };
+    delete (fallback as Record<string, unknown>).citationKey;
+    return fallback;
+  }
+
+  private isCitationKeyFieldUnsupportedError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message) {
+      return false;
+    }
+    const lower = message.toLowerCase();
+    if (!lower.includes("citationkey") && !lower.includes("citation-key") && !lower.includes("citation key")) {
+      return false;
+    }
+    return (
+      lower.includes("unknown field")
+      || lower.includes("unknown property")
+      || lower.includes("invalid field")
+      || lower.includes("invalid property")
+      || lower.includes("unsupported")
+      || lower.includes("cannot be set")
+      || lower.includes("not allowed")
+      || lower.includes("status 400")
+    );
   }
 
   private async updateZoteroItemFieldsLocal(
@@ -6951,7 +7017,9 @@ export default class ZoteroRagPlugin extends Plugin {
       payload.shortTitle = updates.short_title ?? "";
     }
     if ("citekey" in updates) {
-      payload.extra = this.updateExtraWithCitekey(values?.extra, updates.citekey ?? "");
+      const citekey = updates.citekey ?? "";
+      payload.citationKey = citekey;
+      payload.extra = this.updateExtraWithCitekey(values?.extra, citekey);
     }
     if ("date" in updates) {
       payload.date = updates.date ?? "";
@@ -7862,6 +7930,39 @@ export default class ZoteroRagPlugin extends Plugin {
     return `${base}${pathname}`;
   }
 
+  private isZoteroLocalApiRequest(url: string): boolean {
+    const configuredBase = (this.settings.zoteroBaseUrl || "").trim();
+    if (!configuredBase) {
+      return false;
+    }
+    try {
+      const requestUrl = new URL(url);
+      const baseUrl = new URL(configuredBase);
+      const requestPort = requestUrl.port || (requestUrl.protocol === "https:" ? "443" : "80");
+      const basePort = baseUrl.port || (baseUrl.protocol === "https:" ? "443" : "80");
+      if (
+        requestUrl.protocol !== baseUrl.protocol ||
+        requestUrl.hostname !== baseUrl.hostname ||
+        requestPort !== basePort
+      ) {
+        return false;
+      }
+      const basePath = baseUrl.pathname.replace(/\/$/, "");
+      if (!basePath || basePath === "/") {
+        return true;
+      }
+      return requestUrl.pathname === basePath || requestUrl.pathname.startsWith(`${basePath}/`);
+    } catch {
+      return false;
+    }
+  }
+
+  private notifyZoteroLocalApiConnectionError(): void {
+    this.notifyZoteroApiOnce(
+      "Zotero connection error. Start Zotero and enable 'Allow other applications on this computer to communicate with Zotero' in Settings -> Advanced -> General."
+    );
+  }
+
   private requestLocalApiRaw(
     url: string,
     options: {
@@ -7872,6 +7973,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } = {}
   ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
     return new Promise((resolve, reject) => {
+      const isZoteroLocalApiRequest = this.isZoteroLocalApiRequest(url);
       const parsed = new URL(url);
       const lib = parsed.protocol === "https:" ? https : http;
       const method = options.method ?? "GET";
@@ -7901,6 +8003,9 @@ export default class ZoteroRagPlugin extends Plugin {
             if (timeoutId) {
               clearTimeout(timeoutId);
             }
+            if (isZoteroLocalApiRequest) {
+              this.lastZoteroApiNotice = null;
+            }
             const body = Buffer.concat(chunks);
             resolve({
               statusCode: response.statusCode ?? 0,
@@ -7919,6 +8024,9 @@ export default class ZoteroRagPlugin extends Plugin {
       request.on("error", (error) => {
         if (timeoutId) {
           clearTimeout(timeoutId);
+        }
+        if (isZoteroLocalApiRequest) {
+          this.notifyZoteroLocalApiConnectionError();
         }
         reject(error);
       });
@@ -11015,6 +11123,22 @@ export default class ZoteroRagPlugin extends Plugin {
     };
   }
 
+  private async maybeShowFirstContainerStartupNotice(silent?: boolean): Promise<void> {
+    if (silent || this.settings.firstContainerStartupNoticeShown) {
+      return;
+    }
+    this.settings.firstContainerStartupNoticeShown = true;
+    try {
+      await this.saveSettings();
+    } catch (error) {
+      console.warn("Failed to persist first container startup notice flag", error);
+    }
+    new Notice(
+      "First container startup can take several minutes (sometimes 10+ minutes) while images are pulled and worker dependencies are built.",
+      16000
+    );
+  }
+
   private async autoDetectContainerCliOnLoad(): Promise<void> {
     const resolved = await this.resolveDockerPath();
     if (!(await this.isContainerCliAvailable(resolved))) {
@@ -11411,6 +11535,7 @@ export default class ZoteroRagPlugin extends Plugin {
             if (await this.isRedisReachable(redisUrl)) {
               notifySharedRedisHint();
               if (this.usePythonWorker()) {
+                await this.maybeShowFirstContainerStartupNotice(silent);
                 await this.startPythonWorkerService(composeContext);
               }
             } else if (!silent) {
@@ -11425,6 +11550,7 @@ export default class ZoteroRagPlugin extends Plugin {
         if (await this.isRedisReachable(redisUrl)) {
           notifySharedRedisHint();
           if (this.usePythonWorker()) {
+            await this.maybeShowFirstContainerStartupNotice(silent);
             await this.startPythonWorkerService(composeContext);
           }
           return;
@@ -11445,6 +11571,7 @@ export default class ZoteroRagPlugin extends Plugin {
         upArgs.push("--build");
       }
       upArgs.push(...requiredServices);
+      await this.maybeShowFirstContainerStartupNotice(silent);
       await this.runCommand(composeCommand.command, upArgs, {
         cwd: path.dirname(composePath),
         env: composeEnv,
