@@ -17,3 +17,13 @@ Yes. You can edit inside chunks. Just avoid deleting the chunk markers unless yo
 - Enable **Auto‑assign Redis port** for multi‑vault setups.
 - Reindex from cache instead of re‑running OCR when possible.
 - If queries feel slow, consider enabling a local LLM server and embeddings model.
+
+## Can two vaults use the same Redis project/data-dir overrides?
+They can, but both vaults will use the same compose project and containers.
+
+In worker mode, this is risky when both vaults are active: the worker container mounts one vault at `/workspace/vault`, so the other vault can hit missing-file errors.
+
+Best practice:
+
+- Use different project/data-dir overrides per vault (or keep **Auto-assign Redis port** on).
+- Reuse the same overrides only when you intentionally want a shared stack and accept single-active-vault import/reindex behavior.

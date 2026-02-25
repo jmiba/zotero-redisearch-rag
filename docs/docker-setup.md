@@ -79,4 +79,13 @@ docker compose logs python-worker
 - **Compose unavailable**: Podman needs `podman compose` or `podman-compose`.
 - **Port conflict**: `6379` already in use (enable **Auto-assign Redis port**).
 - **Invalid override paths**: custom Redis data/project override folders are missing or not writable.
+- **Multi-vault shared override conflict**: if two vaults use the same project/data-dir overrides, they share one compose project. In worker mode this can cause `/workspace/vault/...` missing-path errors when both vaults run concurrently.
 - **Network/auth issues**: image pull blocked by proxy, firewall, or credential errors.
+
+## Recommended multi-vault setup
+
+- Prefer one compose project per vault.
+- Keep **Auto-assign Redis port** enabled for multi-vault use, or set unique overrides per vault:
+  - unique **Redis project name override**
+  - unique **Redis data directory override**
+- Only reuse identical overrides across vaults if you intentionally want one shared stack and accept single-active-vault import/reindex behavior.

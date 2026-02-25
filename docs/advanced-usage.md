@@ -29,3 +29,21 @@ Use the CLI tools when you need:
 If multiple vaults share a Redis instance, the plugin namespaces the index and key prefix with a vault‑specific hash. This prevents chunks from different vaults from mixing.
 
 If you enable **Auto‑assign Redis port**, each vault can start its own Redis instance on a unique local port.
+
+## Shared compose project overrides across vaults
+If two vaults use the same values for:
+
+- **Redis data directory override**
+- **Redis project name override**
+
+and **Auto-assign Redis port** is off, both vaults will attach to the same Docker/Podman Compose project and containers.
+
+This can be useful for intentional sharing, but it has an important constraint in worker mode:
+
+- The `python-worker` container mounts one vault path at `/workspace/vault`.
+- If a second vault reuses the same project, worker file lookups can point to the wrong mounted vault and fail with missing-path errors under `/workspace/vault/...`.
+
+Recommendations:
+
+- For two vaults open at the same time, use different project names and different data directory overrides (or enable **Auto-assign Redis port** and keep defaults).
+- Only share one project override intentionally if you treat it as a single active vault for import/reindex operations.
