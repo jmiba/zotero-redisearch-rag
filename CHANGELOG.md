@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.7 (Bugfix Release)
+- Fix Redis/Python worker startup failures caused by stale container-name conflicts by auto-removing conflicting project containers and retrying startup once.
+- Improve Zotero annotation deletion propagation to notes by detecting missing Zotero annotations and refreshing note annotation blocks accordingly.
+- Guard annotation-prune sync against incomplete Zotero fetches to avoid accidental removals when annotation APIs fail.
+- Add a focus-triggered annotation sync so note updates are pulled shortly after returning to Obsidian.
+- Preserve Zotero annotation order within each heading by prioritizing Zotero sort tokens (`annotationSortIndex` / `annotationSort`) during block rendering.
+
 ## 0.9.6 (Bugfix Release)
 - Fix worker-mode Redis `Connection refused` failures on Windows by hardening Redis URL rewriting in worker requests, including `redis://`, `rediss://`, and `redis+tls://` loopback URLs.
 - Add support for both `--redis-url <url>` and `--redis-url=<url>` argument styles when mapping worker Redis endpoints.

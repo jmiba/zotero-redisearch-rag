@@ -186,6 +186,7 @@ type AnnotationEntry = {
   text: string;
   comment: string;
   tags: string[];
+  sortToken: string;
   sortIndex: number;
   rawValues: ZoteroItemValues;
   imagePath?: string;
@@ -216,6 +217,17 @@ type AnnotationSnapshotEntry = {
 type AnnotationSnapshotCacheEntry = {
   attachment_key?: string;
   annotations: Record<string, AnnotationSnapshotEntry>;
+};
+
+type AttachmentAnnotationFetchResult = {
+  annotations: AnnotationEntry[];
+  hadFetchError: boolean;
+};
+
+type DocumentAnnotationFetchResult = {
+  attachmentKey: string;
+  annotations: AnnotationEntry[];
+  hadFetchError: boolean;
 };
 
 type ComposeCommandSpec = {
@@ -309,6 +321,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerNoteRenameHandler();
     this.registerNoteSyncHandler();
     this.registerNoteOpenHandler();
+    this.registerAnnotationFocusSyncHandler();
     this.registerPreviewScrollSyncHandlers();
     this.registerNoteDeleteMenu();
     this.registerEditorExtension(createChunkToolsExtension(this));
@@ -4254,6 +4267,20 @@ export default class ZoteroRagPlugin extends Plugin {
     );
   }
 
+  private registerAnnotationFocusSyncHandler(): void {
+    this.registerDomEvent(window, "focus", () => {
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      const file = view?.file;
+      if (!(file instanceof TFile) || file.extension !== "md") {
+        return;
+      }
+      if (!this.isZoteroNoteFile(file)) {
+        return;
+      }
+      this.scheduleNoteAnnotationSync(file, 600, "open");
+    });
+  }
+
   private registerPreviewScrollSyncHandlers(): void {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -5369,6 +5396,22 @@ export default class ZoteroRagPlugin extends Plugin {
       for (const annotation of zoteroAnnotations) {
         zoteroMap.set(annotation.key, annotation);
       }
+      let noteEditsDetected = false;
+      let needsNoteRefresh = false;
+      let forceNoteRefresh = false;
+      if (!resolved.hadFetchError) {
+        for (const key of noteMap.keys()) {
+          if (!zoteroMap.has(key)) {
+            needsNoteRefresh = true;
+          }
+        }
+      } else if (noteMap.size > 0 && zoteroAnnotations.length === 0) {
+        console.info("Skipping annotation-prune sync due incomplete Zotero annotation fetch.", {
+          docId,
+          attachmentKey,
+          reason,
+        });
+      }
 
       const snapshot = await this.getAnnotationSnapshot(docId);
       const snapshotMap = snapshot?.annotations ?? {};
@@ -5379,9 +5422,6 @@ export default class ZoteroRagPlugin extends Plugin {
         noteValue: string;
         zoteroValue: string;
       }> = [];
-      let noteEditsDetected = false;
-      let needsNoteRefresh = false;
-      let forceNoteRefresh = false;
       if (attachmentKey && attachmentKey !== originalAttachmentKey && zoteroAnnotations.length > 0) {
         needsNoteRefresh = true;
         forceNoteRefresh = true;
@@ -5806,7 +5846,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const { heading, callout } = this.resolveAnnotationColorMeta(colorKey);
     const { pageLabel, pageIndex } = this.extractAnnotationPageInfo(data);
     const sortRaw = data.annotationSortIndex ?? data.annotationSort;
-    const sortIndex = Number.isFinite(Number(sortRaw)) ? Number(sortRaw) : 0;
+    const sortToken = coerceString(sortRaw).trim();
+    const sortIndex = Number.isFinite(Number(sortToken)) ? Number(sortToken) : Number.NaN;
     const tags = Array.isArray(data.tags)
       ? data.tags
           .map((tag: any) => (typeof tag === "string" ? tag : tag?.tag))
@@ -5824,6 +5865,7 @@ export default class ZoteroRagPlugin extends Plugin {
       text,
       comment,
       tags: this.normalizeAnnotationTags(tags),
+      sortToken,
       sortIndex,
       rawValues: data,
     };
@@ -5831,11 +5873,13 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async fetchZoteroAnnotations(
     attachmentKey: string
-  ): Promise<AnnotationEntry[]> {
+  ): Promise<AttachmentAnnotationFetchResult> {
     if (!attachmentKey) {
-      return [];
+      return { annotations: [], hadFetchError: false };
     }
     const canUseWebApi = this.canUseWebApi() || (await this.ensureWebApiLibraryId());
+    let hadFetchError = false;
+    let webRequestSucceeded = false;
     const parseAnnotations = (children: any[]): AnnotationEntry[] => {
       const annotations: AnnotationEntry[] = [];
       for (const child of children) {
@@ -5857,6 +5901,7 @@ export default class ZoteroRagPlugin extends Plugin {
       try {
         children = await this.fetchZoteroChildrenLocal(attachmentKey);
       } catch (fallbackError) {
+        hadFetchError = true;
         console.warn("Failed to fetch Zotero annotation items from local API", fallbackError);
       }
     }
@@ -5869,28 +5914,40 @@ export default class ZoteroRagPlugin extends Plugin {
         } catch (error) {
           webChildren = await this.fetchZoteroChildrenWeb(attachmentKey);
         }
+        webRequestSucceeded = true;
         const webAnnotations = parseAnnotations(webChildren);
         if (webAnnotations.length) {
           annotations = webAnnotations;
         }
       } catch (error) {
+        hadFetchError = true;
         console.warn("Failed to fetch Zotero annotation items from Web API", error);
       }
     }
-    return annotations;
+    if (!annotations.length && canUseWebApi && !webRequestSucceeded) {
+      hadFetchError = true;
+    }
+    if (!annotations.length && !canUseWebApi) {
+      hadFetchError = true;
+    }
+    return { annotations, hadFetchError };
   }
 
   private async fetchZoteroAnnotationsForDoc(
     docId: string,
     attachmentKey: string
-  ): Promise<{ attachmentKey: string; annotations: AnnotationEntry[] }> {
+  ): Promise<DocumentAnnotationFetchResult> {
     const primaryKey = attachmentKey;
     const primary = await this.fetchZoteroAnnotations(primaryKey);
-    if (primary.length || !docId) {
-      if (!primary.length) {
+    if (primary.annotations.length || !docId) {
+      if (!primary.annotations.length) {
         this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
       }
-      return { attachmentKey: primaryKey, annotations: primary };
+      return {
+        attachmentKey: primaryKey,
+        annotations: primary.annotations,
+        hadFetchError: primary.hadFetchError,
+      };
     }
     let children: any[] = [];
     try {
@@ -5898,8 +5955,13 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       console.warn("Failed to fetch Zotero attachments for annotations", error);
       this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
-      return { attachmentKey: primaryKey, annotations: primary };
+      return {
+        attachmentKey: primaryKey,
+        annotations: primary.annotations,
+        hadFetchError: true,
+      };
     }
+    let hadFetchError = primary.hadFetchError;
     const candidates: string[] = [];
     const seen = new Set<string>(primaryKey ? [primaryKey] : []);
     for (const child of children) {
@@ -5914,13 +5976,22 @@ export default class ZoteroRagPlugin extends Plugin {
       candidates.push(key);
     }
     for (const candidate of candidates) {
-      const annotations = await this.fetchZoteroAnnotations(candidate);
-      if (annotations.length) {
-        return { attachmentKey: candidate, annotations };
+      const result = await this.fetchZoteroAnnotations(candidate);
+      hadFetchError = hadFetchError || result.hadFetchError;
+      if (result.annotations.length) {
+        return {
+          attachmentKey: candidate,
+          annotations: result.annotations,
+          hadFetchError,
+        };
       }
     }
     this.maybeWarnMissingAnnotationApi(docId, attachmentKey);
-    return { attachmentKey: primaryKey, annotations: primary };
+    return {
+      attachmentKey: primaryKey,
+      annotations: primary.annotations,
+      hadFetchError,
+    };
   }
 
   private async attachAnnotationImages(
@@ -9655,13 +9726,26 @@ export default class ZoteroRagPlugin extends Plugin {
       const { heading } = this.resolveAnnotationColorMeta(colorKey);
       lines.push("", `## ${heading}`);
       entries.sort((left, right) => {
+        const leftToken = (left.sortToken || "").trim();
+        const rightToken = (right.sortToken || "").trim();
+        if (leftToken && rightToken && leftToken !== rightToken) {
+          return leftToken.localeCompare(rightToken, undefined, { numeric: true, sensitivity: "base" });
+        }
+        if (leftToken && !rightToken) {
+          return -1;
+        }
+        if (!leftToken && rightToken) {
+          return 1;
+        }
+        const leftSortFinite = Number.isFinite(left.sortIndex);
+        const rightSortFinite = Number.isFinite(right.sortIndex);
+        if (leftSortFinite && rightSortFinite && left.sortIndex !== right.sortIndex) {
+          return left.sortIndex - right.sortIndex;
+        }
         const leftPage = left.pageIndex ?? 0;
         const rightPage = right.pageIndex ?? 0;
         if (leftPage !== rightPage) {
           return leftPage - rightPage;
-        }
-        if (left.sortIndex !== right.sortIndex) {
-          return left.sortIndex - right.sortIndex;
         }
         return left.key.localeCompare(right.key);
       });
@@ -11433,6 +11517,88 @@ export default class ZoteroRagPlugin extends Plugin {
     return true;
   }
 
+  private isContainerNameConflictError(raw: string): boolean {
+    return /container name/i.test(raw) && /already in use/i.test(raw);
+  }
+
+  private extractConflictingContainerNames(raw: string): string[] {
+    const names = new Set<string>();
+    const regex = /container name\s+["']\/?([^"'\s]+)["']/gi;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(raw)) !== null) {
+      const name = String(match[1] || "").trim().replace(/^\/+/, "");
+      if (name) {
+        names.add(name);
+      }
+    }
+    return Array.from(names);
+  }
+
+  private getExpectedComposeContainerNames(project: string, services: string[]): string[] {
+    const serviceSet = new Set<string>([
+      ...services,
+      REDIS_STACK_SERVICE,
+      PYTHON_WORKER_SERVICE,
+    ]);
+    return Array.from(serviceSet).map((service) => `${project}-${service}-1`);
+  }
+
+  private async resolveContainerRuntimeCommandForCompose(
+    context: ComposeProjectContext
+  ): Promise<string | null> {
+    const composeCmd = path.basename(context.composeCommand.command || "");
+    if (composeCmd === "podman-compose") {
+      const explicit = String(context.composeEnv.PODMAN_BIN || "").trim();
+      if (explicit) {
+        return explicit;
+      }
+      return this.resolvePodmanBin();
+    }
+    return context.composeCommand.command || null;
+  }
+
+  private async recoverFromContainerNameConflict(
+    error: unknown,
+    context: ComposeProjectContext,
+    services: string[]
+  ): Promise<boolean> {
+    const raw = error instanceof Error ? error.message : String(error ?? "");
+    if (!this.isContainerNameConflictError(raw)) {
+      return false;
+    }
+    const expected = this.getExpectedComposeContainerNames(context.project, services);
+    const discovered = this.extractConflictingContainerNames(raw);
+    const prefixed = `${context.project}-`;
+    const containerNames = Array.from(new Set([...expected, ...discovered]))
+      .map((name) => name.replace(/^\/+/, "").trim())
+      .filter((name) => name.startsWith(prefixed));
+    if (!containerNames.length) {
+      return false;
+    }
+    const runtimeCommand = await this.resolveContainerRuntimeCommandForCompose(context);
+    if (!runtimeCommand) {
+      return false;
+    }
+    console.warn("Recovering from stale container name conflict", {
+      project: context.project,
+      containers: containerNames,
+    });
+    for (const name of containerNames) {
+      try {
+        await this.runCommand(runtimeCommand, ["rm", "-f", name], {
+          cwd: path.dirname(context.composePath),
+          env: context.composeEnv,
+        });
+      } catch (cleanupError) {
+        console.warn("Failed to remove stale container during conflict recovery", {
+          name,
+          cleanupError,
+        });
+      }
+    }
+    return true;
+  }
+
   async startRedisStack(silent?: boolean): Promise<void> {
     try {
       await this.ensureBundledTools();
@@ -11591,10 +11757,26 @@ export default class ZoteroRagPlugin extends Plugin {
       }
       upArgs.push(...requiredServices);
       await this.maybeShowFirstContainerStartupNotice(silent);
-      await this.runCommand(composeCommand.command, upArgs, {
-        cwd: path.dirname(composePath),
-        env: composeEnv,
-      });
+      try {
+        await this.runCommand(composeCommand.command, upArgs, {
+          cwd: path.dirname(composePath),
+          env: composeEnv,
+        });
+      } catch (error) {
+        const recovered = await this.recoverFromContainerNameConflict(
+          error,
+          composeContext,
+          requiredServices
+        );
+        if (!recovered) {
+          throw error;
+        }
+        console.info("Retrying Redis stack startup after container conflict recovery.");
+        await this.runCommand(composeCommand.command, upArgs, {
+          cwd: path.dirname(composePath),
+          env: composeEnv,
+        });
+      }
       if (!silent) {
         new Notice("Redis Stack started.");
       }
