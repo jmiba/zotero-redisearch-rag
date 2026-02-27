@@ -2,7 +2,7 @@ name: Release
 
 on:
   release:
-    types: [published]
+    types: [published, released, prereleased]
 
 permissions:
   contents: write
@@ -26,11 +26,16 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/generate-release-notes.mjs
-      - run: npm run build
       - run: npm run package-release
+      - name: Verify release artifacts
+        run: |
+          ls -lah main.js manifest.json versions.json styles.css
+          ls -lah dist
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
           files: |
             main.js
             manifest.json
