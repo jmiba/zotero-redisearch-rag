@@ -9,6 +9,8 @@
     "package-release": "npm run build && bash scripts/package-release.sh"
   },
   "devDependencies": {
+    "@codemirror/state": "6.5.0",
+    "@codemirror/view": "6.38.6",
     "@eslint/js": "^9.39.1",
     "@eslint/json": "^0.14.0",
     "@types/node": "^20.14.9",
