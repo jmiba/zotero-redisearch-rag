@@ -19,7 +19,7 @@ type RedisSearchProvider = {
 };
 
 type ZoteroItemSuggestProvider = {
-  getDocIndex: () => Promise<Record<string, any>>;
+  getDocIndex: () => Promise<Record<string, unknown>>;
   searchZoteroItems: (query: string) => Promise<ZoteroLocalItem[]>;
 };
 
@@ -190,12 +190,11 @@ export class TextPromptModal extends Modal {
       type: "text",
       placeholder: this.placeholder,
     });
-    input.style.width = "100%";
+    input.addClass("zrr-u-width-100");
     input.focus();
 
     const submit = contentEl.createEl("button", { text: "Submit" });
-    submit.style.marginTop = "0.75rem";
-
+    submit.addClass("zrr-u-margin-top-0-75rem");
     const submitValue = (): void => {
       const value = input.value.trim();
       if (!value) {
@@ -238,14 +237,15 @@ export class ReleaseNotesModal extends Modal {
     const markdown = String(this.markdown || "").trim();
     if (markdown) {
       const body = contentEl.createDiv({ cls: "zrr-release-notes-body" });
-      void MarkdownRenderer.renderMarkdown(markdown, body, "", this.markdownComponent);
+      void MarkdownRenderer.render(this.app, markdown, body, "", this.markdownComponent);
     } else {
       contentEl.createEl("p", {
         text: "This version includes improvements and fixes.",
       });
     }
     const changelog = contentEl.createDiv({ cls: "zrr-release-notes-body" });
-    void MarkdownRenderer.renderMarkdown(
+    void MarkdownRenderer.render(
+      this.app,
       `[Full changelog](${FULL_CHANGELOG_URL})`,
       changelog,
       "",
@@ -292,16 +292,15 @@ export class ChunkTagModal extends Modal {
     const input = contentEl.createEl("textarea", {
       attr: { rows: "3" },
     });
-    input.style.width = "100%";
-    input.placeholder = "tag1, tag2, tag3";
+    input.addClass("zrr-u-width-100");
+    input.placeholder = "Tag1, tag2, tag3";
     input.value = this.initialTags.join(", ");
     input.focus();
 
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const submit = actions.createEl("button", { text: "Save tags" });
 
     const handleSubmit = async (): Promise<void> => {
@@ -338,7 +337,7 @@ export class ChunkTagModal extends Modal {
     submit.addEventListener("click", handleSubmit);
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        handleSubmit();
+        void handleSubmit();
       }
     });
   }
@@ -367,7 +366,7 @@ export class ChunkTextPreviewModal extends Modal {
     const area = contentEl.createEl("textarea", {
       attr: { rows: "12", readonly: "true" },
     });
-    area.style.width = "100%";
+    area.addClass("zrr-u-width-100");
     area.value = this.content;
   }
 }
@@ -390,45 +389,43 @@ export class RedisSearchModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     if (this.modalEl) {
-      this.modalEl.style.width = "80vw";
-      this.modalEl.style.maxWidth = "1200px";
-      this.modalEl.style.height = "80vh";
-      this.modalEl.style.maxHeight = "90vh";
-      this.modalEl.style.resize = "both";
-      this.modalEl.style.overflow = "hidden";
+      this.modalEl.addClass("zrr-u-width-80vw");
+      this.modalEl.addClass("zrr-u-max-width-1200px");
+      this.modalEl.addClass("zrr-u-height-80vh");
+      this.modalEl.addClass("zrr-u-max-height-90vh");
+      this.modalEl.addClass("zrr-u-resize-both");
+      this.modalEl.addClass("zrr-u-overflow-hidden");
     }
 
-    contentEl.style.display = "flex";
-    contentEl.style.flexDirection = "column";
-    contentEl.style.height = "100%";
-    contentEl.style.overflow = "hidden";
-    contentEl.style.minHeight = "0";
-
+    contentEl.addClass("zrr-u-display-flex");
+    contentEl.addClass("zrr-u-flex-direction-column");
+    contentEl.addClass("zrr-u-height-100");
+    contentEl.addClass("zrr-u-overflow-hidden");
+    contentEl.addClass("zrr-u-min-height-0");
     const header = contentEl.createDiv();
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.gap = "0.5rem";
+    header.addClass("zrr-u-display-flex");
+    header.addClass("zrr-u-align-items-center");
+    header.addClass("zrr-u-justify-content-space-between");
+    header.addClass("zrr-u-gap-0-5rem");
     header.createEl("h3", { text: "Redis index search" });
 
-    const copyBtn = header.createEl("button", { text: "Copy All" });
-    copyBtn.style.marginLeft = "auto";
+    const copyBtn = header.createEl("button", { text: "Copy all" });
+    copyBtn.addClass("zrr-u-margin-left-auto");
     copyBtn.addEventListener("click", () => {
       this.copyResultsToClipboard();
     });
 
     const searchRow = contentEl.createDiv();
-    searchRow.style.display = "flex";
-    searchRow.style.alignItems = "center";
-    searchRow.style.gap = "0.5rem";
-    searchRow.style.margin = "0.5rem 0";
-
+    searchRow.addClass("zrr-u-display-flex");
+    searchRow.addClass("zrr-u-align-items-center");
+    searchRow.addClass("zrr-u-gap-0-5rem");
+    searchRow.addClass("zrr-u-margin-0-5rem-0");
     const input = searchRow.createEl("input");
     input.type = "text";
     input.placeholder = "Search term";
     input.value = this.initialTerm;
-    input.style.flex = "1";
-    input.style.minWidth = "0";
+    input.addClass("zrr-u-flex-1");
+    input.addClass("zrr-u-min-width-0");
     this.inputEl = input;
 
     const button = searchRow.createEl("button", { text: "Search" });
@@ -443,19 +440,18 @@ export class RedisSearchModal extends Modal {
     });
 
     const status = contentEl.createDiv();
-    status.style.color = "var(--text-muted)";
-    status.style.marginBottom = "0.5rem";
+    status.addClass("zrr-u-color-var-text-muted");
+    status.addClass("zrr-u-margin-bottom-0-5rem");
     this.statusEl = status;
 
     const editorWrap = contentEl.createDiv();
-    editorWrap.style.flex = "1 1 0";
-    editorWrap.style.minHeight = "0";
-    editorWrap.style.border = "1px solid var(--background-modifier-border)";
-    editorWrap.style.borderRadius = "6px";
-    editorWrap.style.display = "flex";
-    editorWrap.style.flexDirection = "column";
-    editorWrap.style.overflow = "auto";
-
+    editorWrap.addClass("zrr-u-flex-1-1-0");
+    editorWrap.addClass("zrr-u-min-height-0");
+    editorWrap.addClass("zrr-u-border-1px-solid-var-background-modifier-border");
+    editorWrap.addClass("zrr-u-border-radius-6px");
+    editorWrap.addClass("zrr-u-display-flex");
+    editorWrap.addClass("zrr-u-flex-direction-column");
+    editorWrap.addClass("zrr-u-overflow-auto");
     const state = EditorState.create({
       doc: this.bodyText,
       extensions: [
@@ -548,28 +544,27 @@ export class OutputModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     if (this.modalEl) {
-      this.modalEl.style.width = "80vw";
-      this.modalEl.style.maxWidth = "1200px";
-      this.modalEl.style.height = "80vh";
-      this.modalEl.style.maxHeight = "90vh";
-      this.modalEl.style.resize = "both";
-      this.modalEl.style.overflow = "hidden";
+      this.modalEl.addClass("zrr-u-width-80vw");
+      this.modalEl.addClass("zrr-u-max-width-1200px");
+      this.modalEl.addClass("zrr-u-height-80vh");
+      this.modalEl.addClass("zrr-u-max-height-90vh");
+      this.modalEl.addClass("zrr-u-resize-both");
+      this.modalEl.addClass("zrr-u-overflow-hidden");
     }
-    contentEl.style.display = "flex";
-    contentEl.style.flexDirection = "column";
-    contentEl.style.height = "100%";
-    contentEl.style.overflow = "hidden";
-    contentEl.style.minHeight = "0";
-
+    contentEl.addClass("zrr-u-display-flex");
+    contentEl.addClass("zrr-u-flex-direction-column");
+    contentEl.addClass("zrr-u-height-100");
+    contentEl.addClass("zrr-u-overflow-hidden");
+    contentEl.addClass("zrr-u-min-height-0");
     const header = contentEl.createDiv();
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.gap = "0.5rem";
+    header.addClass("zrr-u-display-flex");
+    header.addClass("zrr-u-align-items-center");
+    header.addClass("zrr-u-justify-content-space-between");
+    header.addClass("zrr-u-gap-0-5rem");
     header.createEl("h3", { text: this.titleText });
     const actions = header.createDiv();
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-gap-0-5rem");
     if (this.options?.onClear) {
       const clearLabel = this.options.clearLabel ?? "Clear log";
       const clearButton = actions.createEl("button", { text: clearLabel });
@@ -582,14 +577,13 @@ export class OutputModal extends Modal {
       });
     }
     const editorWrap = contentEl.createDiv();
-    editorWrap.style.flex = "1 1 0";
-    editorWrap.style.minHeight = "0";
-    editorWrap.style.border = "1px solid var(--background-modifier-border)";
-    editorWrap.style.borderRadius = "6px";
-    editorWrap.style.display = "flex";
-    editorWrap.style.flexDirection = "column";
-    editorWrap.style.overflow = "auto";
-
+    editorWrap.addClass("zrr-u-flex-1-1-0");
+    editorWrap.addClass("zrr-u-min-height-0");
+    editorWrap.addClass("zrr-u-border-1px-solid-var-background-modifier-border");
+    editorWrap.addClass("zrr-u-border-radius-6px");
+    editorWrap.addClass("zrr-u-display-flex");
+    editorWrap.addClass("zrr-u-flex-direction-column");
+    editorWrap.addClass("zrr-u-overflow-auto");
     const state = EditorState.create({
       doc: this.bodyText,
       extensions: [
@@ -671,9 +665,9 @@ export class ConfirmOverwriteModal extends Modal {
       text: `This will overwrite: ${this.filePath}`,
     });
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const cancel = actions.createEl("button", { text: "Cancel" });
     const confirm = actions.createEl("button", { text: "Overwrite" });
     cancel.addEventListener("click", () => {
@@ -719,9 +713,9 @@ export class ConfirmDeleteNoteModal extends Modal {
       text: `Note: ${this.notePath}`,
     });
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const cancel = actions.createEl("button", { text: "Cancel" });
     const confirm = actions.createEl("button", { text: "Delete" });
     cancel.addEventListener("click", () => {
@@ -757,15 +751,15 @@ export class ConfirmRebuildIndexModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h3", { text: "Rebuild Redis index?" });
+    contentEl.createEl("h3", { text: "Rebuild redis index?" });
     contentEl.createEl("p", { text: this.reason });
     contentEl.createEl("p", {
-      text: "This will drop the RedisSearch index (and embeddings) and rebuild it from cached chunks.",
+      text: "This will drop the redissearch index (and embeddings) and rebuild it from cached chunks.",
     });
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const cancel = actions.createEl("button", { text: "Cancel" });
     const confirm = actions.createEl("button", { text: "Drop & rebuild" });
     cancel.addEventListener("click", () => {
@@ -799,17 +793,17 @@ export class ConfirmPurgeRedisOrphansModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h3", { text: "Purge Redis orphaned chunks?" });
+    contentEl.createEl("h3", { text: "Purge redis orphaned chunks?" });
     contentEl.createEl("p", {
       text: "This removes Redis chunk keys that have no cached item.json or chunk.json on disk.",
     });
     contentEl.createEl("p", {
-      text: "Cache files are not deleted. Use this to clean up stale Redis data.",
+      text: "Cache files are not deleted. Use this to clean up stale redis data.",
     });
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const cancel = actions.createEl("button", { text: "Cancel" });
     const confirm = actions.createEl("button", { text: "Purge orphans" });
     cancel.addEventListener("click", () => {
@@ -865,36 +859,33 @@ export class MetadataConflictBatchModal extends Modal {
     });
 
     const table = contentEl.createEl("div");
-    table.style.display = "grid";
-    table.style.gap = "0.75rem";
-
+    table.addClass("zrr-u-display-grid");
+    table.addClass("zrr-u-gap-0-75rem");
     for (const conflict of this.conflicts) {
       const row = table.createEl("div");
-      row.style.display = "grid";
-      row.style.gap = "0.4rem";
-      row.style.border = "1px solid var(--background-modifier-border)";
-      row.style.borderRadius = "6px";
-      row.style.padding = "0.6rem";
-
-      row.createEl("div", { text: conflict.fieldLabel }).style.fontWeight = "600";
+      row.addClass("zrr-u-display-grid");
+      row.addClass("zrr-u-gap-0-4rem");
+      row.addClass("zrr-u-border-1px-solid-var-background-modifier-border");
+      row.addClass("zrr-u-border-radius-6px");
+      row.addClass("zrr-u-padding-0-6rem");
+      row.createEl("div", { text: conflict.fieldLabel, cls: "zrr-font-semibold" });
 
       const values = row.createEl("div");
-      values.style.display = "grid";
-      values.style.gridTemplateColumns = "1fr 1fr";
-      values.style.gap = "0.5rem";
-
+      values.addClass("zrr-u-display-grid");
+      values.addClass("zrr-u-grid-template-columns-1fr-1fr");
+      values.addClass("zrr-u-gap-0-5rem");
       const noteBox = values.createEl("textarea", { attr: { readonly: "true", rows: "3" } });
-      noteBox.style.width = "100%";
+      noteBox.addClass("zrr-u-width-100");
       noteBox.value = conflict.noteValue || "(empty)";
 
       const zoteroBox = values.createEl("textarea", { attr: { readonly: "true", rows: "3" } });
-      zoteroBox.style.width = "100%";
+      zoteroBox.addClass("zrr-u-width-100");
       zoteroBox.value = conflict.zoteroValue || "(empty)";
 
       const selectWrap = row.createEl("div");
-      selectWrap.style.display = "flex";
-      selectWrap.style.gap = "0.5rem";
-      selectWrap.style.alignItems = "center";
+      selectWrap.addClass("zrr-u-display-flex");
+      selectWrap.addClass("zrr-u-gap-0-5rem");
+      selectWrap.addClass("zrr-u-align-items-center");
       selectWrap.createEl("span", { text: "Decision:" });
       const select = selectWrap.createEl("select");
       select.add(new Option(conflict.noteLabel, "note"));
@@ -905,11 +896,10 @@ export class MetadataConflictBatchModal extends Modal {
     }
 
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.flexWrap = "wrap";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-flex-wrap-wrap");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const applyAll = (value: MetadataDecision) => {
       for (const select of this.selects.values()) {
         select.value = value;
@@ -977,36 +967,33 @@ export class AnnotationConflictBatchModal extends Modal {
     contentEl.createEl("p", { text: "Choose which version to keep for each annotation." });
 
     const table = contentEl.createEl("div");
-    table.style.display = "grid";
-    table.style.gap = "0.75rem";
-
+    table.addClass("zrr-u-display-grid");
+    table.addClass("zrr-u-gap-0-75rem");
     for (const conflict of this.conflicts) {
       const row = table.createEl("div");
-      row.style.display = "grid";
-      row.style.gap = "0.4rem";
-      row.style.border = "1px solid var(--background-modifier-border)";
-      row.style.borderRadius = "6px";
-      row.style.padding = "0.6rem";
-
-      row.createEl("div", { text: conflict.title }).style.fontWeight = "600";
+      row.addClass("zrr-u-display-grid");
+      row.addClass("zrr-u-gap-0-4rem");
+      row.addClass("zrr-u-border-1px-solid-var-background-modifier-border");
+      row.addClass("zrr-u-border-radius-6px");
+      row.addClass("zrr-u-padding-0-6rem");
+      row.createEl("div", { text: conflict.title, cls: "zrr-font-semibold" });
 
       const values = row.createEl("div");
-      values.style.display = "grid";
-      values.style.gridTemplateColumns = "1fr 1fr";
-      values.style.gap = "0.5rem";
-
+      values.addClass("zrr-u-display-grid");
+      values.addClass("zrr-u-grid-template-columns-1fr-1fr");
+      values.addClass("zrr-u-gap-0-5rem");
       const noteBox = values.createEl("textarea", { attr: { readonly: "true", rows: "4" } });
-      noteBox.style.width = "100%";
+      noteBox.addClass("zrr-u-width-100");
       noteBox.value = conflict.noteValue || "(empty)";
 
       const zoteroBox = values.createEl("textarea", { attr: { readonly: "true", rows: "4" } });
-      zoteroBox.style.width = "100%";
+      zoteroBox.addClass("zrr-u-width-100");
       zoteroBox.value = conflict.zoteroValue || "(empty)";
 
       const selectWrap = row.createEl("div");
-      selectWrap.style.display = "flex";
-      selectWrap.style.gap = "0.5rem";
-      selectWrap.style.alignItems = "center";
+      selectWrap.addClass("zrr-u-display-flex");
+      selectWrap.addClass("zrr-u-gap-0-5rem");
+      selectWrap.addClass("zrr-u-align-items-center");
       selectWrap.createEl("span", { text: "Decision:" });
       const select = selectWrap.createEl("select");
       select.add(new Option("Use note", "note"));
@@ -1017,11 +1004,10 @@ export class AnnotationConflictBatchModal extends Modal {
     }
 
     const actions = contentEl.createEl("div");
-    actions.style.display = "flex";
-    actions.style.flexWrap = "wrap";
-    actions.style.gap = "0.5rem";
-    actions.style.marginTop = "0.75rem";
-
+    actions.addClass("zrr-u-display-flex");
+    actions.addClass("zrr-u-flex-wrap-wrap");
+    actions.addClass("zrr-u-gap-0-5rem");
+    actions.addClass("zrr-u-margin-top-0-75rem");
     const applyAll = (value: MetadataDecision) => {
       for (const select of this.selects.values()) {
         select.value = value;
@@ -1066,7 +1052,7 @@ export class LanguageSuggestModal extends SuggestModal<LanguageOption> {
   constructor(app: App, onSelect: (value: string | null) => void) {
     super(app);
     this.resolveSelection = onSelect;
-    this.setPlaceholder("Select a language for OCR/quality...");
+    this.setPlaceholder("Select a language for ocr/quality...");
   }
 
   getSuggestions(query: string): LanguageOption[] {

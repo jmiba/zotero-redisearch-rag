@@ -2,12 +2,12 @@ import { fileURLToPath } from "url";
 import type { PdfAttachment, ZoteroItemValues } from "./types";
 
 export type PdfAttachmentResolverDeps = {
-  fetchZoteroChildren: (itemKey: string) => Promise<any[]>;
+  fetchZoteroChildren: (itemKey: string) => Promise<unknown[]>;
 };
 
 export type RawApiResponse = {
   statusCode: number;
-  headers: Record<string, any>;
+  headers: Record<string, unknown>;
   body: Buffer;
 };
 
@@ -59,15 +59,15 @@ export const pickPdfAttachment = (values: ZoteroItemValues): PdfAttachment | nul
   return null;
 };
 
-export const collectAttachmentCandidates = (values: ZoteroItemValues): any[] => {
+export const collectAttachmentCandidates = (values: ZoteroItemValues): unknown[] => {
   const buckets = [
     values.attachments,
     values.children,
     values.items,
-    (values as any).attachment,
-    (values as any).allAttachments,
+    (values as unknown).attachment,
+    (values as unknown).allAttachments,
   ];
-  const collected: any[] = [];
+  const collected: unknown[] = [];
   for (const bucket of buckets) {
     if (!bucket) {
       continue;
@@ -81,7 +81,7 @@ export const collectAttachmentCandidates = (values: ZoteroItemValues): any[] => 
   return collected;
 };
 
-export const toPdfAttachment = (attachment: any): PdfAttachment | null => {
+export const toPdfAttachment = (attachment: unknown): PdfAttachment | null => {
   const contentType = attachment?.contentType ?? attachment?.mimeType ?? attachment?.data?.contentType;
   if (contentType !== "application/pdf") {
     return null;
@@ -94,7 +94,7 @@ export const toPdfAttachment = (attachment: any): PdfAttachment | null => {
   return filePath ? { key, filePath } : { key };
 };
 
-export const extractAttachmentPath = (attachment: any): string | null => {
+export const extractAttachmentPath = (attachment: unknown): string | null => {
   const href =
     attachment?.links?.enclosure?.href ??
     attachment?.enclosure?.href ??

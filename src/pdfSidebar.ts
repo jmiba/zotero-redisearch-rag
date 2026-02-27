@@ -30,7 +30,7 @@ export type PdfSidebarDependencies = {
   hydrateDocIndexFromCache: (docId: string) => Promise<{ pdf_path?: string } | null>;
   toVaultRelativePath: (path: string) => string | null;
   normalizeChunkIdForNote: (chunkId: string, docId?: string) => string | null;
-  readChunkPayload: (chunkPath: string) => Promise<any>;
+  readChunkPayload: (chunkPath: string) => Promise<unknown>;
 };
 
 const getTopVisibleLineNumber = (view: EditorView): number | null => {
@@ -62,9 +62,9 @@ export class PdfSidebarController {
     this.helpers = helpers;
   }
 
-  public createSyncExtension(): ViewPlugin<{}> {
-    const controller = this;
+  public createSyncExtension(): ViewPlugin<object> {
     const helpers = this.helpers;
+    const syncPdfSidebarForDoc = this.syncPdfSidebarForDoc.bind(this);
     return ViewPlugin.fromClass(
       class {
         private view: EditorView;
@@ -137,7 +137,7 @@ export class PdfSidebarController {
           }
           this.lastPage = pageNumber;
           this.lastChunkId = chunkId;
-          void controller.syncPdfSidebarForDoc(docId, pageNumber ?? undefined, chunkId ?? undefined);
+          void syncPdfSidebarForDoc(docId, pageNumber ?? undefined, chunkId ?? undefined);
         }
       }
     );
@@ -350,7 +350,7 @@ export class PdfSidebarController {
       ensureSideLeaf?: (
         type: string,
         side: "left" | "right",
-        options?: { active?: boolean; split?: boolean; reveal?: boolean; state?: any }
+        options?: { active?: boolean; split?: boolean; reveal?: boolean; state?: unknown }
       ) => Promise<WorkspaceLeaf>;
     };
     if (typeof workspaceAny.ensureSideLeaf === "function") {
@@ -429,10 +429,11 @@ export class PdfSidebarController {
         continue;
       }
       seen.add(iconEl);
-      iconEl.innerHTML = "";
+      iconEl.replaceChildren();
       setIcon(iconEl, "zrr-pdf");
       if (!iconEl.querySelector("svg") && this.deps.iconSvg) {
-        iconEl.innerHTML = this.deps.iconSvg;
+        const parsed = document.createRange().createContextualFragment(this.deps.iconSvg);
+        iconEl.replaceChildren(parsed);
       }
       if (iconEl.dataset) {
         iconEl.dataset.zrrIcon = "zrr-pdf";
@@ -491,8 +492,8 @@ export class PdfSidebarController {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private getPluginsRegistry(): Record<string, any> | undefined {
-    return (this.deps.app as any).plugins?.plugins as Record<string, any> | undefined;
+  private getPluginsRegistry(): Record<string, unknown> | undefined {
+    return (this.deps.app as unknown).plugins?.plugins as Record<string, unknown> | undefined;
   }
 
   private isLeafTabActive(leaf: WorkspaceLeaf): boolean {

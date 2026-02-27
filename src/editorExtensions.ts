@@ -36,7 +36,7 @@ const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElem
     if (info.type === "sync-start") {
       badge.textContent = info.docId ? `Redis Index Sync start - ${info.docId}` : "Redis Index Sync start";
     } else {
-      badge.textContent = "Redis Index Sync end";
+      badge.textContent = "Redis index sync end";
     }
     return badge;
   }

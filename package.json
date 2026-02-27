@@ -1,6 +1,6 @@
 {
   "name": "zotero-redisearch-rag",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Obsidian plugin for Zotero -> Docling -> Redis Stack RAG",
   "main": "main.js",
   "scripts": {
@@ -9,9 +9,14 @@
     "package-release": "npm run build && bash scripts/package-release.sh"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@eslint/json": "^0.14.0",
     "@types/node": "^20.14.9",
     "esbuild": "^0.27.2",
+    "eslint": "^9.39.1",
+    "eslint-plugin-obsidianmd": "^0.1.9",
     "obsidian": "^1.5.12",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.35.1"
   }
 }

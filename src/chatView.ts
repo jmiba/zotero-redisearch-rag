@@ -72,7 +72,7 @@ export class ZoteroChatView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Zotero Research Assistant Chat";
+    return "Zotero research assistant chat";
   }
 
   getIcon(): string {
@@ -85,10 +85,10 @@ export class ZoteroChatView extends ItemView {
     containerEl.addClass("zrr-chat-view");
 
     const header = containerEl.createEl("div", { cls: "zrr-chat-header" });
-    header.createEl("div", { cls: "zrr-chat-title", text: "Zotero Research Assistant Chat" });
+    header.createEl("div", { cls: "zrr-chat-title", text: "Zotero research assistant chat" });
     const controls = header.createEl("div", { cls: "zrr-chat-controls" });
     const selectRow = controls.createEl("div", { cls: "zrr-chat-controls-row" });
-    this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" }) as HTMLSelectElement;
+    this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" });
     this.sessionSelect.addEventListener("change", async () => {
       await this.switchSession(this.sessionSelect.value);
     });
@@ -132,7 +132,7 @@ export class ZoteroChatView extends ItemView {
     this.inputEl = inputWrap.createEl("textarea", {
       cls: "zrr-chat-textarea",
       attr: { placeholder: "Ask your Zotero library..." },
-    }) as HTMLTextAreaElement;
+    });
     this.sendButton = inputWrap.createEl("button", {
       cls: "zrr-chat-send",
       attr: { "aria-label": "Send message", title: "Send message" },
@@ -183,7 +183,7 @@ export class ZoteroChatView extends ItemView {
     this.activeSessionId = await this.plugin.getActiveChatSessionId();
     this.sessionSelect.empty();
     for (const session of sessions) {
-      const option = this.sessionSelect.createEl("option", { text: session.name }) as HTMLOptionElement;
+      const option = this.sessionSelect.createEl("option", { text: session.name });
       option.value = session.id;
       if (session.id === this.activeSessionId) {
         option.selected = true;
@@ -326,7 +326,7 @@ export class ZoteroChatView extends ItemView {
     if (index === -1) {
       return;
     }
-    const confirmDelete = window.confirm("Delete this message? This cannot be undone.");
+    const confirmDelete = await this.confirmDeleteMessage();
     if (!confirmDelete) {
       return;
     }
@@ -343,6 +343,12 @@ export class ZoteroChatView extends ItemView {
     }
     this.pendingThinking.delete(messageId);
     await this.saveHistory();
+  }
+
+  private async confirmDeleteMessage(): Promise<boolean> {
+    return new Promise((resolve) => {
+      new ConfirmDeleteMessageModal(this.app, resolve).open();
+    });
   }
 
   private scheduleRender(message: ChatMessage): void {
@@ -384,7 +390,7 @@ export class ZoteroChatView extends ItemView {
     // Use a data attribute to store last rendered content
     if (els.content.dataset.lastRendered !== newContent) {
       els.content.empty();
-      await MarkdownRenderer.renderMarkdown(newContent, els.content, "", this.plugin);
+      await MarkdownRenderer.render(this.app, newContent, els.content, "", this);
       this.hookInternalLinks(els.content);
       els.content.dataset.lastRendered = newContent;
     }
@@ -619,9 +625,9 @@ export class ZoteroChatView extends ItemView {
 
 class RenameChatModal extends Modal {
   private initialValue: string;
-  private onSubmit: (value: string) => void;
+  private onSubmit: (value: string) => Promise<void> | void;
 
-  constructor(app: App, initialValue: string, onSubmit: (value: string) => void) {
+  constructor(app: App, initialValue: string, onSubmit: (value: string) => Promise<void> | void) {
     super(app);
     this.initialValue = initialValue;
     this.onSubmit = onSubmit;
@@ -644,10 +650,9 @@ class RenameChatModal extends Modal {
       });
 
     const buttons = contentEl.createEl("div");
-    buttons.style.display = "flex";
-    buttons.style.gap = "0.5rem";
-    buttons.style.marginTop = "1rem";
-
+    buttons.addClass("zrr-u-display-flex");
+    buttons.addClass("zrr-u-gap-0-5rem");
+    buttons.addClass("zrr-u-margin-top-1rem");
     const cancel = buttons.createEl("button", { text: "Cancel" });
     cancel.addEventListener("click", () => this.close());
 
@@ -659,16 +664,16 @@ class RenameChatModal extends Modal {
         return;
       }
       this.close();
-      this.onSubmit(trimmed);
+      void Promise.resolve(this.onSubmit(trimmed));
     });
   }
 }
 
 class ConfirmDeleteChatModal extends Modal {
   private chatName: string;
-  private onConfirm: () => void;
+  private onConfirm: () => Promise<void> | void;
 
-  constructor(app: App, chatName: string, onConfirm: () => void) {
+  constructor(app: App, chatName: string, onConfirm: () => Promise<void> | void) {
     super(app);
     this.chatName = chatName;
     this.onConfirm = onConfirm;
@@ -681,17 +686,58 @@ class ConfirmDeleteChatModal extends Modal {
     contentEl.createEl("p", { text: `Delete "${this.chatName}"? This cannot be undone.` });
 
     const buttons = contentEl.createEl("div");
-    buttons.style.display = "flex";
-    buttons.style.gap = "0.5rem";
-    buttons.style.marginTop = "1rem";
-
+    buttons.addClass("zrr-u-display-flex");
+    buttons.addClass("zrr-u-gap-0-5rem");
+    buttons.addClass("zrr-u-margin-top-1rem");
     const cancel = buttons.createEl("button", { text: "Cancel" });
     cancel.addEventListener("click", () => this.close());
 
     const confirm = buttons.createEl("button", { text: "Delete" });
     confirm.addEventListener("click", () => {
       this.close();
-      this.onConfirm();
+      void Promise.resolve(this.onConfirm());
     });
+  }
+}
+
+class ConfirmDeleteMessageModal extends Modal {
+  private onResolve: (confirmed: boolean) => void;
+  private resolved = false;
+
+  constructor(app: App, onResolve: (confirmed: boolean) => void) {
+    super(app);
+    this.onResolve = onResolve;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Delete message" });
+    contentEl.createEl("p", { text: "Delete this message? This cannot be undone." });
+
+    const buttons = contentEl.createEl("div");
+    buttons.addClass("zrr-u-display-flex");
+    buttons.addClass("zrr-u-gap-0-5rem");
+    buttons.addClass("zrr-u-margin-top-1rem");
+
+    const cancel = buttons.createEl("button", { text: "Cancel" });
+    cancel.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(false);
+    });
+
+    const confirm = buttons.createEl("button", { text: "Delete" });
+    confirm.addEventListener("click", () => {
+      this.resolved = true;
+      this.close();
+      this.onResolve(true);
+    });
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.onResolve(false);
+    }
   }
 }

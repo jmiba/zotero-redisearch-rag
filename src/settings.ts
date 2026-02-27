@@ -341,7 +341,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     clearLogFile?: () => Promise<void>;
     checkZoteroCompanionHealth: () => Promise<void>;
     openZoteroAddons: () => Promise<void>;
-    openReleaseNotesModal: () => Promise<void>;
+    openReleaseNotesModal: () => void;
     switchPythonRuntimeToLocalLegacy: () => Promise<void>;
     manifest: { dir?: string };
   };
@@ -367,12 +367,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       clearLogFile: () => Promise<void>;
       checkZoteroCompanionHealth: () => Promise<void>;
       openZoteroAddons: () => Promise<void>;
-      openReleaseNotesModal: () => Promise<void>;
+      openReleaseNotesModal: () => void;
       switchPythonRuntimeToLocalLegacy: () => Promise<void>;
       manifest: { dir?: string };
     }
   ) {
-    super(app, plugin as any);
+    super(app, plugin as unknown);
     this.plugin = plugin;
   }
 
@@ -397,7 +397,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderPrerequisites = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "Prerequisites" });
+      new Setting(tabEl).setName("Prerequisites").setHeading();
 
       let pythonRuntimeSetting: Setting | null = null;
       let pythonRuntimeDropdown: DropdownComponent | null = null;
@@ -414,18 +414,14 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           return;
         }
         setting.settingEl.classList.toggle("is-disabled", disabled);
-        setting.settingEl.style.opacity = disabled ? "0.55" : "";
-        const desc = setting.settingEl.querySelector(".setting-item-description") as HTMLElement | null;
-        if (desc) {
-          desc.style.color = disabled ? "var(--text-faint)" : "";
-        }
+        setting.settingEl.classList.toggle("zrr-setting-disabled", disabled);
       };
 
       const setSettingVisibility = (setting: Setting | null, visible: boolean): void => {
         if (!setting) {
           return;
         }
-        setting.settingEl.style.display = visible ? "" : "none";
+        setting.settingEl.classList.toggle("zrr-setting-hidden", !visible);
       };
 
       const refreshPythonRuntimeState = (): void => {
@@ -452,7 +448,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       new Setting(tabEl)
-        .setName("Docker/Podman path")
+        .setName("Docker/podman path")
         .setDesc(
           "CLI path for Docker or Podman (used to start Redis Stack and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
             "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~, $HOME, and %USERPROFILE%. " +
@@ -460,7 +456,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         )
         .addText((text) =>
           text
-            .setPlaceholder("docker")
+            .setPlaceholder("Docker")
             .setValue(this.plugin.settings.dockerPath)
             .onChange(async (value) => {
               this.plugin.settings.dockerPath = value.trim() || "docker";
@@ -469,7 +465,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("Advanced Python runtime options")
+        .setName("Advanced python runtime options")
         .setDesc(
           "Show legacy local interpreter/venv controls. Recommended to keep this disabled."
         )
@@ -480,7 +476,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               this.plugin.settings.showAdvancedPythonRuntimeOptions = value;
               if (!value && this.plugin.settings.pythonRuntime === "local") {
                 this.plugin.settings.pythonRuntime = "worker";
-                new Notice("Switched Python runtime to worker mode.");
+                new Notice("Switched python runtime to worker mode.");
               }
               await this.plugin.saveSettings();
               refreshPythonRuntimeState();
@@ -518,7 +514,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addText((text) => {
           pythonPathText = text;
           return text
-            .setPlaceholder("auto-detect")
+            .setPlaceholder("Auto-detect")
             .setValue(this.plugin.settings.pythonPath)
             .onChange(async (value) => {
               this.plugin.settings.pythonPath = value.trim();
@@ -529,12 +525,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       pythonEnvSetting = new Setting(tabEl)
         .setName("Python environment")
         .setDesc(
-          "Local mode: create or update the plugin's Python env. Worker mode: managed by Docker startup."
+          "Local mode: create or update the plugin's python env. Worker mode: managed by docker startup."
         )
         .addButton((button) => {
           pythonEnvButtonComponent = button;
           pythonEnvButton = button.buttonEl;
-          button.setButtonText("Create/Update").setCta();
+          button.setButtonText("Create/update").setCta();
           button.onClick(async () => {
             button.setDisabled(true);
             try {
@@ -571,7 +567,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Redis URL")
         .addText((text) =>
           text
-            .setPlaceholder("redis://127.0.0.1:6379")
+            .setPlaceholder("Redis://127.0.0.1:6379")
             .setValue(this.plugin.settings.redisUrl)
             .onChange(async (value) => {
               this.plugin.settings.redisUrl = value.trim();
@@ -592,8 +588,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       new Setting(tabEl)
-        .setName("Auto-assign Redis port")
-        .setDesc("When starting Redis stack, pick a free local port and update the Redis URL.")
+        .setName("Auto-assign redis port")
+        .setDesc("When starting redis stack, pick a free local port and update the redis URL.")
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.autoAssignRedisPort).onChange(async (value) => {
             this.plugin.settings.autoAssignRedisPort = value;
@@ -612,7 +608,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addText((text) => {
           redisDataDirText = text;
           return text
-            .setPlaceholder("~/Redis/zrr-data")
+            .setPlaceholder("~/redis/zrr-data")
             .setValue(this.plugin.settings.redisDataDirOverride)
             .onChange(async (value) => {
               this.plugin.settings.redisDataDirOverride = value.trim();
@@ -630,7 +626,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addText((text) => {
           redisProjectText = text;
           return text
-            .setPlaceholder("zrr-shared")
+            .setPlaceholder("Zrr-shared")
             .setValue(this.plugin.settings.redisProjectName)
             .onChange(async (value) => {
               this.plugin.settings.redisProjectName = value.trim();
@@ -642,7 +638,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       refreshRedisOverrideState();
 
       new Setting(tabEl)
-        .setName("Auto-start Redis stack (Docker/Podman Compose)")
+        .setName("Auto-start redis stack (docker/podman compose)")
         .setDesc(
           "Requires Docker Desktop running and your vault path shared with Docker. " +
             "Starts Redis and, in worker mode, the Python worker container."
@@ -655,8 +651,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("Start Redis stack now")
-        .setDesc("Starts or restarts Redis stack (and Python worker in worker mode).")
+        .setName("Start redis stack now")
+        .setDesc("Starts or restarts redis stack (and python worker in worker mode).")
         .addButton((button) =>
           button.setButtonText("Start").onClick(async () => {
             await this.plugin.startRedisStack();
@@ -665,14 +661,14 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderZoteroImport = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "Zotero Local API" });
+      new Setting(tabEl).setName("Zotero local API").setHeading();
 
       new Setting(tabEl)
         .setName("Zotero base URL")
-        .setDesc("Local Zotero API base URL, e.g. http://127.0.0.1:23119/api")
+        .setDesc("Local Zotero API base URL, e.g. HTTP://127.0.0.1:23119/API")
         .addText((text) =>
           text
-            .setPlaceholder("http://127.0.0.1:23119/api")
+            .setPlaceholder("HTTP://127.0.0.1:23119/API")
             .setValue(this.plugin.settings.zoteroBaseUrl)
             .onChange(async (value) => {
               this.plugin.settings.zoteroBaseUrl = value.trim();
@@ -734,7 +730,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       void refreshLibraries();
 
-      tabEl.createEl("h2", { text: "Zotero Web API" });
+      new Setting(tabEl).setName("Zotero web API").setHeading();
 
       new Setting(tabEl)
         .setName("Web API base URL")
@@ -751,11 +747,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Web API library type")
-        .setDesc("Library type for Web API writes.")
+        .setDesc("Library type for web API writes.")
         .addDropdown((dropdown) =>
           dropdown
-            .addOption("user", "user")
-            .addOption("group", "group")
+            .addOption("user", "User")
+            .addOption("group", "Group")
             .setValue(this.plugin.settings.webApiLibraryType)
             .onChange(async (value) => {
               this.plugin.settings.webApiLibraryType = value as "user" | "group";
@@ -765,7 +761,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Web API library ID")
-        .setDesc("Numeric Zotero user/group ID for Web API writes.")
+        .setDesc("Numeric Zotero user/group ID for web API writes.")
         .addText((text) =>
           text
             .setPlaceholder("15218")
@@ -778,11 +774,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Web API key")
-        .setDesc("Zotero API key for write fallback (from zotero.org).")
+        .setDesc("Zotero API key for write fallback (from Zotero.org).")
         .addText((text) => {
           maskApiKeyInput(text);
           text
-            .setPlaceholder("your-api-key")
+            .setPlaceholder("Your-api-key")
             .setValue(this.plugin.settings.webApiKey)
             .onChange(async (value) => {
               this.plugin.settings.webApiKey = value.trim();
@@ -790,13 +786,13 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      tabEl.createEl("h2", { text: "Output" });
+      new Setting(tabEl).setName("Output").setHeading();
 
       new Setting(tabEl)
         .setName("PDF folder")
         .addText((text) =>
           text
-            .setPlaceholder("zotero/pdfs")
+            .setPlaceholder("Zotero/pdfs")
             .setValue(this.plugin.settings.outputPdfDir)
             .onChange(async (value) => {
               this.plugin.settings.outputPdfDir = value.trim();
@@ -808,7 +804,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Notes folder")
         .addText((text) =>
           text
-            .setPlaceholder("zotero/notes")
+            .setPlaceholder("Zotero/notes")
             .setValue(this.plugin.settings.outputNoteDir)
             .onChange(async (value) => {
               this.plugin.settings.outputNoteDir = value.trim();
@@ -827,7 +823,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
           text.inputEl.rows = 10;
-          text.inputEl.style.width = "100%";
+          text.inputEl.addClass("zrr-u-width-100");
         });
 
       new Setting(tabEl)
@@ -836,10 +832,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addDropdown((dropdown) =>
           dropdown
             .addOption("none", "No change")
-            .addOption("camel", "camelCase")
-            .addOption("pascal", "PascalCase")
-            .addOption("snake", "snake_case")
-            .addOption("kebab", "kebab-case")
+            .addOption("camel", "Camelcase")
+            .addOption("pascal", "Pascalcase")
+            .addOption("snake", "Snake_case")
+            .addOption("kebab", "Kebab-case")
             .setValue(this.plugin.settings.tagSanitizeMode === "replace" ? "kebab" : this.plugin.settings.tagSanitizeMode)
             .onChange(async (value) => {
               this.plugin.settings.tagSanitizeMode = value as "none" | "camel" | "pascal" | "snake" | "kebab";
@@ -860,7 +856,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
           text.inputEl.rows = 8;
-          text.inputEl.style.width = "100%";
+          text.inputEl.addClass("zrr-u-width-100");
         });
 
       new Setting(tabEl)
@@ -868,7 +864,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setDesc("Where exported chat notes are stored (vault-relative).")
         .addText((text) =>
           text
-            .setPlaceholder("zotero/chats")
+            .setPlaceholder("Zotero/chats")
             .setValue(this.plugin.settings.chatOutputDir)
             .onChange(async (value) => {
               this.plugin.settings.chatOutputDir = value.trim() || "zotero/chats";
@@ -877,7 +873,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("Copy PDFs into vault")
+        .setName("Copy pdfs into vault")
         .setDesc(
           "Disable to use Zotero storage paths directly. If a local file path is unavailable, the plugin temporarily copies the PDF into the vault for processing."
         )
@@ -893,9 +889,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("Create OCR-layered PDF copy")
+        .setName("Create ocr-layered PDF copy")
         .setDesc(
-          "When OCR is used, replace the vault PDF with a Tesseract text layer (requires Copy PDFs into vault)."
+          "When ocr is used, replace the vault PDF with a tesseract text layer (requires copy pdfs into vault)."
         )
         .addToggle((toggle) => {
           const enabled = this.plugin.settings.copyPdfToVault;
@@ -925,7 +921,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderAnnotations = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "Annotations" });
+      new Setting(tabEl).setName("Annotations").setHeading();
 
       new Setting(tabEl)
         .setName("Annotation page label")
@@ -950,7 +946,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      tabEl.createEl("h3", { text: "Zotero companion" });
+      new Setting(tabEl).setName("Zotero companion").setHeading();
       tabEl.createEl("p", {
         text: "Install the Zotero companion add-on to enable cached image/rect annotations. " +
           "See tab Maintenance for instructions.",
@@ -971,7 +967,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setDesc("Local URL for the Zotero companion plugin (loopback only).")
         .addText((text) =>
           text
-            .setPlaceholder("http://127.0.0.1:23120")
+            .setPlaceholder("HTTP://127.0.0.1:23120")
             .setValue(this.plugin.settings.zoteroCompanionBaseUrl)
             .onChange(async (value) => {
               this.plugin.settings.zoteroCompanionBaseUrl = value.trim();
@@ -986,7 +982,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           maskApiKeyInput(text);
           this.companionTokenInput = text;
           text
-            .setPlaceholder("optional-token")
+            .setPlaceholder("Optional-token")
             .setValue(this.plugin.settings.zoteroCompanionToken)
             .onChange(async (value) => {
               this.plugin.settings.zoteroCompanionToken = value.trim();
@@ -996,7 +992,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Generate companion token")
-        .setDesc("Create and paste a secure token. The generated token is copied to your clipboard. In Zotero, set your Zotero Companion Plugin token to this value.")
+        .setDesc("Create and paste a secure token. The generated token is copied to your clipboard. In Zotero, set your Zotero companion plugin token to this value.")
         .addButton((button) =>
           button
             .setButtonText("Generate token")
@@ -1017,7 +1013,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      tabEl.createEl("h3", { text: "Annotation color map" });
+      new Setting(tabEl).setName("Annotation color map").setHeading();
       tabEl.createEl("p", {
         text: "Map Zotero highlight colors to section headings and callout types.",
       });
@@ -1140,7 +1136,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderOcr = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "Docling" });
+      new Setting(tabEl).setName("Docling").setHeading();
 
       let ocrEngineDropdown: DropdownComponent | null = null;
 
@@ -1207,11 +1203,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       const paddleApiKeySetting = new Setting(tabEl)
-        .setName("Paddle OCR API key")
-        .setDesc("API token for PaddleOCR-VL / PP-StructureV3 endpoints. Get a free API key at ");
+        .setName("Paddle ocr API key")
+        .setDesc("API token for paddleocr-vl / pp-structurev3 endpoints. Get a free API key at ");
       const paddleApiLink = document.createElement("a");
       paddleApiLink.href = "https://aistudio.baidu.com/paddleocr";
-      paddleApiLink.textContent = "https://aistudio.baidu.com/paddleocr";
+      paddleApiLink.textContent = "HTTPS://aistudio.baidu.com/paddleocr";
       paddleApiLink.target = "_blank";
       paddleApiLink.rel = "noopener noreferrer";
       paddleApiKeySetting.descEl.appendChild(paddleApiLink);
@@ -1220,7 +1216,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addText((text) => {
           maskApiKeyInput(text);
           text
-            .setPlaceholder("your-api-token")
+            .setPlaceholder("Your-api-token")
             .setValue(this.plugin.settings.paddleApiKey)
             .onChange(async (value) => {
               this.plugin.settings.paddleApiKey = value.trim();
@@ -1230,11 +1226,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
 
       new Setting(tabEl)
-        .setName("PaddleOCR-VL API URL")
-        .setDesc("Optional override for the PaddleOCR-VL API endpoint.")
+        .setName("Paddleocr-vl API URL")
+        .setDesc("Optional override for the paddleocr-vl API endpoint.")
         .addText((text) =>
           text
-            .setPlaceholder("https://.../layout-parsing")
+            .setPlaceholder("HTTPS://.../layout-parsing")
             .setValue(this.plugin.settings.paddleVlApiUrl)
             .onChange(async (value) => {
               this.plugin.settings.paddleVlApiUrl = value.trim();
@@ -1243,11 +1239,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("PP-StructureV3 API URL")
-        .setDesc("API endpoint for PP-StructureV3 (see Baidu AI Studio docs).")
+        .setName("Pp-structurev3 API URL")
+        .setDesc("API endpoint for pp-structurev3 (see baidu AI studio docs).")
         .addText((text) =>
           text
-            .setPlaceholder("https://.../pp-structure")
+            .setPlaceholder("HTTPS://.../pp-structure")
             .setValue(this.plugin.settings.paddleStructureApiUrl)
             .onChange(async (value) => {
               this.plugin.settings.paddleStructureApiUrl = value.trim();
@@ -1257,8 +1253,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("OCR engine")
-        .setDesc("Select the OCR engine to use when OCR is required.")
+        .setName("Ocr engine")
+        .setDesc("Select the ocr engine to use when ocr is required.")
         .addDropdown((dropdown) => {
           ocrEngineDropdown = dropdown;
           dropdown.addOption("auto", "Auto (default)");
@@ -1270,13 +1266,13 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
 
       new Setting(tabEl)
-        .setName("OCR decision (when to OCR)")
-        .setDesc("Controls when OCR runs; per-page behavior is configured separately below.")
+        .setName("Ocr decision (when to ocr)")
+        .setDesc("Controls when ocr runs; per-page behavior is configured separately below.")
         .addDropdown((dropdown) =>
           dropdown
             .addOption("auto", "Auto: use text layer when reliable")
-            .addOption("force_low_quality", "OCR only if text is poor")
-            .addOption("force", "Prefer OCR for full document")
+            .addOption("force_low_quality", "Ocr only if text is poor")
+            .addOption("force", "Prefer ocr for full document")
             .setValue(this.plugin.settings.ocrMode)
             .onChange(async (value: string) => {
               this.plugin.settings.ocrMode = value as OcrMode;
@@ -1285,8 +1281,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("OCR layout override (per-page)")
-        .setDesc("Force per-page OCR when OCR runs, bypassing layout heuristics; can be slower for multi-column PDFs.")
+        .setName("Ocr layout override (per-page)")
+        .setDesc("Force per-page ocr when ocr runs, bypassing layout heuristics; can be slower for multi-column pdfs.")
         .addToggle((toggle) =>
           toggle
             .setValue(this.plugin.settings.forcePerPageOcr)
@@ -1312,11 +1308,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Chunking")
-        .setDesc("page or section")
+        .setDesc("Page or section")
         .addDropdown((dropdown) =>
           dropdown
-            .addOption("page", "page")
-            .addOption("section", "section")
+            .addOption("page", "Page")
+            .addOption("section", "Section")
             .setValue(this.plugin.settings.chunkingMode)
             .onChange(async (value: string) => {
               this.plugin.settings.chunkingMode = value as ChunkingMode;
@@ -1328,7 +1324,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderLlms = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "LLM Provider Profiles" });
+      new Setting(tabEl).setName("LLM provider profiles").setHeading();
 
       const profilesContainer = tabEl.createDiv({ cls: "zrr-llm-profiles" });
 
@@ -1366,7 +1362,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             .setName("Base URL")
             .addText((text) =>
               text
-                .setPlaceholder("http://localhost:1234/v1")
+                .setPlaceholder("HTTP://localhost:1234/v1")
                 .setValue(profile.baseUrl || "")
                 .onChange(async (value) => {
                   profile.baseUrl = value.trim();
@@ -1380,7 +1376,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             .addText((text) => {
               maskApiKeyInput(text);
               text
-                .setPlaceholder("sk-...")
+                .setPlaceholder("Sk-...")
                 .setValue(profile.apiKey || "")
                 .onChange(async (value) => {
                   profile.apiKey = value.trim();
@@ -1426,11 +1422,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       renderProfiles();
 
-      tabEl.createEl("h2", { text: "OCR cleanup" });
+      new Setting(tabEl).setName("Ocr cleanup").setHeading();
 
       new Setting(tabEl)
         .setName("LLM cleanup for low-quality chunks")
-        .setDesc("Automatic AI cleanup for poor OCR at import. Can be slow/costly.")
+        .setDesc("Automatic AI cleanup for poor ocr at import. Can be slow/costly.")
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.enableLlmCleanup).onChange(async (value) => {
             this.plugin.settings.enableLlmCleanup = value;
@@ -1494,11 +1490,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("LLM cleanup base URL")
-        .setDesc("OpenAI-compatible endpoint, e.g. http://127.0.0.1:1234/v1")
+        .setDesc("OpenAI-compatible endpoint, e.g. HTTP://127.0.0.1:1234/v1")
         .addText((text) => {
           cleanupBaseUrlInput = text;
           text
-            .setPlaceholder("http://127.0.0.1:1234/v1")
+            .setPlaceholder("HTTP://127.0.0.1:1234/v1")
             .setValue(this.plugin.settings.llmCleanupBaseUrl)
             .onChange(async (value) => {
               await applyCleanupBaseUrl(value);
@@ -1512,7 +1508,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           cleanupApiKeyInput = text;
           maskApiKeyInput(text);
           text
-            .setPlaceholder("sk-...")
+            .setPlaceholder("Sk-...")
             .setValue(this.plugin.settings.llmCleanupApiKey)
             .onChange(async (value) => {
               this.plugin.settings.llmCleanupApiKey = value.trim();
@@ -1622,7 +1618,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      tabEl.createEl("h2", { text: "Text Embedding" });
+      new Setting(tabEl).setName("Text embedding").setHeading();
 
       let embedProfileDropdown: DropdownComponent | null = null;
       let embedBaseUrlInput: TextComponent | null = null;
@@ -1683,7 +1679,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addText((text) => {
           embedBaseUrlInput = text;
           text
-            .setPlaceholder("http://localhost:1234/v1")
+            .setPlaceholder("HTTP://localhost:1234/v1")
             .setValue(this.plugin.settings.embedBaseUrl)
             .onChange(async (value) => {
               await applyEmbedBaseUrl(value);
@@ -1696,7 +1692,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           embedApiKeyInput = text;
           maskApiKeyInput(text);
           text
-            .setPlaceholder("lm-studio")
+            .setPlaceholder("Lm-studio")
             .setValue(this.plugin.settings.embedApiKey)
             .onChange(async (value) => {
               this.plugin.settings.embedApiKey = value.trim();
@@ -1832,7 +1828,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Generate LLM tags for chunks")
-        .setDesc("Use the OCR cleanup model to tag chunks before indexing.")
+        .setDesc("Use the ocr cleanup model to tag chunks before indexing.")
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.enableChunkTagging).onChange(async (value) => {
             this.plugin.settings.enableChunkTagging = value;
@@ -1840,7 +1836,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      tabEl.createEl("h2", { text: "Chat LLM" });
+      new Setting(tabEl).setName("Chat LLM").setHeading();
 
       let chatProfileDropdown: DropdownComponent | null = null;
       let chatBaseUrlInput: TextComponent | null = null;
@@ -1902,7 +1898,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addText((text) => {
           chatBaseUrlInput = text;
           text
-            .setPlaceholder("http://localhost:1234/v1")
+            .setPlaceholder("HTTP://localhost:1234/v1")
             .setValue(this.plugin.settings.chatBaseUrl)
             .onChange(async (value) => {
               await applyChatBaseUrl(value);
@@ -1915,7 +1911,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           chatApiKeyInput = text;
           maskApiKeyInput(text);
           text
-            .setPlaceholder("lm-studio")
+            .setPlaceholder("Lm-studio")
             .setValue(this.plugin.settings.chatApiKey)
             .onChange(async (value) => {
               this.plugin.settings.chatApiKey = value.trim();
@@ -2024,7 +2020,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      tabEl.createEl("h2", { text: "Retrieval" });
+      new Setting(tabEl).setName("Retrieval").setHeading();
 
       new Setting(tabEl)
         .setName("Enable agentic retrieval")
@@ -2113,7 +2109,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       const rerankModelSetting = new Setting(tabEl)
         .setName("Cross-encoder model")
-        .setDesc("Choose a multilingual preset, or select Custom to edit the model id.");
+        .setDesc("Choose a multilingual preset, or select custom to edit the model ID.");
 
       rerankModelSetting
         .addDropdown((dropdown) => {
@@ -2153,7 +2149,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Rerank candidate multiplier")
-        .setDesc("Retrieve k × N candidates before reranking.")
+        .setDesc("Retrieve k × n candidates before reranking.")
         .addText((text) =>
           text
             .setPlaceholder("4")
@@ -2168,7 +2164,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("RRF k")
+        .setName("Rrf k")
         .setDesc("Rank fusion constant for blending lexical and vector results.")
         .addText((text) =>
           text
@@ -2182,8 +2178,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("RRF log top N")
-        .setDesc("Log the top N RRF-ranked chunks to stderr (0 disables).")
+        .setName("Rrf log top n")
+        .setDesc("Log the top n rrf-ranked chunks to stderr (0 disables).")
         .addText((text) =>
           text
             .setPlaceholder("0")
@@ -2213,7 +2209,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderMaintenance = (tabEl: HTMLElement) => {
-      tabEl.createEl("h2", { text: "Python Runtime" });
+      new Setting(tabEl).setName("Python runtime").setHeading();
 
       new Setting(tabEl)
         .setName("Use local runtime (legacy)")
@@ -2226,7 +2222,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      tabEl.createEl("h2", { text: "Logging" });
+      new Setting(tabEl).setName("Logging").setHeading();
 
       new Setting(tabEl)
         .setName("Enable logging to file")
@@ -2265,21 +2261,21 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      tabEl.createEl("h2", { text: "Zotero Companion Plugin" });
+      new Setting(tabEl).setName("Zotero companion plugin").setHeading();
       tabEl.createEl("p", {
-        text: "Download the XPI, then in Zotero go to Tools → Add-ons → Install from File and restart.",
+        text: "Download the xpi, then in Zotero go to tools → add-ons → install from file and restart.",
       });
 
       new Setting(tabEl)
         .setName("Download companion add-on")
-        .setDesc("Downloads the companion XPI to your system Downloads folder.")
+        .setDesc("Downloads the companion xpi to your system downloads folder.")
         .addButton((button) =>
           button
-            .setButtonText("Download XPI")
+            .setButtonText("Download xpi")
             .onClick(async () => {
               const downloadDir = this.getDefaultDownloadDir();
               if (!downloadDir) {
-                new Notice("Unable to resolve the system Downloads folder.");
+                new Notice("Unable to resolve the system downloads folder.");
                 return;
               }
               const xpiPath = path.join(downloadDir, "zrr-companion.xpi");
@@ -2287,14 +2283,14 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
                 new Notice(`Companion XPI already exists: ${xpiPath}`);
                 return;
               }
-              new Notice("Downloading companion XPI...");
+              new Notice("Downloading companion xpi...");
               await this.downloadCompanionXpi(xpiPath);
             })
         );
 
       new Setting(tabEl)
         .setName("Open Zotero")
-        .setDesc("Launch Zotero and open the Add-ons window (Tools → Add-ons).")
+        .setDesc("Launch Zotero and open the add-ons window (tools → add-ons).")
         .addButton((button) =>
           button
             .setButtonText("Open Zotero")
@@ -2314,11 +2310,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
       );
       
-      tabEl.createEl("h2", { text: "Redis Indexing" });
+      new Setting(tabEl).setName("Redis indexing").setHeading();
 
       new Setting(tabEl)
-        .setName("Reindex Redis from cached chunks")
-        .setDesc("Rebuild the Redis index from cached chunk JSON files.")
+        .setName("Reindex redis from cached chunks")
+        .setDesc("Rebuild the redis index from cached chunk JSON files.")
         .addButton((button) =>
           button.setButtonText("Reindex").onClick(async () => {
             await this.plugin.reindexRedisFromCache();
@@ -2339,14 +2335,14 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      tabEl.createEl("h2", { text: "Release Notes" });
+      new Setting(tabEl).setName("Release notes").setHeading();
 
       new Setting(tabEl)
         .setName("Show release notes")
         .setDesc("Open the current version splash screen.")
         .addButton((button) =>
-          button.setButtonText("Show").onClick(async () => {
-            await this.plugin.openReleaseNotesModal();
+          button.setButtonText("Show").onClick(() => {
+            this.plugin.openReleaseNotesModal();
           })
         );
     };
@@ -2451,7 +2447,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       await fs.writeFile(xpiPath, buffer);
       new Notice(`Downloaded companion XPI: ${xpiPath}`);
     } catch (error) {
-      new Notice("Failed to download companion XPI. See console for details.");
+      new Notice("Failed to download companion xpi. See console for details.");
       console.warn("Failed to download companion XPI", error);
     }
   }

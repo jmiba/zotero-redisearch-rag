@@ -110,7 +110,7 @@ export const extractDocIdFromDoc = (doc: CMText): string | null => {
   for (let line = 1; line <= doc.lines; line += 1) {
     const text = doc.line(line).text;
     if (ZRR_SYNC_START_RE.test(text)) {
-      const docMatch = text.match(/doc_id=([\"']?)([^\"'\s]+)\1/i);
+      const docMatch = text.match(/doc_id=(["']?)([^"'\s]+)\1/i);
       return docMatch ? docMatch[2].trim() : null;
     }
   }

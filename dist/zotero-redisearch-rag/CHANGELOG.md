@@ -1,10 +1,20 @@
 # Changelog
+## 0.9.8 (Bugfix Release)
+- Fix Obsidian review-blocking code issues for release validation:
+  - replace deprecated markdown rendering calls with `MarkdownRenderer.render`,
+  - replace `fetch` usage with Obsidian `requestUrl`,
+  - remove `window.confirm` usage in favor of modal confirmations,
+  - remove direct `innerHTML` writes in PDF sidebar/icon handling,
+  - align command labels and static UI styling with plugin guidelines.
+- Fix TypeScript regressions introduced during lint refactors by restoring robust `unknown`/JSON payload narrowing across chat history parsing, worker stream events, Redis stats payloads, and Zotero API response handling.
+- Refine runtime-safe metadata/tag/creator parsing and cache payload handling in `main.ts` to prevent `{}`/`unknown` property access errors in editor diagnostics.
+
 ## 0.9.7 (Bugfix Release)
 - Fix Redis/Python worker startup failures caused by stale container-name conflicts by auto-removing conflicting project containers and retrying startup once.
 - Improve Zotero annotation deletion propagation to notes by detecting missing Zotero annotations and refreshing note annotation blocks accordingly.
 - Guard annotation-prune sync against incomplete Zotero fetches to avoid accidental removals when annotation APIs fail.
 - Add a focus-triggered annotation sync so note updates are pulled shortly after returning to Obsidian.
-- Preserve Zotero manual annotation order within each heading by prioritizing Zotero sort tokens (`annotationSortIndex` / `annotationSort`) during block rendering.
+- Preserve Zotero annotation order within each heading by prioritizing Zotero sort tokens (`annotationSortIndex` / `annotationSort`) during block rendering.
 
 ## 0.9.6 (Bugfix Release)
 - Fix worker-mode Redis `Connection refused` failures on Windows by hardening Redis URL rewriting in worker requests, including `redis://`, `rediss://`, and `redis+tls://` loopback URLs.

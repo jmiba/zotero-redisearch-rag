@@ -1,9 +1,9 @@
-export type ZoteroItemValues = Record<string, any> & { version?: number };
+export type ZoteroItemValues = Record<string, unknown> & { version?: number };
 
 export type ZoteroLocalItem = {
   key: string;
-  data: Record<string, any>;
-  meta?: Record<string, any>;
+  data: Record<string, unknown>;
+  meta?: Record<string, unknown>;
 };
 
 export type PdfAttachment = {

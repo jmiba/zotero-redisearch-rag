@@ -62,7 +62,7 @@ export const extractYearFromItem = (item: ZoteroLocalItem): string => {
   return extractYear(parsed);
 };
 
-export const formatCreatorName = (creator: any): string => {
+export const formatCreatorName = (creator: unknown): string => {
   if (!creator || typeof creator !== "object") {
     return "";
   }
@@ -75,7 +75,7 @@ export const formatCreatorName = (creator: any): string => {
   return combined || `${first} ${last}`.trim();
 };
 
-export const extractCitekey = (values: ZoteroItemValues, meta?: Record<string, any>): string => {
+export const extractCitekey = (values: ZoteroItemValues, meta?: Record<string, unknown>): string => {
   const candidates = [
     // Prefer Zotero's native citation-key field variants first.
     values.citationKey,
@@ -122,16 +122,16 @@ export const extractCitekey = (values: ZoteroItemValues, meta?: Record<string, a
   return "";
 };
 
-export const extractCitekeyFromCsl = (csl: Record<string, any> | null): string => {
+export const extractCitekeyFromCsl = (csl: Record<string, unknown> | null): string => {
   if (!csl) {
     return "";
   }
   const candidates = [
     csl["citation-key"],
-    (csl as any).citationKey,
-    (csl as any).citationkey,
-    (csl as any).citekey,
-    (csl as any).citation_key,
+    (csl as unknown).citationKey,
+    (csl as unknown).citationkey,
+    (csl as unknown).citekey,
+    (csl as unknown).citation_key,
   ];
   for (const candidate of candidates) {
     const resolved = coerceString(candidate);
@@ -142,7 +142,7 @@ export const extractCitekeyFromCsl = (csl: Record<string, any> | null): string =
   return "";
 };
 
-export const extractShortTitleFromCsl = (csl: Record<string, any> | null): string => {
+export const extractShortTitleFromCsl = (csl: Record<string, unknown> | null): string => {
   if (!csl) {
     return "";
   }
@@ -151,15 +151,15 @@ export const extractShortTitleFromCsl = (csl: Record<string, any> | null): strin
 };
 
 export const extractShortTitleFromValues = (values: ZoteroItemValues): string => {
-  const direct = coerceString((values as any).shortTitle);
+  const direct = coerceString((values as unknown).shortTitle);
   if (direct) {
     return direct;
   }
-  const underscored = coerceString((values as any).short_title);
+  const underscored = coerceString((values as unknown).short_title);
   if (underscored) {
     return underscored;
   }
-  const hyphenated = coerceString((values as any)["title-short"]);
+  const hyphenated = coerceString((values as unknown)["title-short"]);
   if (hyphenated) {
     return hyphenated;
   }
@@ -182,7 +182,7 @@ export const extractDoiFromExtra = (values: ZoteroItemValues): string => {
   return doiMatch ? doiMatch[0].replace(/[.,;]+$/, "") : "";
 };
 
-export const extractDoiFromCsl = (csl: Record<string, any> | null): string => {
+export const extractDoiFromCsl = (csl: Record<string, unknown> | null): string => {
   if (!csl) {
     return "";
   }
@@ -193,7 +193,7 @@ export const extractDoiFromCsl = (csl: Record<string, any> | null): string => {
   return "";
 };
 
-export const collectItemAttachments = (data: Record<string, any> | undefined): any[] => {
+export const collectItemAttachments = (data: Record<string, unknown> | undefined): unknown[] => {
   if (!data) {
     return [];
   }
@@ -201,10 +201,10 @@ export const collectItemAttachments = (data: Record<string, any> | undefined): a
     data.attachments,
     data.children,
     data.items,
-    (data as any).attachment,
-    (data as any).allAttachments,
+    (data as unknown).attachment,
+    (data as unknown).allAttachments,
   ];
-  const collected: any[] = [];
+  const collected: unknown[] = [];
   for (const bucket of buckets) {
     if (!bucket) {
       continue;
@@ -218,7 +218,7 @@ export const collectItemAttachments = (data: Record<string, any> | undefined): a
   return collected;
 };
 
-export const isPdfAttachment = (entry: any): boolean => {
+export const isPdfAttachment = (entry: unknown): boolean => {
   const contentType =
     entry?.contentType ?? entry?.mimeType ?? entry?.data?.contentType ?? entry?.data?.mimeType ?? "";
   if (contentType === "application/pdf") {

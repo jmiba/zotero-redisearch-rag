@@ -561,3 +561,155 @@
 .zrr-redis-override-setting.is-disabled .setting-item-description {
   color: var(--text-faint);
 }
+
+.zrr-setting-disabled {
+  opacity: 0.55;
+}
+
+.zrr-setting-disabled .setting-item-description {
+  color: var(--text-faint);
+}
+
+.zrr-setting-hidden {
+  display: none;
+}
+
+.zrr-font-semibold {
+  font-weight: 600;
+}
+
+.zrr-status-bar-inner--indeterminate-width {
+  width: 40%;
+}
+
+.zrr-status-bar-inner--zero-width {
+  width: 0%;
+}
+
+.zrr-u-align-items-center {
+  align-items: center;
+}
+
+.zrr-u-border-1px-solid-var-background-modifier-border {
+  border: 1px solid var(--background-modifier-border);
+}
+
+.zrr-u-border-radius-6px {
+  border-radius: 6px;
+}
+
+.zrr-u-color-var-text-muted {
+  color: var(--text-muted);
+}
+
+.zrr-u-display-flex {
+  display: flex;
+}
+
+.zrr-u-display-grid {
+  display: grid;
+}
+
+.zrr-u-flex-1 {
+  flex: 1;
+}
+
+.zrr-u-flex-1-1-0 {
+  flex: 1 1 0;
+}
+
+.zrr-u-flex-direction-column {
+  flex-direction: column;
+}
+
+.zrr-u-flex-wrap-wrap {
+  flex-wrap: wrap;
+}
+
+.zrr-u-gap-0-4rem {
+  gap: 0.4rem;
+}
+
+.zrr-u-gap-0-5rem {
+  gap: 0.5rem;
+}
+
+.zrr-u-gap-0-75rem {
+  gap: 0.75rem;
+}
+
+.zrr-u-grid-template-columns-1fr-1fr {
+  grid-template-columns: 1fr 1fr;
+}
+
+.zrr-u-height-100 {
+  height: 100%;
+}
+
+.zrr-u-height-80vh {
+  height: 80vh;
+}
+
+.zrr-u-justify-content-space-between {
+  justify-content: space-between;
+}
+
+.zrr-u-margin-0-5rem-0 {
+  margin: 0.5rem 0;
+}
+
+.zrr-u-margin-bottom-0-5rem {
+  margin-bottom: 0.5rem;
+}
+
+.zrr-u-margin-left-auto {
+  margin-left: auto;
+}
+
+.zrr-u-margin-top-0-75rem {
+  margin-top: 0.75rem;
+}
+
+.zrr-u-margin-top-1rem {
+  margin-top: 1rem;
+}
+
+.zrr-u-max-height-90vh {
+  max-height: 90vh;
+}
+
+.zrr-u-max-width-1200px {
+  max-width: 1200px;
+}
+
+.zrr-u-min-height-0 {
+  min-height: 0;
+}
+
+.zrr-u-min-width-0 {
+  min-width: 0;
+}
+
+.zrr-u-overflow-auto {
+  overflow: auto;
+}
+
+.zrr-u-overflow-hidden {
+  overflow: hidden;
+}
+
+.zrr-u-padding-0-6rem {
+  padding: 0.6rem;
+}
+
+.zrr-u-resize-both {
+  resize: both;
+}
+
+.zrr-u-width-100 {
+  width: 100%;
+}
+
+.zrr-u-width-80vw {
+  width: 80vw;
+}
