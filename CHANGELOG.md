@@ -1,4 +1,9 @@
 # Changelog
+## 0.9.9 (Bugfix Release)
+- Fix release workflow install failures by syncing npm dependency metadata and lockfile for CI.
+- Pin Obsidian peer `@codemirror/state` and `@codemirror/view` dev dependencies so `npm ci` resolves deterministically in GitHub Actions.
+- Restore reliable GitHub release asset publication (`main.js`, `manifest.json`, `versions.json`, `styles.css`, and release zip) after CI recovery.
+
 ## 0.9.8 (Bugfix Release)
 - Fix Obsidian review-blocking code issues for release validation:
   - replace deprecated markdown rendering calls with `MarkdownRenderer.render`,
