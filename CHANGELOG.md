@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.10 (Bugfix Release)
+- Fix remaining Obsidian review lint issues:
+  - remove async Promise-returning DOM callbacks where `void` is required,
+  - remove deprecated-node rule suppressions and refactor request error handling,
+  - tighten unknown/object-to-string coercion guards to avoid `[object Object]` fallbacks.
+- Normalize flagged UI labels in settings/modals to sentence case.
+
 ## 0.9.9 (Bugfix Release)
 - Fix release workflow install failures by syncing npm dependency metadata and lockfile for CI.
 - Pin Obsidian peer `@codemirror/state` and `@codemirror/view` dev dependencies so `npm ci` resolves deterministically in GitHub Actions.
