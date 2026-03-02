@@ -316,25 +316,29 @@ export class ChunkTagModal extends Modal {
 
     if (this.onRegenerate) {
       const regenerate = actions.createEl("button", { text: "Regenerate" });
-      regenerate.addEventListener("click", async () => {
-        regenerate.setAttribute("disabled", "true");
-        submit.setAttribute("disabled", "true");
-        try {
-          const tags = await this.onRegenerate?.();
-          if (tags && tags.length > 0) {
-            input.value = tags.join(", ");
-            await Promise.resolve(this.onSubmit(tags));
-          } else if (tags) {
-            new Notice("No tags were generated.");
+      regenerate.addEventListener("click", () => {
+        void (async () => {
+          regenerate.setAttribute("disabled", "true");
+          submit.setAttribute("disabled", "true");
+          try {
+            const tags = await this.onRegenerate?.();
+            if (tags && tags.length > 0) {
+              input.value = tags.join(", ");
+              await Promise.resolve(this.onSubmit(tags));
+            } else if (tags) {
+              new Notice("No tags were generated.");
+            }
+          } finally {
+            regenerate.removeAttribute("disabled");
+            submit.removeAttribute("disabled");
           }
-        } finally {
-          regenerate.removeAttribute("disabled");
-          submit.removeAttribute("disabled");
-        }
+        })();
       });
     }
 
-    submit.addEventListener("click", handleSubmit);
+    submit.addEventListener("click", () => {
+      void handleSubmit();
+    });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         void handleSubmit();
@@ -568,12 +572,14 @@ export class OutputModal extends Modal {
     if (this.options?.onClear) {
       const clearLabel = this.options.clearLabel ?? "Clear log";
       const clearButton = actions.createEl("button", { text: clearLabel });
-      clearButton.addEventListener("click", async () => {
-        try {
-          await this.options?.onClear?.();
-        } finally {
-          await this.refreshFromSource();
-        }
+      clearButton.addEventListener("click", () => {
+        void (async () => {
+          try {
+            await this.options?.onClear?.();
+          } finally {
+            await this.refreshFromSource();
+          }
+        })();
       });
     }
     const editorWrap = contentEl.createDiv();
@@ -795,7 +801,7 @@ export class ConfirmPurgeRedisOrphansModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h3", { text: "Purge redis orphaned chunks?" });
     contentEl.createEl("p", {
-      text: "This removes Redis chunk keys that have no cached item.json or chunk.json on disk.",
+      text: "This removes Redis chunk keys that have no cached item.json or chunks JSON files on disk.",
     });
     contentEl.createEl("p", {
       text: "Cache files are not deleted. Use this to clean up stale redis data.",
@@ -1174,7 +1180,7 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     const docId = getDocIdFromItem(item);
     const isIndexed = docId ? this.indexedDocIds?.has(docId) : false;
     const pdfStatus = getPdfStatusFromItem(item);
-    const itemType = String(item.data?.itemType ?? "").trim();
+    const itemType = typeof item.data?.itemType === "string" ? item.data.itemType.trim() : "";
     if (isIndexed) {
       el.addClass("zrr-indexed-item");
     }

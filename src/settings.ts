@@ -1065,70 +1065,82 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
           deleteButton.type = "button";
 
-          colorInput.addEventListener("change", async () => {
-            const nextKey = colorInput.value.trim().toLowerCase();
-            if (!nextKey) {
-              colorInput.value = colorKey;
-              return;
-            }
-            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
-            if (nextKey !== colorKey && current[nextKey]) {
-              new Notice(`Annotation color '${nextKey}' already exists.`);
-              colorInput.value = colorKey;
-              return;
-            }
-            const entry = current[colorKey];
-            delete current[colorKey];
-            current[nextKey] = entry ?? { heading: "", callout: "" };
-            await saveMap(current);
-            renderMap();
+          colorInput.addEventListener("change", () => {
+            void (async () => {
+              const nextKey = colorInput.value.trim().toLowerCase();
+              if (!nextKey) {
+                colorInput.value = colorKey;
+                return;
+              }
+              const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+              if (nextKey !== colorKey && current[nextKey]) {
+                new Notice(`Annotation color '${nextKey}' already exists.`);
+                colorInput.value = colorKey;
+                return;
+              }
+              const entry = current[colorKey];
+              delete current[colorKey];
+              current[nextKey] = entry ?? { heading: "", callout: "" };
+              await saveMap(current);
+              renderMap();
+            })();
           });
 
-          headingInput.addEventListener("change", async () => {
-            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
-            const entry = current[colorKey] ?? { heading: "", callout: "" };
-            entry.heading = headingInput.value.trim();
-            current[colorKey] = entry;
-            await saveMap(current);
+          headingInput.addEventListener("change", () => {
+            void (async () => {
+              const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+              const entry = current[colorKey] ?? { heading: "", callout: "" };
+              entry.heading = headingInput.value.trim();
+              current[colorKey] = entry;
+              await saveMap(current);
+            })();
           });
 
-          calloutInput.addEventListener("change", async () => {
-            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
-            const entry = current[colorKey] ?? { heading: "", callout: "" };
-            entry.callout = calloutInput.value.trim();
-            current[colorKey] = entry;
-            await saveMap(current);
+          calloutInput.addEventListener("change", () => {
+            void (async () => {
+              const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+              const entry = current[colorKey] ?? { heading: "", callout: "" };
+              entry.callout = calloutInput.value.trim();
+              current[colorKey] = entry;
+              await saveMap(current);
+            })();
           });
 
-          deleteButton.addEventListener("click", async () => {
-            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
-            delete current[colorKey];
-            await saveMap(current);
-            renderMap();
+          deleteButton.addEventListener("click", () => {
+            void (async () => {
+              const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+              delete current[colorKey];
+              await saveMap(current);
+              renderMap();
+            })();
           });
         }
 
         const actions = mapContainer.createDiv({ cls: "zrr-annotation-map-actions" });
         const addButton = actions.createEl("button", { text: "Add mapping" });
         addButton.type = "button";
-        addButton.addEventListener("click", async () => {
-          const current = { ...(this.plugin.settings.annotationColorMap || {}) };
-          let key = "new-color";
-          let idx = 1;
-          while (current[key]) {
-            key = `new-color-${idx}`;
-            idx += 1;
-          }
-          current[key] = { heading: "", callout: "" };
-          await saveMap(current);
-          renderMap();
+        addButton.addEventListener("click", () => {
+          void (async () => {
+            const current = { ...(this.plugin.settings.annotationColorMap || {}) };
+            let key = "new-color";
+            let idx = 1;
+            while (current[key]) {
+              key = `new-color-${idx}`;
+              idx += 1;
+            }
+            current[key] = { heading: "", callout: "" };
+            await saveMap(current);
+            renderMap();
+          })();
         });
 
         const resetButton = actions.createEl("button", { text: "Reset to defaults" });
         resetButton.type = "button";
-        resetButton.addEventListener("click", async () => {
-          await saveMap({ ...DEFAULT_SETTINGS.annotationColorMap });
-          renderMap();
+        resetButton.addEventListener("click", () => {
+          void (async () => {
+            await saveMap({ ...DEFAULT_SETTINGS.annotationColorMap });
+            renderMap();
+          })();
         });
       };
 
@@ -1324,7 +1336,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     };
 
     const renderLlms = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("LLM provider profiles").setHeading();
+      new Setting(tabEl).setName("Model provider profiles").setHeading();
 
       const profilesContainer = tabEl.createDiv({ cls: "zrr-llm-profiles" });
 
@@ -1425,7 +1437,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       new Setting(tabEl).setName("Ocr cleanup").setHeading();
 
       new Setting(tabEl)
-        .setName("LLM cleanup for low-quality chunks")
+        .setName("Model cleanup for low-quality chunks")
         .setDesc("Automatic AI cleanup for poor ocr at import. Can be slow/costly.")
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.enableLlmCleanup).onChange(async (value) => {
@@ -1437,7 +1449,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       let cleanupProfileDropdown: DropdownComponent | null = null;
       let cleanupBaseUrlInput: TextComponent | null = null;
       let cleanupApiKeyInput: TextComponent | null = null;
-      let refreshCleanupModels: () => Promise<void> = async () => undefined;
+      let refreshCleanupModels: () => Promise<void> = () => Promise.resolve();
 
       const applyCleanupBaseUrl = async (value: string, markCustom = true) => {
         const trimmed = value.trim();
@@ -1468,7 +1480,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       new Setting(tabEl)
-        .setName("LLM cleanup provider profile")
+        .setName("Cleanup provider profile")
         .setDesc("Select a profile to populate base URL and API key.")
         .addDropdown((dropdown) => {
           cleanupProfileDropdown = dropdown;
@@ -1489,7 +1501,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
 
       new Setting(tabEl)
-        .setName("LLM cleanup base URL")
+        .setName("Cleanup base URL")
         .setDesc("OpenAI-compatible endpoint, e.g. HTTP://127.0.0.1:1234/v1")
         .addText((text) => {
           cleanupBaseUrlInput = text;
@@ -1502,7 +1514,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
 
       new Setting(tabEl)
-        .setName("LLM cleanup API key")
+        .setName("Cleanup API key")
         .setDesc("Optional API key for the cleanup endpoint.")
         .addText((text) => {
           cleanupApiKeyInput = text;
@@ -1521,7 +1533,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
 
       const cleanupModelSetting = new Setting(tabEl)
-        .setName("LLM cleanup model")
+        .setName("Cleanup model")
         .setDesc("Select a cleanup-capable model from the provider.");
 
       let cleanupModelDropdown: DropdownComponent | null = null;
@@ -1577,7 +1589,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       void refreshCleanupModels();
 
       new Setting(tabEl)
-        .setName("LLM cleanup temperature")
+        .setName("Cleanup temperature")
         .setDesc("Lower is more conservative.")
         .addText((text) =>
           text
@@ -1591,7 +1603,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("LLM cleanup min quality")
+        .setName("Cleanup minimum quality")
         .setDesc("Only run cleanup when chunk quality is below this threshold (0-1).")
         .addSlider((slider) =>
           slider
@@ -1605,7 +1617,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("LLM cleanup max chars")
+        .setName("Cleanup maximum chars")
         .setDesc("Skip cleanup for chunks longer than this limit.")
         .addText((text) =>
           text
@@ -1623,7 +1635,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       let embedProfileDropdown: DropdownComponent | null = null;
       let embedBaseUrlInput: TextComponent | null = null;
       let embedApiKeyInput: TextComponent | null = null;
-      let refreshEmbeddingModels: () => Promise<void> = async () => undefined;
+      let refreshEmbeddingModels: () => Promise<void> = () => Promise.resolve();
 
       const applyEmbedBaseUrl = async (value: string, markCustom = true) => {
         const trimmed = value.trim();
@@ -1827,7 +1839,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl)
-        .setName("Generate LLM tags for chunks")
+        .setName("Generate model tags for chunks")
         .setDesc("Use the ocr cleanup model to tag chunks before indexing.")
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.enableChunkTagging).onChange(async (value) => {
@@ -1836,12 +1848,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl).setName("Chat LLM").setHeading();
+      new Setting(tabEl).setName("Chat model").setHeading();
 
       let chatProfileDropdown: DropdownComponent | null = null;
       let chatBaseUrlInput: TextComponent | null = null;
       let chatApiKeyInput: TextComponent | null = null;
-      let refreshChatModels: () => Promise<void> = async () => undefined;
+      let refreshChatModels: () => Promise<void> = () => Promise.resolve();
 
       const applyChatBaseUrl = async (value: string, markCustom = true) => {
         const trimmed = value.trim();
@@ -1894,7 +1906,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Chat base URL")
-        .setDesc("OpenAI-compatible base URL for chat requests.")
+        .setDesc("OpenAI-compatible endpoint for chat requests.")
         .addText((text) => {
           chatBaseUrlInput = text;
           text

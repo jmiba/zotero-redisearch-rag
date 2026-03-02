@@ -89,8 +89,8 @@ export class ZoteroChatView extends ItemView {
     const controls = header.createEl("div", { cls: "zrr-chat-controls" });
     const selectRow = controls.createEl("div", { cls: "zrr-chat-controls-row" });
     this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" });
-    this.sessionSelect.addEventListener("change", async () => {
-      await this.switchSession(this.sessionSelect.value);
+    this.sessionSelect.addEventListener("change", () => {
+      void this.switchSession(this.sessionSelect.value);
     });
     const buttonRow = controls.createEl("div", { cls: "zrr-chat-controls-row zrr-chat-controls-actions" });
     this.renameButton = buttonRow.createEl("button", {
@@ -98,32 +98,32 @@ export class ZoteroChatView extends ItemView {
       text: "Rename",
       attr: { title: "Rename the current chat" },
     });
-    this.renameButton.addEventListener("click", async () => {
-      await this.promptRenameSession();
+    this.renameButton.addEventListener("click", () => {
+      void this.promptRenameSession();
     });
     this.copyButton = buttonRow.createEl("button", {
       cls: "zrr-chat-copy",
       text: "Copy",
       attr: { title: "Copy this chat to a new note" },
     });
-    this.copyButton.addEventListener("click", async () => {
-      await this.copyChatToNote();
+    this.copyButton.addEventListener("click", () => {
+      void this.copyChatToNote();
     });
     this.deleteButton = buttonRow.createEl("button", {
       cls: "zrr-chat-delete",
       text: "Delete",
       attr: { title: "Delete this chat" },
     });
-    this.deleteButton.addEventListener("click", async () => {
-      await this.deleteChat();
+    this.deleteButton.addEventListener("click", () => {
+      void this.deleteChat();
     });
     this.newButton = buttonRow.createEl("button", {
       cls: "zrr-chat-new",
       text: "New chat",
       attr: { title: "Start a new chat session" },
     });
-    this.newButton.addEventListener("click", async () => {
-      await this.startNewChat();
+    this.newButton.addEventListener("click", () => {
+      void this.startNewChat();
     });
 
     this.messagesEl = containerEl.createEl("div", { cls: "zrr-chat-messages" });
@@ -276,20 +276,20 @@ export class ZoteroChatView extends ItemView {
       attr: { title: "Copy this message", "aria-label": "Copy this message" },
     });
     setIcon(copyButton, "copy");
-    copyButton.addEventListener("click", async (event) => {
+    copyButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      await this.copyMessage(message);
+      void this.copyMessage(message);
     });
     const deleteButton = actions.createEl("button", {
       cls: "zrr-chat-message-delete zrr-chat-icon-button",
       attr: { title: "Delete this message", "aria-label": "Delete this message" },
     });
     setIcon(deleteButton, "trash-2");
-    deleteButton.addEventListener("click", async (event) => {
+    deleteButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      await this.deleteMessage(message.id);
+      void this.deleteMessage(message.id);
     });
     const contentEl = wrapper.createEl("div", { cls: "zrr-chat-content" });
     const citationsEl = wrapper.createEl("div", { cls: "zrr-chat-citations" });
@@ -355,10 +355,11 @@ export class ZoteroChatView extends ItemView {
     if (this.pendingRender.has(message.id)) {
       return;
     }
-    const handle = window.setTimeout(async () => {
+    const handle = window.setTimeout(() => {
       this.pendingRender.delete(message.id);
-      await this.renderMessageContent(message);
-      this.scrollToBottom();
+      void this.renderMessageContent(message).then(() => {
+        this.scrollToBottom();
+      });
     }, 80);
     this.pendingRender.set(message.id, handle);
   }
@@ -485,7 +486,9 @@ export class ZoteroChatView extends ItemView {
   }
 
   private isCancellationError(error: unknown): boolean {
-    const text = error instanceof Error ? error.message : String(error ?? "");
+    const text = error instanceof Error
+      ? error.message
+      : (typeof error === "string" ? error : "");
     const lowered = text.toLowerCase();
     return (
       lowered.includes("request canceled") ||

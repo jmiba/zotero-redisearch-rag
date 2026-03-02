@@ -1155,12 +1155,15 @@ export default class ZoteroRagPlugin extends Plugin {
         .filter((s): s is Record<string, unknown> => {
           return Boolean(this.asRecord(s) && typeof (s as Record<string, unknown>).id === "string");
         })
-        .map((s) => ({
-          id: String(s.id),
-          name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : String(s.id),
+        .map((s) => {
+          const id = typeof s.id === "string" ? s.id : "";
+          return {
+            id,
+            name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : id,
           createdAt: typeof s.createdAt === "string" ? s.createdAt : new Date().toISOString(),
           updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : new Date().toISOString(),
-        }));
+          };
+        });
     } catch (error) {
       console.warn("Failed to read chat sessions index", error);
       return [];
@@ -1271,7 +1274,7 @@ export default class ZoteroRagPlugin extends Plugin {
       .map((msg) => ({
         id: typeof msg.id === "string" ? msg.id : this.generateChatId(),
         role: msg.role === "assistant" ? "assistant" : "user",
-        content: String(msg.content ?? ""),
+        content: typeof msg.content === "string" ? msg.content : "",
         citations: Array.isArray(msg.citations) ? msg.citations : [],
         retrieved: Array.isArray(msg.retrieved) ? msg.retrieved : [],
         createdAt: typeof msg.createdAt === "string" ? msg.createdAt : new Date().toISOString(),
@@ -1325,12 +1328,15 @@ export default class ZoteroRagPlugin extends Plugin {
         sessions: sessions
           .map((s) => this.asRecord(s))
           .filter((s): s is Record<string, unknown> => Boolean(s))
-          .map((s) => ({
-            id: String(s.id ?? ""),
-            name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : String(s.id ?? ""),
+          .map((s) => {
+            const id = typeof s.id === "string" ? s.id : "";
+            return {
+              id,
+              name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : id,
             createdAt: typeof s.createdAt === "string" ? s.createdAt : now,
             updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : now,
-        })),
+            };
+          }),
       };
     } catch (error) {
       console.warn("Failed to parse chat sessions index", error);
@@ -1407,7 +1413,7 @@ export default class ZoteroRagPlugin extends Plugin {
             version: 1,
             active: typeof payload?.active === "string" ? payload.active : "default",
             sessions: updatedSessions.map((s) => ({
-              id: String(s.id ?? ""),
+              id: typeof s.id === "string" ? s.id : "",
               name: typeof s.name === "string" ? s.name : "New chat",
               createdAt: typeof s.createdAt === "string" ? s.createdAt : now,
               updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : now,
@@ -2908,9 +2914,13 @@ export default class ZoteroRagPlugin extends Plugin {
               return;
             }
             if (event.type === "progress" && event.message) {
+              const progressMessage = typeof event.message === "string" ? event.message : "";
+              if (!progressMessage) {
+                return;
+              }
               void this.appendToLogFile(
                 logPath,
-                String(event.message),
+                progressMessage,
                 "index_redisearch",
                 "INFO"
               );
@@ -3924,7 +3934,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!key) {
       return false;
     }
-    const itemType = String(item.data?.itemType ?? "").trim().toLowerCase();
+    const itemType = typeof item.data?.itemType === "string" ? item.data.itemType.trim().toLowerCase() : "";
     if (itemType === "attachment" || itemType === "note" || itemType === "annotation") {
       return false;
     }
@@ -4509,11 +4519,11 @@ export default class ZoteroRagPlugin extends Plugin {
     const rawTags = target.chunk_tags ?? [];
     const initialTags = Array.isArray(rawTags)
       ? rawTags.map((tag) => String(tag).trim()).filter((tag) => tag)
-      : String(rawTags)
+      : (typeof rawTags === "string" ? rawTags : "")
           .split(/[|,;\n]+/)
           .map((tag) => tag.trim())
           .filter((tag) => tag);
-    const chunkText = typeof target.text === "string" ? target.text : String(target.text ?? "");
+    const chunkText = typeof target.text === "string" ? target.text : "";
     new ChunkTagModal(
       this.app,
       chunkId,
@@ -4525,7 +4535,8 @@ export default class ZoteroRagPlugin extends Plugin {
           delete target.chunk_tags;
         }
         await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
-        await this.reindexChunkUpdates(docId, chunkPath, [String(target.chunk_id || chunkId)], []);
+        const targetChunkId = typeof target.chunk_id === "string" ? target.chunk_id : chunkId;
+        await this.reindexChunkUpdates(docId, chunkPath, [targetChunkId], []);
         new Notice("Chunk tags updated.");
       },
       async () => {
@@ -4557,7 +4568,7 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice(`Chunk ${chunkId} not found in cache.`);
       return;
     }
-    const text = typeof target.text === "string" ? target.text : String(target.text ?? "");
+    const text = typeof target.text === "string" ? target.text : "";
     const indexedText = await this.renderMarkdownToIndexText(text);
     const note = this.settings.embedIncludeMetadata
       ? "Note: when “Include metadata in embeddings” is enabled, the indexer prepends title/authors/tags/section info before embedding. The preview below shows only the chunk text."
@@ -5035,7 +5046,7 @@ export default class ZoteroRagPlugin extends Plugin {
         if (this.isAnnotationChunk(chunk)) {
           continue;
         }
-        const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+        const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : "";
         if (id) {
           chunkMap.set(id, chunk);
         }
@@ -5064,7 +5075,8 @@ export default class ZoteroRagPlugin extends Plugin {
             payloadUpdated = true;
           }
           const normalized = this.normalizeChunkText(block.text);
-          if (normalized && normalized !== String(existing.text ?? "")) {
+          const existingText = typeof existing.text === "string" ? existing.text : "";
+          if (normalized && normalized !== existingText) {
             existing.text = normalized;
             existing.char_count = normalized.length;
             payloadUpdated = true;
@@ -5088,7 +5100,7 @@ export default class ZoteroRagPlugin extends Plugin {
           removals.add(chunkId);
           continue;
         }
-        const currentText = typeof existing.text === "string" ? existing.text : String(existing.text ?? "");
+        const currentText = typeof existing.text === "string" ? existing.text : "";
         if (normalized !== currentText) {
           existing.text = normalized;
           existing.char_count = normalized.length;
@@ -5123,7 +5135,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
       if (removals.size) {
         chunkPayload.chunks = chunks.filter((chunk) => {
-          const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+          const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : "";
           return id && !removals.has(id);
         });
         payloadUpdated = true;
@@ -7567,7 +7579,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const baseChunks: Record<string, unknown>[] = [];
     const existingAnnotations = new Map<string, Record<string, unknown>>();
     for (const chunk of existing) {
-      const chunkId = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+      const chunkId = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : "";
       if (chunkId && this.isAnnotationChunk(chunk)) {
         existingAnnotations.set(chunkId, chunk);
       } else {
@@ -7581,7 +7593,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     for (const annotation of annotations) {
       const chunk = this.buildAnnotationChunk(annotation);
-      const chunkId = String(chunk.chunk_id || "");
+      const chunkId = typeof chunk.chunk_id === "string" ? chunk.chunk_id : "";
       if (!chunkId) {
         continue;
       }
@@ -7633,7 +7645,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const normalized = this.normalizeChunkIdForNote(chunkId, docId) || chunkId;
     const candidates = new Set([chunkId, normalized, `${docId}:${chunkId}`]);
     for (const chunk of chunks) {
-      const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : String(chunk?.chunk_id ?? "");
+      const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id : "";
       if (id && candidates.has(id)) {
         return chunk;
       }
@@ -7706,7 +7718,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const payload = await this.readChunkPayload(chunkPath);
       const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
       deleteIds = chunks
-        .map((chunk) => String(chunk?.chunk_id ?? ""))
+        .map((chunk) => (typeof chunk?.chunk_id === "string" ? chunk.chunk_id : ""))
         .map((chunkId) => (
           chunkId.startsWith(`${docId}:`) ? chunkId.slice(docId.length + 1) : chunkId
         ))
@@ -7767,7 +7779,13 @@ export default class ZoteroRagPlugin extends Plugin {
     if (fieldTypes && Object.keys(fieldTypes).length > 0) {
       const entries = Object.keys(fieldTypes)
         .sort()
-        .map((key) => `${key}:${String(fieldTypes[key] ?? "")}`);
+        .map((key) => {
+          const value = fieldTypes[key];
+          const text = (typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+            ? String(value)
+            : "";
+          return `${key}:${text}`;
+        });
       lines.push(`Field types: {${entries.join(", ")}}`);
     }
     if (fallbackUsed) {
@@ -8158,15 +8176,18 @@ export default class ZoteroRagPlugin extends Plugin {
           request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
         }, timeoutMs);
       }
-      // eslint-disable-next-line @typescript-eslint/no-deprecated -- Node ClientRequest emits errors via EventEmitter API.
-      request.on("error", (error) => {
+      const requestEmitter = request as unknown as NodeJS.EventEmitter;
+      requestEmitter.on("error", (error) => {
         if (timeoutId) {
           clearTimeout(timeoutId);
         }
         if (isZoteroLocalApiRequest) {
           this.notifyZoteroLocalApiConnectionError();
         }
-        reject(error);
+        const requestError = error instanceof Error
+          ? error
+          : new Error(typeof error === "string" ? error : "Request failed");
+        reject(requestError);
       });
       if (body !== undefined) {
         request.write(body);
@@ -8477,7 +8498,10 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     const outputAbs = `${sourcePdfPath}.ocr.tmp`;
-    const language = (languageHint || metadata?.languages || "eng").toString();
+    const metadataLanguage = typeof metadata?.languages === "string" ? metadata.languages : "";
+    const language = (typeof languageHint === "string" && languageHint.trim()
+      ? languageHint
+      : (metadataLanguage || "eng")).trim();
     const pluginDir = this.getPluginDir();
     const script = path.join(pluginDir, "tools", "ocr_layered_pdf.py");
 
@@ -9692,12 +9716,16 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!idValue) {
         continue;
       }
-      const id = String(idValue).trim();
+      const id = (typeof idValue === "string" || typeof idValue === "number")
+        ? String(idValue).trim()
+        : "";
       if (!id) {
         continue;
       }
       const nameValue = record.name ?? (entry as Record<string, unknown>).name ?? id;
-      const name = String(nameValue || id).trim() || id;
+      const name = (typeof nameValue === "string" || typeof nameValue === "number")
+        ? String(nameValue).trim() || id
+        : id;
       options.push({
         value: `groups/${id}`,
         label: `Group: ${name}`,
@@ -11652,7 +11680,7 @@ export default class ZoteroRagPlugin extends Plugin {
     context: ComposeProjectContext,
     services: string[]
   ): Promise<boolean> {
-    const raw = error instanceof Error ? error.message : String(error ?? "");
+    const raw = error instanceof Error ? error.message : (typeof error === "string" ? error : "");
     if (!this.isContainerNameConflictError(raw)) {
       return false;
     }
@@ -12751,9 +12779,11 @@ export default class ZoteroRagPlugin extends Plugin {
             }
 
             const doneRecord = this.asRecord(doneEvent);
-            const stderr = String(doneRecord?.stderr ?? "");
-            const doneError = String(doneRecord?.error ?? "").trim();
-            const exitCode = Number.parseInt(String(doneRecord?.exit_code ?? 1), 10);
+            const stderr = typeof doneRecord?.stderr === "string" ? doneRecord.stderr : "";
+            const doneError = typeof doneRecord?.error === "string" ? doneRecord.error.trim() : "";
+            const exitCode = typeof doneRecord?.exit_code === "number"
+              ? doneRecord.exit_code
+              : Number.parseInt(typeof doneRecord?.exit_code === "string" ? doneRecord.exit_code : "1", 10);
             if (!sawFinal && lastPayload) {
               onFallbackFinal(lastPayload);
             }
@@ -12814,17 +12844,21 @@ export default class ZoteroRagPlugin extends Plugin {
       request.setTimeout((effectiveTimeoutSec + 30) * 1000, () => {
         request.destroy(new Error("Python worker streaming request timed out"));
       });
-      // eslint-disable-next-line @typescript-eslint/no-deprecated -- Node ClientRequest emits errors via EventEmitter API.
-      request.on("error", (error) => {
+      const requestEmitter = request as unknown as NodeJS.EventEmitter;
+      requestEmitter.on("error", (error) => {
         markRequestKilled();
+        const errorText = error instanceof Error ? error.message : (typeof error === "string" ? error : "");
         this.logPythonWorkerTiming("stream-request-error", {
           requestId,
           tool: toolName,
           durationMs: Date.now() - startedAt,
-          error: String(error),
+          error: errorText,
         });
-        this.handlePythonProcessError(String(error));
-        reject(error);
+        this.handlePythonProcessError(errorText);
+        const requestError = error instanceof Error
+          ? error
+          : new Error(errorText || "Python worker streaming request failed");
+        reject(requestError);
       });
       request.write(body);
       request.end();
