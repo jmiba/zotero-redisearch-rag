@@ -7,6 +7,15 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.12",
+    markdown: `- Fix broken chunk citation wiki-links by writing proper Obsidian link label delimiters (\`|\`) instead of escaped \`\\|\` in generated inline citations and exported chat notes.
+- Improve legacy citation compatibility by normalizing malformed chunk anchors (\`#zrr-chunk:...\\\\|...\`) before rendering and by extracting chunk IDs robustly when opening links.
+- Fix citation/link resolution edge cases for note titles ending in whitespace:
+  - harden filename sanitization to strip trailing spaces/dots after truncation,
+  - sanitize reused basename sources from existing \`note_path\` / \`pdf_path\`,
+  - keep exact internal-link path resolution with trimmed fallbacks for legacy files.`,
+  },
+  {
     version: "0.9.11",
     markdown: `- Fix annotation-sync safety when Zotero annotation fetch is incomplete by preserving existing annotation chunks and skipping delete reindex operations in fetch-error states.
 - Fix PDF sidebar sync for newly imported notes by re-triggering sidebar sync after \`doc_index\` updates.

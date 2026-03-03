@@ -1,4 +1,12 @@
 # Changelog
+## 0.9.12 (Bugfix Release)
+- Fix broken chunk citation wiki-links by writing proper Obsidian link label delimiters (`|`) instead of escaped `\|` in generated inline citations and exported chat notes.
+- Improve legacy citation compatibility by normalizing malformed chunk anchors (`#zrr-chunk:...\\|...`) before rendering and by extracting chunk IDs robustly when opening links.
+- Fix citation/link resolution edge cases for note titles ending in whitespace:
+  - harden filename sanitization to strip trailing spaces/dots after truncation,
+  - sanitize reused basename sources from existing `note_path` / `pdf_path`,
+  - keep exact internal-link path resolution with trimmed fallbacks for legacy files.
+
 ## 0.9.11 (Bugfix Release)
 - Fix annotation-sync safety when Zotero annotation fetch is incomplete:
   - preserve existing annotation chunks instead of deleting them,

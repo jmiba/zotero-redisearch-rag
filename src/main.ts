@@ -784,11 +784,11 @@ export default class ZoteroRagPlugin extends Plugin {
 
     let baseName = this.sanitizeFileName(title) || docId;
     if (existingEntry?.note_path) {
-      baseName = path.basename(existingEntry.note_path, ".md") || baseName;
+      baseName = this.sanitizeFileName(path.basename(existingEntry.note_path, ".md")) || baseName;
     } else if (existingEntry?.pdf_path) {
       const relativePdf = this.toVaultRelativePath(existingEntry.pdf_path);
       if (relativePdf && relativePdf.startsWith(normalizePath(this.settings.outputPdfDir))) {
-        baseName = path.basename(relativePdf, ".pdf") || baseName;
+        baseName = this.sanitizeFileName(path.basename(relativePdf, ".pdf")) || baseName;
       }
     }
 
@@ -2111,6 +2111,10 @@ export default class ZoteroRagPlugin extends Plugin {
       return text;
     }
     let next = text;
+    // Normalize legacy escaped wiki-label delimiters produced by older plugin versions.
+    // Example: [[path#zrr-chunk:p2\|Label]] -> [[path#zrr-chunk:p2|Label]]
+    next = next.replace(/(\[\[[^\]\n#]+#zrr-chunk:[^\]\n\\|]+)\\\|/g, "$1|");
+
     // 1) Close any line-ending link that starts a zrr-chunk anchor but lacks closing ]] on that line
     //    We only touch links that clearly target a zrr-chunk to avoid false positives.
     next = next.replace(/\[\[([^\]\n#]+#zrr-chunk:[^\]\n|]+)(?=\n|$)/g, "[[$1]]");
@@ -4276,12 +4280,16 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private sanitizeFileName(value: string): string {
-    const cleaned = value.replace(/[\\/:*?"<>|]/g, "").replace(/\s+/g, " ").trim();
+    const cleaned = String(value || "")
+      .replace(/[\\/:*?"<>|]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
     if (!cleaned) {
       return "";
     }
-    const normalized = cleaned.replace(/[.]+$/g, "").trim();
-    return normalized.slice(0, 120);
+    const truncated = cleaned.slice(0, 120);
+    const normalized = truncated.replace(/[. ]+$/g, "").trim();
+    return normalized;
   }
 
   private registerNoteRenameHandler(): void {
@@ -8631,8 +8639,18 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
+  private extractChunkIdFromAnchor(anchorValue: string): string {
+    if (!anchorValue) {
+      return "";
+    }
+    const normalized = String(anchorValue).replace(/\\\|/g, "|").trim();
+    const separatorIndex = normalized.indexOf("|");
+    return (separatorIndex >= 0 ? normalized.slice(0, separatorIndex) : normalized).trim();
+  }
+
   private async openNoteAtChunk(notePath: string, chunkId: string): Promise<boolean> {
-    if (!notePath || !chunkId) {
+    const anchorChunkId = this.extractChunkIdFromAnchor(chunkId);
+    if (!notePath || !anchorChunkId) {
       return false;
     }
     await this.openNoteInMain(notePath);
@@ -8642,7 +8660,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return false;
     }
     const editor = view.editor;
-    const normalizedChunkId = this.normalizeChunkIdForNote(chunkId) || chunkId;
+    const normalizedChunkId = this.normalizeChunkIdForNote(anchorChunkId) || anchorChunkId;
     const line = this.findChunkLineInText(editor.getValue(), normalizedChunkId);
     if (line === null) {
       new Notice(`Chunk ${normalizedChunkId} not found in note.`);
@@ -8688,16 +8706,27 @@ export default class ZoteroRagPlugin extends Plugin {
 
   public async openInternalLinkInMain(linkText: string): Promise<void> {
     const leaf = this.getMainLeaf();
-    const [linkPathRaw, anchorRaw] = linkText.split("#");
-    const linkPath = (linkPathRaw || "").trim();
-    const anchor = (anchorRaw || "").trim();
+    const [linkPathRaw, ...anchorParts] = linkText.split("#");
+    const linkPath = linkPathRaw || "";
+    const anchor = anchorParts.join("#").trim();
     const chunkAnchorPrefix = "zrr-chunk:";
-    const file = linkPath
-      ? this.app.metadataCache.getFirstLinkpathDest(linkPath, "")
-      : null;
+    let file: TFile | null = null;
+    if (linkPath) {
+      const candidates = Array.from(new Set([linkPath, linkPath.trimEnd(), linkPath.trim()]));
+      for (const candidate of candidates) {
+        if (!candidate) {
+          continue;
+        }
+        const resolved = this.app.metadataCache.getFirstLinkpathDest(candidate, "");
+        if (resolved instanceof TFile) {
+          file = resolved;
+          break;
+        }
+      }
+    }
     if (file instanceof TFile) {
       const chunkId = anchor.startsWith(chunkAnchorPrefix)
-        ? anchor.slice(chunkAnchorPrefix.length).trim()
+        ? this.extractChunkIdFromAnchor(anchor.slice(chunkAnchorPrefix.length).trim())
         : "";
       if (chunkId) {
         const opened = await this.openNoteAtChunk(file.path, chunkId);
@@ -8835,13 +8864,13 @@ export default class ZoteroRagPlugin extends Plugin {
     const target = normalizePath(notePath).replace(/\.md$/i, "");
     const anchor = `zrr-chunk:${chunkId}`;
     const safeLabel = this.escapeWikiLabel(label);
-    return `[[${target}#${anchor}\\|${safeLabel}]]`;
+    return `[[${target}#${anchor}|${safeLabel}]]`;
   }
 
   private buildNoteLink(notePath: string, label: string): string {
     const target = normalizePath(notePath).replace(/\.md$/i, "");
     const safeLabel = this.escapeWikiLabel(label);
-    return `[[${target}\\|${safeLabel}]]`;
+    return `[[${target}|${safeLabel}]]`;
   }
 
   private buildNoteAnnotationLink(
@@ -8857,7 +8886,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const target = normalizePath(notePath).replace(/\.md$/i, "");
     const safeLabel = this.escapeWikiLabel(label);
-    return `[[${target}#^${blockId}\\|${safeLabel}]]`;
+    return `[[${target}#^${blockId}|${safeLabel}]]`;
   }
 
   private buildAnnotationBlockId(
@@ -8878,7 +8907,10 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!label) {
       return "";
     }
-    return label.replace(/\|/g, "\\|");
+    return label
+      .replace(/\|/g, " ")
+      .replace(/[\[\]]/g, "")
+      .trim();
   }
 
   private generateChatId(): string {
