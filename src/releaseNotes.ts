@@ -7,6 +7,13 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.11",
+    markdown: `- Fix annotation-sync safety when Zotero annotation fetch is incomplete by preserving existing annotation chunks and skipping delete reindex operations in fetch-error states.
+- Fix PDF sidebar sync for newly imported notes by re-triggering sidebar sync after \`doc_index\` updates.
+- Improve PDF sidebar reliability by triggering pending sync on note-open and adding a manual command: **Sync PDF view in right sidebar for current note**.
+- Add compatibility mapping for legacy worker paths (\`/workspace/vault/...\`) to vault-relative paths so existing \`doc_index.json\` entries resolve in desktop Obsidian.`,
+  },
+  {
     version: "0.9.1",
     markdown: `- Rebrand the plugin display name to **Zotero Research Assistant** across Obsidian UI labels and user-facing docs.
 - Rename chat UI labels and command text to match the new product name.

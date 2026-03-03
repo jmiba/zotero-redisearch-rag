@@ -1,4 +1,14 @@
 # Changelog
+## 0.9.11 (Bugfix Release)
+- Fix annotation-sync safety when Zotero annotation fetch is incomplete:
+  - preserve existing annotation chunks instead of deleting them,
+  - skip annotation chunk delete reindex operations during fetch-error states.
+- Fix PDF sidebar sync regression for newly imported notes by re-triggering sidebar sync after `doc_index` is updated.
+- Improve PDF sidebar reliability:
+  - trigger pending sidebar sync when opening a note,
+  - add command **Sync PDF view in right sidebar for current note** for manual recovery.
+- Add compatibility mapping for legacy worker paths (`/workspace/vault/...`) to vault-relative paths so existing `doc_index.json` entries resolve in desktop Obsidian.
+
 ## 0.9.10 (Bugfix Release)
 - Fix remaining Obsidian review lint issues:
   - remove async Promise-returning DOM callbacks where `void` is required,
