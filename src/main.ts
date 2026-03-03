@@ -8909,7 +8909,8 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     return label
       .replace(/\|/g, " ")
-      .replace(/[\[\]]/g, "")
+      .replace(/\[/g, "")
+      .replace(/\]/g, "")
       .trim();
   }
 

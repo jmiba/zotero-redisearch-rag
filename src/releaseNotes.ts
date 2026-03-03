@@ -7,6 +7,15 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.13",
+    markdown: `- Add release quality gates for plugin publishing:
+  - add ESLint flat config for TypeScript source checks,
+  - add \`npm run lint:changed\` helper for fast changed-file linting,
+  - enforce \`npm run lint\` as part of \`npm run package-release\`.
+- Add a dedicated manifest validator (\`npm run validate:manifest\`) and enforce it in \`package-release\` before build/package steps.
+- Fix minor citation label sanitization escaping to satisfy lint while preserving wiki-link safety.`,
+  },
+  {
     version: "0.9.12",
     markdown: `- Fix broken chunk citation wiki-links by writing proper Obsidian link label delimiters (\`|\`) instead of escaped \`\\|\` in generated inline citations and exported chat notes.
 - Improve legacy citation compatibility by normalizing malformed chunk anchors (\`#zrr-chunk:...\\\\|...\`) before rendering and by extracting chunk IDs robustly when opening links.
