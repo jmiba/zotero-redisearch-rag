@@ -1906,7 +1906,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Chat base URL")
-        .setDesc("OpenAI-compatible endpoint for chat requests.")
+        .setDesc("Compatible endpoint for chat requests.")
         .addText((text) => {
           chatBaseUrlInput = text;
           text

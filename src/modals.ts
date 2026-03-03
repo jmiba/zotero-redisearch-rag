@@ -801,7 +801,7 @@ export class ConfirmPurgeRedisOrphansModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h3", { text: "Purge redis orphaned chunks?" });
     contentEl.createEl("p", {
-      text: "This removes Redis chunk keys that have no cached item.json or chunks JSON files on disk.",
+      text: "This removes redis chunk keys that have no cached item.json or chunk files on disk.",
     });
     contentEl.createEl("p", {
       text: "Cache files are not deleted. Use this to clean up stale redis data.",
