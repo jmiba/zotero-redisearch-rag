@@ -42,6 +42,13 @@ const getTopVisibleLineNumber = (view: EditorView): number | null => {
   return view.state.doc.lineAt(pos).number;
 };
 
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+};
+
 export class PdfSidebarController {
   private readonly deps: PdfSidebarDependencies;
   private readonly helpers: PdfSidebarHelpers;
@@ -360,9 +367,6 @@ export class PdfSidebarController {
           split: false,
           reveal: true,
         });
-        if (!this.isRightSidebarLeaf(leaf)) {
-          return null;
-        }
         this.pdfSidebarLeaf = leaf;
         this.updatePdfSidebarIcon(leaf);
         return leaf;
@@ -371,13 +375,13 @@ export class PdfSidebarController {
       }
     }
     const existing = this.deps.app.workspace.getRightLeaf(false);
-    if (existing && this.isRightSidebarLeaf(existing)) {
+    if (existing) {
       this.pdfSidebarLeaf = existing;
       this.updatePdfSidebarIcon(existing);
       return existing;
     }
     const created = this.deps.app.workspace.getRightLeaf(true);
-    if (created && this.isRightSidebarLeaf(created)) {
+    if (created) {
       this.pdfSidebarLeaf = created;
       this.updatePdfSidebarIcon(created);
       return created;
@@ -389,9 +393,16 @@ export class PdfSidebarController {
     if (!leaf) {
       return false;
     }
+    const rightLeaf = this.deps.app.workspace.getRightLeaf(false);
+    if (rightLeaf && rightLeaf === leaf) {
+      return true;
+    }
     const leafAny = leaf as unknown as { containerEl?: HTMLElement };
     const containerEl = leafAny.containerEl;
-    return Boolean(containerEl?.closest(".workspace-split.mod-right-split, .mod-right-split"));
+    if (!containerEl) {
+      return true;
+    }
+    return Boolean(containerEl.closest(".workspace-split.mod-right-split, .mod-right-split"));
   }
 
   private updatePdfSidebarIcon(leaf: WorkspaceLeaf | null): void {
@@ -447,11 +458,21 @@ export class PdfSidebarController {
   }
 
   private async openPdfLinkInLeaf(leaf: WorkspaceLeaf, linkText: string): Promise<void> {
-    const pdfPlus = this.getPluginsRegistry()?.["pdf-plus"];
-    const pdfPlusOpen = pdfPlus?.lib?.workspace?.openPDFLinkTextInLeaf;
+    const pdfPlus = asRecord(this.getPluginsRegistry()?.["pdf-plus"]);
+    const pdfPlusLib = asRecord(pdfPlus?.lib);
+    const pdfPlusWorkspace = asRecord(pdfPlusLib?.workspace);
+    const pdfPlusOpen =
+      typeof pdfPlusWorkspace?.openPDFLinkTextInLeaf === "function"
+        ? (pdfPlusWorkspace.openPDFLinkTextInLeaf as (
+          leaf: WorkspaceLeaf,
+          linkText: string,
+          sourcePath: string,
+          state?: { active?: boolean }
+        ) => Promise<void>)
+        : null;
     if (typeof pdfPlusOpen === "function") {
       try {
-        await pdfPlusOpen.call(pdfPlus.lib.workspace, leaf, linkText, "", { active: false });
+        await pdfPlusOpen.call(pdfPlusWorkspace, leaf, linkText, "", { active: false });
         return;
       } catch (error) {
         if (!this.isPdfAnnotationRaceError(error)) {
@@ -495,7 +516,10 @@ export class PdfSidebarController {
   }
 
   private getPluginsRegistry(): Record<string, unknown> | undefined {
-    return (this.deps.app as unknown).plugins?.plugins as Record<string, unknown> | undefined;
+    const appAny = this.deps.app as unknown as {
+      plugins?: { plugins?: Record<string, unknown> };
+    };
+    return appAny.plugins?.plugins;
   }
 
   private isLeafTabActive(leaf: WorkspaceLeaf): boolean {
@@ -532,16 +556,17 @@ export class PdfSidebarController {
     if (!(await adapter.exists(chunkPath))) {
       return null;
     }
-    const payload = await this.deps.readChunkPayload(chunkPath);
-    const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
+    const payload = asRecord(await this.deps.readChunkPayload(chunkPath));
+    const chunks = Array.isArray(payload?.chunks) ? payload.chunks : [];
     const map = new Map<string, number>();
     for (const chunk of chunks) {
-      const id = typeof chunk?.chunk_id === "string" ? chunk.chunk_id.trim() : "";
+      const chunkRecord = asRecord(chunk);
+      const id = typeof chunkRecord?.chunk_id === "string" ? chunkRecord.chunk_id.trim() : "";
       if (!id) {
         continue;
       }
-      const pageStart = Number.isFinite(chunk?.page_start ?? NaN) ? Number(chunk.page_start) : null;
-      const pageEnd = Number.isFinite(chunk?.page_end ?? NaN) ? Number(chunk.page_end) : null;
+      const pageStart = Number.isFinite(chunkRecord?.page_start ?? NaN) ? Number(chunkRecord?.page_start) : null;
+      const pageEnd = Number.isFinite(chunkRecord?.page_end ?? NaN) ? Number(chunkRecord?.page_end) : null;
       const pageNumber = pageStart ?? pageEnd;
       if (pageNumber !== null) {
         map.set(id, pageNumber);

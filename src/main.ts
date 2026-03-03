@@ -355,6 +355,11 @@ export default class ZoteroRagPlugin extends Plugin {
       name: "Open research assistant chat panel",
       callback: () => this.openChatView(true),
     });
+    this.addCommand({
+      id: "sync-pdf-sidebar-current-note",
+      name: "Sync PDF view in right sidebar for current note",
+      callback: () => this.syncPdfSidebarForActiveNote(),
+    });
 
     this.addCommand({
       id: "rebuild-zotero-note-cache",
@@ -1072,6 +1077,11 @@ export default class ZoteroRagPlugin extends Plugin {
         pdf_path: pdfSourcePath,
         attachment_key: attachment.key,
       });
+      const noteFile = this.app.vault.getAbstractFileByPath(notePath);
+      if (noteFile instanceof TFile) {
+        void this.pdfSidebar.syncPdfSidebarForFile(noteFile);
+        void this.pdfSidebar.maybeSyncPendingPdf();
+      }
     } catch (error) {
       console.error("Failed to update doc index", error);
     }
@@ -1083,6 +1093,17 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async askZoteroLibrary(): Promise<void> {
     await this.openChatView(true);
+  }
+
+  private async syncPdfSidebarForActiveNote(): Promise<void> {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const file = view?.file;
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      new Notice("Open a Markdown note first.");
+      return;
+    }
+    await this.pdfSidebar.syncPdfSidebarForFile(file);
+    await this.pdfSidebar.maybeSyncPendingPdf();
   }
 
   private getChatLeaf(): WorkspaceLeaf {
@@ -4320,6 +4341,7 @@ export default class ZoteroRagPlugin extends Plugin {
           return;
         }
         void this.pdfSidebar.syncPdfSidebarForFile(file);
+        void this.pdfSidebar.maybeSyncPendingPdf();
         this.pdfSidebar.updatePreviewScrollHandler();
         this.scheduleNoteMetadataSync(file, 600, "open");
         this.scheduleNoteAnnotationSync(file, 800, "open");
@@ -5610,7 +5632,12 @@ export default class ZoteroRagPlugin extends Plugin {
       }
 
       await this.updateAnnotationSnapshot(docId, attachmentKey, zoteroAnnotations);
-      await this.updateAnnotationChunks(docId, attachmentKey, zoteroAnnotations);
+      await this.updateAnnotationChunks(
+        docId,
+        attachmentKey,
+        zoteroAnnotations,
+        { allowDeletes: !resolved.hadFetchError }
+      );
     } catch (error) {
       console.warn("Failed to sync note annotations with Zotero", error);
     } finally {
@@ -7564,8 +7591,10 @@ export default class ZoteroRagPlugin extends Plugin {
   private async updateAnnotationChunks(
     docId: string,
     attachmentKey: string,
-    annotations: AnnotationEntry[]
+    annotations: AnnotationEntry[],
+    options?: { allowDeletes?: boolean }
   ): Promise<void> {
+    const allowDeletes = options?.allowDeletes !== false;
     const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
     const adapter = this.app.vault.adapter;
     if (!(await adapter.exists(chunkPath))) {
@@ -7610,9 +7639,17 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     const deleteIds: string[] = [];
-    for (const chunkId of existingAnnotations.keys()) {
-      if (!seen.has(chunkId)) {
-        deleteIds.push(chunkId);
+    if (allowDeletes) {
+      for (const chunkId of existingAnnotations.keys()) {
+        if (!seen.has(chunkId)) {
+          deleteIds.push(chunkId);
+        }
+      }
+    } else {
+      for (const [chunkId, chunk] of existingAnnotations.entries()) {
+        if (!seen.has(chunkId)) {
+          annotationChunks.push(chunk);
+        }
       }
     }
 
