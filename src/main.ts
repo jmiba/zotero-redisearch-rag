@@ -8363,15 +8363,8 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!sourcePdf) {
       return "";
     }
-    if (!path.isAbsolute(sourcePdf) && !/^[A-Za-z]+:\/\//.test(sourcePdf)) {
-      const relative = normalizePath(sourcePdf);
-      return `[[${relative}]]`;
-    }
-    const vaultBase = path.normalize(this.getVaultBasePath());
-    const normalizedSource = path.normalize(sourcePdf);
-    const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
-    if (normalizedSource.startsWith(vaultPrefix)) {
-      const relative = normalizePath(path.relative(vaultBase, normalizedSource));
+    const relative = this.toVaultRelativePath(sourcePdf);
+    if (relative) {
       return `[[${relative}]]`;
     }
     return `[PDF](${pathToFileURL(sourcePdf).toString()})`;
@@ -8388,6 +8381,13 @@ export default class ZoteroRagPlugin extends Plugin {
     const normalizedSource = path.normalize(sourcePath);
     const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
     if (!normalizedSource.startsWith(vaultPrefix)) {
+      const workerVaultRoot = path.normalize(PYTHON_WORKER_VAULT_ROOT);
+      const workerPrefix = workerVaultRoot.endsWith(path.sep)
+        ? workerVaultRoot
+        : `${workerVaultRoot}${path.sep}`;
+      if (normalizedSource.startsWith(workerPrefix)) {
+        return normalizePath(path.relative(workerVaultRoot, normalizedSource));
+      }
       return "";
     }
     return normalizePath(path.relative(vaultBase, normalizedSource));
@@ -8734,17 +8734,8 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!sourcePdf) {
       return false;
     }
-    if (!path.isAbsolute(sourcePdf) && !/^[A-Za-z]+:\/\//.test(sourcePdf)) {
-      const relative = normalizePath(sourcePdf);
-      const pageSuffix = pageStart ? `#page=${pageStart}` : "";
-      await this.app.workspace.openLinkText(`${relative}${pageSuffix}`, "", "tab");
-      return true;
-    }
-    const vaultBase = path.normalize(this.getVaultBasePath());
-    const normalizedSource = path.normalize(sourcePdf);
-    const vaultPrefix = vaultBase.endsWith(path.sep) ? vaultBase : `${vaultBase}${path.sep}`;
-    if (normalizedSource.startsWith(vaultPrefix)) {
-      const relative = normalizePath(path.relative(vaultBase, normalizedSource));
+    const relative = this.toVaultRelativePath(sourcePdf);
+    if (relative) {
       const pageSuffix = pageStart ? `#page=${pageStart}` : "";
       await this.app.workspace.openLinkText(`${relative}${pageSuffix}`, "", "tab");
       return true;
