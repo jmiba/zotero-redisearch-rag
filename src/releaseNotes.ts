@@ -7,6 +7,14 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.14",
+    markdown: `- Fix repeated empty right-sidebar tab creation when opening Zotero notes:
+  - prevent automatic PDF sidebar sync from creating new sidebar leaves,
+  - reuse existing right-sidebar/PDF leaves only during background sync,
+  - reserve leaf creation for the manual command **Sync PDF view in right sidebar for current note**.
+- Harden right-sidebar leaf detection to use passive leaf iteration instead of \`getRightLeaf(...)\` during auto-sync paths.`,
+  },
+  {
     version: "0.9.13",
     markdown: `- Add release quality gates for plugin publishing:
   - add ESLint flat config for TypeScript source checks,

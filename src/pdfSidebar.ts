@@ -150,12 +150,12 @@ export class PdfSidebarController {
     );
   }
 
-  public async maybeSyncPendingPdf(): Promise<void> {
+  public async maybeSyncPendingPdf(options: { allowCreateLeaf?: boolean } = {}): Promise<void> {
     if (!this.pendingPdfSync) {
       return;
     }
     if (!this.pdfSidebarLeaf || this.pdfSidebarLeaf.view?.getViewType?.() !== "pdf") {
-      const leaf = await this.getPdfSidebarLeaf();
+      const leaf = await this.getPdfSidebarLeaf(Boolean(options.allowCreateLeaf));
       if (!leaf) {
         return;
       }
@@ -190,7 +190,10 @@ export class PdfSidebarController {
     this.schedulePreviewSync(view);
   }
 
-  public async syncPdfSidebarForFile(file: TFile): Promise<void> {
+  public async syncPdfSidebarForFile(
+    file: TFile,
+    options: { allowCreateLeaf?: boolean } = {}
+  ): Promise<void> {
     try {
       const content = await this.deps.app.vault.read(file);
       const docId = await this.deps.resolveDocIdForNote(file, content);
@@ -198,7 +201,7 @@ export class PdfSidebarController {
         return;
       }
       const firstMarker = this.helpers.extractFirstChunkMarkerFromContent(content);
-      await this.syncPdfSidebarForDoc(docId, firstMarker?.pageNumber, firstMarker?.chunkId);
+      await this.syncPdfSidebarForDoc(docId, firstMarker?.pageNumber, firstMarker?.chunkId, options);
     } catch (error) {
       console.warn("Failed to sync PDF sidebar for opened note", error);
     }
@@ -207,7 +210,8 @@ export class PdfSidebarController {
   public async syncPdfSidebarForDoc(
     docId: string | null,
     pageNumber?: number,
-    chunkId?: string
+    chunkId?: string,
+    options: { allowCreateLeaf?: boolean } = {}
   ): Promise<void> {
     if (!docId) {
       return;
@@ -241,7 +245,7 @@ export class PdfSidebarController {
       if (!(file instanceof TFile) || file.extension.toLowerCase() !== "pdf") {
         return;
       }
-      const leaf = await this.getPdfSidebarLeaf();
+      const leaf = await this.getPdfSidebarLeaf(Boolean(options.allowCreateLeaf));
       if (!leaf) {
         this.pendingPdfSync = { docId, pageNumber, chunkId };
         return;
@@ -349,9 +353,26 @@ export class PdfSidebarController {
     return null;
   }
 
-  private async getPdfSidebarLeaf(): Promise<WorkspaceLeaf | null> {
-    if (this.pdfSidebarLeaf && this.pdfSidebarLeaf.view?.getViewType?.() === "pdf") {
+  private async getPdfSidebarLeaf(allowCreate = false): Promise<WorkspaceLeaf | null> {
+    if (this.pdfSidebarLeaf && this.isRightSidebarLeaf(this.pdfSidebarLeaf)) {
       return this.pdfSidebarLeaf;
+    }
+    const existingPdfLeaf = this.deps.app.workspace
+      .getLeavesOfType("pdf")
+      .find((leaf) => this.isRightSidebarLeaf(leaf)) ?? null;
+    if (existingPdfLeaf) {
+      this.pdfSidebarLeaf = existingPdfLeaf;
+      this.updatePdfSidebarIcon(existingPdfLeaf);
+      return existingPdfLeaf;
+    }
+    const existing = this.findRightSidebarLeaf();
+    if (existing) {
+      this.pdfSidebarLeaf = existing;
+      this.updatePdfSidebarIcon(existing);
+      return existing;
+    }
+    if (!allowCreate) {
+      return null;
     }
     const workspaceAny = this.deps.app.workspace as unknown as {
       ensureSideLeaf?: (
@@ -365,7 +386,7 @@ export class PdfSidebarController {
         const leaf = await workspaceAny.ensureSideLeaf("pdf", "right", {
           active: false,
           split: false,
-          reveal: true,
+          reveal: false,
         });
         this.pdfSidebarLeaf = leaf;
         this.updatePdfSidebarIcon(leaf);
@@ -373,12 +394,6 @@ export class PdfSidebarController {
       } catch (error) {
         console.warn("Failed to ensure PDF side leaf", error);
       }
-    }
-    const existing = this.deps.app.workspace.getRightLeaf(false);
-    if (existing) {
-      this.pdfSidebarLeaf = existing;
-      this.updatePdfSidebarIcon(existing);
-      return existing;
     }
     const created = this.deps.app.workspace.getRightLeaf(true);
     if (created) {
@@ -389,18 +404,30 @@ export class PdfSidebarController {
     return null;
   }
 
+  private findRightSidebarLeaf(): WorkspaceLeaf | null {
+    const workspaceAny = this.deps.app.workspace as unknown as {
+      iterateAllLeaves?: (callback: (leaf: WorkspaceLeaf) => void) => void;
+    };
+    if (typeof workspaceAny.iterateAllLeaves !== "function") {
+      return null;
+    }
+    let found: WorkspaceLeaf | null = null;
+    workspaceAny.iterateAllLeaves((leaf) => {
+      if (!found && this.isRightSidebarLeaf(leaf)) {
+        found = leaf;
+      }
+    });
+    return found;
+  }
+
   private isRightSidebarLeaf(leaf: WorkspaceLeaf | null): boolean {
     if (!leaf) {
       return false;
     }
-    const rightLeaf = this.deps.app.workspace.getRightLeaf(false);
-    if (rightLeaf && rightLeaf === leaf) {
-      return true;
-    }
     const leafAny = leaf as unknown as { containerEl?: HTMLElement };
     const containerEl = leafAny.containerEl;
     if (!containerEl) {
-      return true;
+      return false;
     }
     return Boolean(containerEl.closest(".workspace-split.mod-right-split, .mod-right-split"));
   }

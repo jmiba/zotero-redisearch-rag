@@ -1102,8 +1102,8 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Open a Markdown note first.");
       return;
     }
-    await this.pdfSidebar.syncPdfSidebarForFile(file);
-    await this.pdfSidebar.maybeSyncPendingPdf();
+    await this.pdfSidebar.syncPdfSidebarForFile(file, { allowCreateLeaf: true });
+    await this.pdfSidebar.maybeSyncPendingPdf({ allowCreateLeaf: true });
   }
 
   private getChatLeaf(): WorkspaceLeaf {
