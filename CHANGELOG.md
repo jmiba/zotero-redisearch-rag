@@ -1,4 +1,10 @@
 # Changelog
+## 0.9.15 (Bugfix Release)
+- Add chunk-cache self-healing for note-based reindexing:
+  - when `.zotero-redisearch-rag/chunks/<doc_id>.json` is missing but the note still contains `zrr:sync` / `zrr:chunk` markers, the plugin rebuilds chunk cache JSON directly from the note and continues reindexing.
+- Apply the same fallback during note-save sync, so incremental chunk updates keep working after accidental cache file deletion.
+- Preserve chunk marker metadata while restoring cache (chunk ID, page number, exclude flag, section marker), and refresh `doc_index` note path/title plus available PDF/attachment metadata.
+
 ## 0.9.14 (Bugfix Release)
 - Fix repeated empty right-sidebar tab creation when opening Zotero notes:
   - prevent automatic PDF sidebar sync from creating new sidebar leaves,

@@ -70,6 +70,7 @@ import {
   ZRR_CHUNK_START_RE,
   ZRR_SYNC_END_RE,
   ZRR_SYNC_START_RE,
+  extractPageNumberFromChunkId,
   extractDocIdFromDoc,
   extractFirstChunkMarkerFromContent,
   findChunkStartLineInDoc,
@@ -174,6 +175,8 @@ type ParsedChunkBlock = {
   chunkId: string;
   text: string;
   excludeFlag: boolean;
+  pageStart?: number;
+  sectionChunk?: boolean;
 };
 
 type AnnotationEntry = {
@@ -2322,6 +2325,14 @@ export default class ZoteroRagPlugin extends Plugin {
           new Notice("No doc_ID found for this note.");
         }
         return;
+      }
+      const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(chunkPath))) {
+        const restored = await this.restoreMissingChunkCacheFromNote(file, content, docId, showNotices);
+        if (!restored) {
+          return;
+        }
       }
       const ok = await this.reindexDocIdFromCache(docId, showNotices);
       if (ok && showNotices) {
@@ -5064,7 +5075,10 @@ export default class ZoteroRagPlugin extends Plugin {
       const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
       const adapter = this.app.vault.adapter;
       if (!(await adapter.exists(chunkPath))) {
-        return;
+        const restored = await this.restoreMissingChunkCacheFromNote(file, content, docId, false);
+        if (!restored) {
+          return;
+        }
       }
       const chunkPayload = await this.readChunkPayload(chunkPath);
       if (!chunkPayload) {
@@ -7418,6 +7432,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const blocks: ParsedChunkBlock[] = [];
     let currentId = "";
     let currentExclude = false;
+    let currentPageStart: number | undefined;
+    let currentSectionChunk = false;
     let currentLines: string[] = [];
 
     const flush = (): void => {
@@ -7428,9 +7444,13 @@ export default class ZoteroRagPlugin extends Plugin {
         chunkId: currentId,
         text: currentLines.join("\n").trim(),
         excludeFlag: currentExclude,
+        pageStart: Number.isFinite(currentPageStart ?? NaN) ? Number(currentPageStart) : undefined,
+        sectionChunk: currentSectionChunk,
       });
       currentId = "";
       currentExclude = false;
+      currentPageStart = undefined;
+      currentSectionChunk = false;
       currentLines = [];
     };
 
@@ -7444,8 +7464,13 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!chunkId) {
           continue;
         }
+        const markerInfo = parseChunkMarkerLine(line);
         currentId = chunkId;
         currentExclude = /\bexclude\b/i.test(attrs) || /\bdelete\b/i.test(attrs);
+        currentPageStart = Number.isFinite(markerInfo?.pageNumber ?? NaN)
+          ? Number(markerInfo?.pageNumber)
+          : undefined;
+        currentSectionChunk = /\bsection\b/i.test(attrs);
         currentLines = [];
         continue;
       }
@@ -7465,6 +7490,148 @@ export default class ZoteroRagPlugin extends Plugin {
 
     flush();
     return blocks;
+  }
+
+  private inferSectionTitleFromChunkText(text: string): string {
+    if (!text) {
+      return "";
+    }
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const heading = trimmed.match(/^#{1,6}\s+(.+)$/);
+      if (heading?.[1]) {
+        return heading[1].trim();
+      }
+      break;
+    }
+    return "";
+  }
+
+  private extractAttachmentKeyFromAnnotationMarker(content: string): string {
+    const range = this.findAnnotationBlockRange(content);
+    if (!range) {
+      return "";
+    }
+    const markerInfo = this.parseAnnotationBlockMarker(range.startMarker);
+    return markerInfo.attachmentKey?.trim() ?? "";
+  }
+
+  private async restoreMissingChunkCacheFromNote(
+    file: TFile,
+    content: string,
+    docId: string,
+    showNotices: boolean
+  ): Promise<string | null> {
+    const adapter = this.app.vault.adapter;
+    const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
+    if (await adapter.exists(chunkPath)) {
+      return chunkPath;
+    }
+
+    const syncSection = this.extractSyncSection(content);
+    if (!syncSection) {
+      if (showNotices) {
+        new Notice(`Chunks cache missing for ${docId}, and no sync section was found in the note.`);
+      }
+      return null;
+    }
+
+    const parsedBlocks = this.parseSyncedChunkBlocks(syncSection);
+    if (!parsedBlocks.length) {
+      if (showNotices) {
+        new Notice(`Chunks cache missing for ${docId}, and no chunk markers were found in the sync section.`);
+      }
+      return null;
+    }
+
+    const chunks: Record<string, unknown>[] = [];
+    for (const block of parsedBlocks) {
+      const rawId = String(block.chunkId || "").trim();
+      if (!rawId) {
+        continue;
+      }
+      const chunkId = this.normalizeChunkIdForNote(rawId, docId) ?? rawId;
+      const text = this.normalizeChunkText(String(block.text || ""));
+      const pageStart = Number.isFinite(block.pageStart ?? NaN)
+        ? Number(block.pageStart)
+        : extractPageNumberFromChunkId(chunkId) ?? undefined;
+
+      const chunk: Record<string, unknown> = {
+        chunk_id: chunkId,
+        text,
+        char_count: text.length,
+      };
+
+      if (block.excludeFlag) {
+        chunk.excluded = true;
+      }
+      if (Number.isFinite(pageStart ?? NaN)) {
+        chunk.page_start = Number(pageStart);
+        chunk.page_end = Number(pageStart);
+      }
+      if (block.sectionChunk) {
+        const sectionTitle = this.inferSectionTitleFromChunkText(text);
+        if (sectionTitle) {
+          chunk.section = sectionTitle;
+        }
+      }
+      chunks.push(chunk);
+    }
+
+    if (!chunks.length) {
+      if (showNotices) {
+        new Notice(`Chunks cache missing for ${docId}, and chunk markers contained no usable chunks.`);
+      }
+      return null;
+    }
+
+    await this.ensureFolder(CHUNK_CACHE_DIR);
+    let existingEntry = await this.getDocIndexEntry(docId);
+    if (!existingEntry) {
+      existingEntry = await this.hydrateDocIndexFromCache(docId);
+    }
+    const frontmatter =
+      this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+    const sourcePdf = this.normalizeDocIndexPdfPath(existingEntry?.pdf_path ?? "");
+    const attachmentKey =
+      existingEntry?.attachment_key
+      || this.extractAttachmentKeyFromAnnotationMarker(content)
+      || await this.resolveAttachmentKeyForDocId(docId, frontmatter);
+
+    const payload: Record<string, unknown> = {
+      doc_id: docId,
+      chunks,
+    };
+    if (sourcePdf) {
+      payload.source_pdf = sourcePdf;
+    }
+    if (attachmentKey) {
+      payload.metadata = { attachment_key: attachmentKey };
+    }
+
+    await adapter.write(chunkPath, JSON.stringify(payload, null, 2));
+
+    const updates: Partial<DocIndexEntry> & { doc_id: string } = {
+      doc_id: docId,
+      note_path: file.path,
+      note_title: path.basename(file.path, ".md"),
+    };
+    if (sourcePdf) {
+      updates.pdf_path = sourcePdf;
+    }
+    if (attachmentKey) {
+      updates.attachment_key = attachmentKey;
+    }
+    await this.updateDocIndex(updates);
+
+    if (showNotices) {
+      new Notice(`Restored chunk cache from note markers for ${docId}.`);
+    }
+    return chunkPath;
   }
 
   private normalizeChunkText(text: string): string {

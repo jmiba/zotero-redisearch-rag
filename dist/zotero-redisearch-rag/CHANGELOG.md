@@ -1,4 +1,55 @@
 # Changelog
+## 0.9.15 (Bugfix Release)
+- Add chunk-cache self-healing for note-based reindexing:
+  - when `.zotero-redisearch-rag/chunks/<doc_id>.json` is missing but the note still contains `zrr:sync` / `zrr:chunk` markers, the plugin rebuilds chunk cache JSON directly from the note and continues reindexing.
+- Apply the same fallback during note-save sync, so incremental chunk updates keep working after accidental cache file deletion.
+- Preserve chunk marker metadata while restoring cache (chunk ID, page number, exclude flag, section marker), and refresh `doc_index` note path/title plus available PDF/attachment metadata.
+
+## 0.9.14 (Bugfix Release)
+- Fix repeated empty right-sidebar tab creation when opening Zotero notes:
+  - prevent automatic PDF sidebar sync from creating new sidebar leaves,
+  - reuse existing right-sidebar/PDF leaves only during background sync,
+  - reserve leaf creation for the manual command **Sync PDF view in right sidebar for current note**.
+- Harden right-sidebar leaf detection to use passive leaf iteration instead of `getRightLeaf(...)` during auto-sync paths.
+
+## 0.9.13 (Bugfix Release)
+- Add release quality gates for plugin publishing:
+  - add ESLint flat config for TypeScript source checks,
+  - add `npm run lint:changed` helper for fast changed-file linting,
+  - enforce `npm run lint` as part of `npm run package-release`.
+- Add a dedicated manifest validator (`npm run validate:manifest`) and enforce it in `package-release` before build/package steps.
+- Fix minor citation label sanitization escaping to satisfy lint while preserving wiki-link safety.
+
+## 0.9.12 (Bugfix Release)
+- Fix broken chunk citation wiki-links by writing proper Obsidian link label delimiters (`|`) instead of escaped `\|` in generated inline citations and exported chat notes.
+- Improve legacy citation compatibility by normalizing malformed chunk anchors (`#zrr-chunk:...\\|...`) before rendering and by extracting chunk IDs robustly when opening links.
+- Fix citation/link resolution edge cases for note titles ending in whitespace:
+  - harden filename sanitization to strip trailing spaces/dots after truncation,
+  - sanitize reused basename sources from existing `note_path` / `pdf_path`,
+  - keep exact internal-link path resolution with trimmed fallbacks for legacy files.
+
+## 0.9.11 (Bugfix Release)
+- Fix annotation-sync safety when Zotero annotation fetch is incomplete:
+  - preserve existing annotation chunks instead of deleting them,
+  - skip annotation chunk delete reindex operations during fetch-error states.
+- Fix PDF sidebar sync regression for newly imported notes by re-triggering sidebar sync after `doc_index` is updated.
+- Improve PDF sidebar reliability:
+  - trigger pending sidebar sync when opening a note,
+  - add command **Sync PDF view in right sidebar for current note** for manual recovery.
+- Add compatibility mapping for legacy worker paths (`/workspace/vault/...`) to vault-relative paths so existing `doc_index.json` entries resolve in desktop Obsidian.
+
+## 0.9.10 (Bugfix Release)
+- Fix remaining Obsidian review lint issues:
+  - remove async Promise-returning DOM callbacks where `void` is required,
+  - remove deprecated-node rule suppressions and refactor request error handling,
+  - tighten unknown/object-to-string coercion guards to avoid `[object Object]` fallbacks.
+- Normalize flagged UI labels in settings/modals to sentence case.
+
+## 0.9.9 (Bugfix Release)
+- Fix release workflow install failures by syncing npm dependency metadata and lockfile for CI.
+- Pin Obsidian peer `@codemirror/state` and `@codemirror/view` dev dependencies so `npm ci` resolves deterministically in GitHub Actions.
+- Restore reliable GitHub release asset publication (`main.js`, `manifest.json`, `versions.json`, `styles.css`, and release zip) after CI recovery.
+
 ## 0.9.8 (Bugfix Release)
 - Fix Obsidian review-blocking code issues for release validation:
   - replace deprecated markdown rendering calls with `MarkdownRenderer.render`,

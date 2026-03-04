@@ -1,7 +1,7 @@
 {
   "id": "zotero-redisearch-rag",
   "name": "Zotero Research Assistant",
-  "version": "0.9.14",
+  "version": "0.9.15",
   "minAppVersion": "1.5.0",
   "isDesktopOnly": true,
   "description": "Import and OCR Zotero PDFs using a Docling pipeline, sync metadata including annotations, and chat with your research literature using local Redis-powered RAG.",
