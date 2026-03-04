@@ -414,6 +414,7 @@ If you want PaddleOCR API OCR, set the Paddle OCR API key (https://aistudio.baid
 ## Troubleshooting
 
 - "No such index idx:zotero": start Redis Stack and reindex cached chunks.
+- "Chunks cache missing for <doc_id>": open the note and run "Reindex current note from cache" to rebuild missing chunk cache from existing `zrr:chunk` markers.
 - "Invalid model identifier": use the exact LM Studio model ID.
 - Redis data not persisting: start Redis Stack from the plugin so it uses the correct data folder.
 

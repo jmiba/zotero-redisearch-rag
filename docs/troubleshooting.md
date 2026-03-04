@@ -6,6 +6,11 @@ This page lists common issues and how to resolve them.
 - **“No such index idx:zotero”**
   - Start Redis Stack and run **Reindex Redis from cached chunks**.
 
+- **“Chunks cache missing for <doc_id>”**
+  - Run **Reindex current note from cache** while the affected note is open.
+  - The plugin now rebuilds `.zotero-redisearch-rag/chunks/<doc_id>.json` from existing `zrr:sync` / `zrr:chunk` markers in the note, then continues reindexing.
+  - If the note no longer contains valid chunk markers, reimport the item from Zotero.
+
 - **“Failed to sync bundled tools”**
   - Restart Obsidian and try again. If it persists, reinstall the plugin.
 
