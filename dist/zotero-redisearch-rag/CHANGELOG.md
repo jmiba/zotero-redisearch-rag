@@ -1,4 +1,12 @@
 # Changelog
+## 0.9.16 (Bugfix Release)
+- Fix metadata sync coverage for publication container fields by adding full bidirectional sync support for:
+  - `publication_title` (`publicationTitle` in Zotero),
+  - `book_title` (`bookTitle` in Zotero),
+  - `journal_abbrev` (`journalAbbreviation` in Zotero).
+- Include these fields in metadata conflict/snapshot tracking and one-sided auto-create note -> Zotero behavior.
+- Update docs to reflect the expanded synced metadata set and recognized YAML key variants.
+
 ## 0.9.15 (Bugfix Release)
 - Add chunk-cache self-healing for note-based reindexing:
   - when `.zotero-redisearch-rag/chunks/<doc_id>.json` is missing but the note still contains `zrr:sync` / `zrr:chunk` markers, the plugin rebuilds chunk cache JSON directly from the note and continues reindexing.

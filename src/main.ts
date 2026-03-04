@@ -5271,6 +5271,9 @@ export default class ZoteroRagPlugin extends Plugin {
         "date",
         "abstract",
         "doi",
+        "publication_title",
+        "book_title",
+        "journal_abbrev",
         "publisher",
         "place",
         "issue",
@@ -5288,6 +5291,9 @@ export default class ZoteroRagPlugin extends Plugin {
         date: "date",
         abstract: "abstract",
         doi: "doi",
+        publication_title: "publication_title",
+        book_title: "book_title",
+        journal_abbrev: "journal_abbrev",
         publisher: "publisher",
         place: "place",
         issue: "issue",
@@ -5308,6 +5314,9 @@ export default class ZoteroRagPlugin extends Plugin {
         "date",
         "abstract",
         "doi",
+        "publication_title",
+        "book_title",
+        "journal_abbrev",
         "publisher",
         "place",
         "issue",
@@ -5333,6 +5342,9 @@ export default class ZoteroRagPlugin extends Plugin {
         date: "Date",
         abstract: "Abstract",
         doi: "DOI",
+        publication_title: "Publication title",
+        book_title: "Book title",
+        journal_abbrev: "Journal abbreviation",
         publisher: "Publisher",
         place: "Place",
         issue: "Issue",
@@ -5755,6 +5767,24 @@ export default class ZoteroRagPlugin extends Plugin {
       frontmatter?.abstract ?? frontmatter?.abstractNote
     );
     const doi = this.normalizeMetadataString(frontmatter?.doi ?? frontmatter?.DOI);
+    const publicationTitle = this.normalizeMetadataString(
+      frontmatter?.["publication title"]
+        ?? frontmatter?.publication_title
+        ?? frontmatter?.publicationTitle
+        ?? frontmatter?.["publication-title"]
+    );
+    const bookTitle = this.normalizeMetadataString(
+      frontmatter?.["book title"]
+        ?? frontmatter?.book_title
+        ?? frontmatter?.bookTitle
+        ?? frontmatter?.["book-title"]
+    );
+    const journalAbbrev = this.normalizeMetadataString(
+      frontmatter?.["journal abbrev"]
+        ?? frontmatter?.journal_abbrev
+        ?? frontmatter?.journalAbbrev
+        ?? frontmatter?.["journal-abbrev"]
+    );
     const publisher = this.normalizeMetadataString(frontmatter?.publisher);
     const place = this.normalizeMetadataString(frontmatter?.place);
     const issue = this.normalizeMetadataString(frontmatter?.issue);
@@ -5777,6 +5807,9 @@ export default class ZoteroRagPlugin extends Plugin {
       date,
       abstract: abstractNote,
       doi,
+      publication_title: publicationTitle,
+      book_title: bookTitle,
+      journal_abbrev: journalAbbrev,
       publisher,
       place,
       issue,
@@ -5796,6 +5829,9 @@ export default class ZoteroRagPlugin extends Plugin {
     const date = this.normalizeMetadataString(values?.date);
     const abstractNote = this.normalizeMetadataString(values?.abstractNote);
     const doi = this.normalizeMetadataString(values?.DOI ?? values?.doi);
+    const publicationTitle = this.normalizeMetadataString(values?.publicationTitle);
+    const bookTitle = this.normalizeMetadataString(values?.bookTitle);
+    const journalAbbrev = this.normalizeMetadataString(values?.journalAbbreviation);
     const publisher = this.normalizeMetadataString(values?.publisher);
     const place = this.normalizeMetadataString(values?.place);
     const issue = this.normalizeMetadataString(values?.issue);
@@ -5829,6 +5865,9 @@ export default class ZoteroRagPlugin extends Plugin {
       date,
       abstract: abstractNote,
       doi,
+      publication_title: publicationTitle,
+      book_title: bookTitle,
+      journal_abbrev: journalAbbrev,
       publisher,
       place,
       issue,
@@ -6748,6 +6787,9 @@ export default class ZoteroRagPlugin extends Plugin {
       "date",
       "abstract",
       "doi",
+      "publication_title",
+      "book_title",
+      "journal_abbrev",
       "publisher",
       "place",
       "issue",
@@ -7142,6 +7184,24 @@ export default class ZoteroRagPlugin extends Plugin {
         if ("doi" in updates) {
           frontmatter.doi = updates.doi ?? "";
         }
+        if ("publication_title" in updates) {
+          frontmatter["publication title"] = updates.publication_title ?? "";
+          delete (frontmatter as Record<string, unknown>).publication_title;
+          delete (frontmatter as Record<string, unknown>).publicationTitle;
+          delete (frontmatter as Record<string, unknown>)["publication-title"];
+        }
+        if ("book_title" in updates) {
+          frontmatter["book title"] = updates.book_title ?? "";
+          delete (frontmatter as Record<string, unknown>).book_title;
+          delete (frontmatter as Record<string, unknown>).bookTitle;
+          delete (frontmatter as Record<string, unknown>)["book-title"];
+        }
+        if ("journal_abbrev" in updates) {
+          frontmatter["journal abbrev"] = updates.journal_abbrev ?? "";
+          delete (frontmatter as Record<string, unknown>).journal_abbrev;
+          delete (frontmatter as Record<string, unknown>).journalAbbrev;
+          delete (frontmatter as Record<string, unknown>)["journal-abbrev"];
+        }
         if ("publisher" in updates) {
           frontmatter.publisher = updates.publisher ?? "";
         }
@@ -7213,6 +7273,15 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     if ("doi" in updates) {
       payload.DOI = updates.doi ?? "";
+    }
+    if ("publication_title" in updates) {
+      payload.publicationTitle = updates.publication_title ?? "";
+    }
+    if ("book_title" in updates) {
+      payload.bookTitle = updates.book_title ?? "";
+    }
+    if ("journal_abbrev" in updates) {
+      payload.journalAbbreviation = updates.journal_abbrev ?? "";
     }
     if ("publisher" in updates) {
       payload.publisher = updates.publisher ?? "";

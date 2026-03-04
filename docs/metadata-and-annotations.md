@@ -22,6 +22,9 @@ Bidirectional metadata fields:
 - `date`
 - `abstract`
 - `doi`
+- `publication_title`
+- `book_title`
+- `journal_abbrev`
 - `publisher`
 - `place`
 - `issue`
@@ -39,6 +42,9 @@ Bidirectional metadata fields:
 The plugin recognizes canonical keys and common variants, for example:
 
 - `short title`, `short_title`, `short-title`, `shortTitle`
+- `publication title`, `publication_title`, `publication-title`, `publicationTitle`
+- `book title`, `book_title`, `book-title`, `bookTitle`
+- `journal abbrev`, `journal_abbrev`, `journal-abbrev`, `journalAbbrev`
 - `item type`, `item_type`, `item-type`, `itemType`
 
 When writing updates to the note, the plugin normalizes to canonical frontmatter keys.
@@ -61,7 +67,7 @@ When a field has no snapshot entry yet (first-time or newly introduced):
   - If note is empty/missing and Zotero has a value, the field is created in YAML.
 - Obsidian -> Zotero auto-create (core bibliographic fields only):
   - If note has a value and Zotero is empty, note is pushed to Zotero for:
-  - `title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `authors`, `editors`
+  - `title`, `short_title`, `citekey`, `date`, `abstract`, `doi`, `publication_title`, `book_title`, `journal_abbrev`, `publisher`, `place`, `issue`, `volume`, `pages`, `item_type`, `authors`, `editors`
 
 `tags` are tracked bidirectionally but are not in the one-sided note -> Zotero auto-create subset.
 
