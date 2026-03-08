@@ -17,6 +17,10 @@ This page lists common issues and how to resolve them.
 - **“No PDF attachment found for item”**
   - The selected Zotero item doesn’t have a PDF attachment. Add one in Zotero and re‑import.
 
+- **The synced PDF tab disappeared from the right sidebar**
+  - Run **Sync PDF view in right sidebar for current note** from the command palette, or click the PDF ribbon button, while the note is open.
+  - If the sidebar was collapsed, the command will reveal the PDF leaf again.
+
 ## Redis index mismatch and reindex
 If you change embedding models or the index schema gets out of sync, you may see errors about embedding dimensions or missing fields.
 

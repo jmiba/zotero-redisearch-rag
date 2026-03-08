@@ -12,6 +12,10 @@ This page lists the main commands and what they do.
 - **Open Zotero Research Assistant chat panel**
   - Opens the chat view and session controls.
 
+## PDF sync
+- **Sync PDF view in right sidebar for current note**
+  - Reopen or refresh the synced PDF tab in the right sidebar for the current note.
+
 ## Rebuild and reindex
 - **Rebuild Zotero note from cache (Docling + RedisSearch)**
   - Recreate the note and reindex from cached files.

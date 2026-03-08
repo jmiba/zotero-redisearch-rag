@@ -361,7 +361,7 @@ export default class ZoteroRagPlugin extends Plugin {
     this.addCommand({
       id: "sync-pdf-sidebar-current-note",
       name: "Sync PDF view in right sidebar for current note",
-      callback: () => this.syncPdfSidebarForActiveNote(),
+      callback: () => this.syncPdfSidebarForActiveNote({ revealSidebar: true }),
     });
 
     this.addCommand({
@@ -1098,15 +1098,50 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.openChatView(true);
   }
 
-  private async syncPdfSidebarForActiveNote(): Promise<void> {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const file = view?.file;
+  private getCurrentMarkdownFile(): TFile | null {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const activeViewFile = activeView?.file;
+    if (activeViewFile instanceof TFile && activeViewFile.extension === "md") {
+      return activeViewFile;
+    }
+
+    const activeFile = this.app.workspace.getActiveFile();
+    if (activeFile instanceof TFile && activeFile.extension === "md") {
+      return activeFile;
+    }
+
+    const recentLeaf = this.app.workspace.getMostRecentLeaf(this.app.workspace.rootSplit);
+    const recentView = recentLeaf?.view;
+    if (recentView instanceof MarkdownView) {
+      const recentFile = recentView.file;
+      if (recentFile instanceof TFile && recentFile.extension === "md") {
+        return recentFile;
+      }
+    }
+
+    const markdownLeaf = this.app.workspace.getLeavesOfType("markdown")[0];
+    const markdownView = markdownLeaf?.view;
+    if (markdownView instanceof MarkdownView) {
+      const markdownFile = markdownView.file;
+      if (markdownFile instanceof TFile && markdownFile.extension === "md") {
+        return markdownFile;
+      }
+    }
+
+    return null;
+  }
+
+  private async syncPdfSidebarForActiveNote(options: { revealSidebar?: boolean } = {}): Promise<void> {
+    const file = this.getCurrentMarkdownFile();
     if (!(file instanceof TFile) || file.extension !== "md") {
       new Notice("Open a Markdown note first.");
       return;
     }
     await this.pdfSidebar.syncPdfSidebarForFile(file, { allowCreateLeaf: true });
     await this.pdfSidebar.maybeSyncPendingPdf({ allowCreateLeaf: true });
+    if (options.revealSidebar) {
+      await this.pdfSidebar.revealPdfSidebar({ allowCreateLeaf: true });
+    }
   }
 
   private getChatLeaf(): WorkspaceLeaf {
@@ -3727,6 +3762,15 @@ export default class ZoteroRagPlugin extends Plugin {
       () => this.openChatView(true)
     );
     chatButton.addClass("zrr-ribbon-chat");
+
+    const pdfButton = this.addRibbonIcon(
+      "zrr-pdf",
+      "Sync PDF view in right sidebar for current note",
+      () => {
+        void this.syncPdfSidebarForActiveNote({ revealSidebar: true });
+      }
+    );
+    pdfButton.addClass("zrr-ribbon-pdf");
   }
 
   private async confirmOverwrite(notePath: string): Promise<boolean> {

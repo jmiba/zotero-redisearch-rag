@@ -1,4 +1,13 @@
 # Changelog
+## 0.9.17 (Bugfix Release)
+- Fix right-sidebar PDF sync recovery after the sidebar tab is closed:
+  - manual PDF sync now reuses only real PDF leaves instead of hijacking unrelated sidebar tabs or spawning empty leaves/splits,
+  - sidebar recovery now coerces fallback leaves into a PDF view before opening the target file/page.
+- Improve manual PDF sync UX:
+  - make **Sync PDF view in right sidebar for current note** resolve the current Markdown note reliably even when focus is in another pane or the command palette,
+  - make both the command and the ribbon button reveal the right-sidebar PDF view after syncing.
+- Add a dedicated PDF ribbon button for one-click sidebar recovery and update docs for the new recovery path.
+
 ## 0.9.16 (Bugfix Release)
 - Fix metadata sync coverage for publication container fields by adding full bidirectional sync support for:
   - `publication_title` (`publicationTitle` in Zotero),

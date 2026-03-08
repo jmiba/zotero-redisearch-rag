@@ -7,6 +7,32 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.17",
+    markdown: `- Fix right-sidebar PDF sync recovery after the sidebar tab is closed:
+  - manual PDF sync now reuses only real PDF leaves instead of hijacking unrelated sidebar tabs or spawning empty leaves/splits,
+  - sidebar recovery now coerces fallback leaves into a PDF view before opening the target file/page.
+- Improve manual PDF sync UX:
+  - make **Sync PDF view in right sidebar for current note** resolve the current Markdown note reliably even when focus is in another pane or the command palette,
+  - make both the command and the ribbon button reveal the right-sidebar PDF view after syncing.
+- Add a dedicated PDF ribbon button for one-click sidebar recovery and update docs for the new recovery path.`,
+  },
+  {
+    version: "0.9.16",
+    markdown: `- Fix metadata sync coverage for publication container fields by adding full bidirectional sync support for:
+  - \`publication_title\` (\`publicationTitle\` in Zotero),
+  - \`book_title\` (\`bookTitle\` in Zotero),
+  - \`journal_abbrev\` (\`journalAbbreviation\` in Zotero).
+- Include these fields in metadata conflict/snapshot tracking and one-sided auto-create note -> Zotero behavior.
+- Update docs to reflect the expanded synced metadata set and recognized YAML key variants.`,
+  },
+  {
+    version: "0.9.15",
+    markdown: `- Add chunk-cache self-healing for note-based reindexing:
+  - when \`.zotero-redisearch-rag/chunks/<doc_id>.json\` is missing but the note still contains \`zrr:sync\` / \`zrr:chunk\` markers, the plugin rebuilds chunk cache JSON directly from the note and continues reindexing.
+- Apply the same fallback during note-save sync, so incremental chunk updates keep working after accidental cache file deletion.
+- Preserve chunk marker metadata while restoring cache (chunk ID, page number, exclude flag, section marker), and refresh \`doc_index\` note path/title plus available PDF/attachment metadata.`,
+  },
+  {
     version: "0.9.14",
     markdown: `- Fix repeated empty right-sidebar tab creation when opening Zotero notes:
   - prevent automatic PDF sidebar sync from creating new sidebar leaves,
