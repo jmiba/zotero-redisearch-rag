@@ -332,6 +332,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
     detectOcrEngines?: () => Promise<OcrEngineAvailability>;
     startRedisStack: (silent?: boolean) => Promise<void>;
+    recreateRedisStack: (silent?: boolean) => Promise<void>;
     setupPythonEnv: () => Promise<void>;
     reindexRedisFromCache: () => Promise<boolean>;
     recreateMissingNotesFromCache: () => Promise<void>;
@@ -359,6 +360,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       fetchCleanupModelOptions: () => Promise<Array<{ value: string; label: string }>>;
       detectOcrEngines?: () => Promise<OcrEngineAvailability>;
       startRedisStack: (silent?: boolean) => Promise<void>;
+      recreateRedisStack: (silent?: boolean) => Promise<void>;
       setupPythonEnv: () => Promise<void>;
       reindexRedisFromCache: () => Promise<boolean>;
       recreateMissingNotesFromCache: () => Promise<void>;
@@ -2330,6 +2332,15 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addButton((button) =>
           button.setButtonText("Reindex").onClick(async () => {
             await this.plugin.reindexRedisFromCache();
+          })
+        );
+
+      new Setting(tabEl)
+        .setName("Recreate redis stack")
+        .setDesc("Pulls the configured redis image and force-recreates the redis-stack service.")
+        .addButton((button) =>
+          button.setButtonText("Recreate").onClick(async () => {
+            await this.plugin.recreateRedisStack();
           })
         );
 

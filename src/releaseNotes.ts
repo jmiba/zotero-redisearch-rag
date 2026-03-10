@@ -7,6 +7,16 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.18",
+    markdown: `- Replace the bundled Redis image with \`redis/redis-stack:7.4.0-v8\` so new and recreated local stacks include Redis Insight.
+- Add multi-vault-safe Redis Insight host-port handling by deriving the Insight port alongside the Redis and Python worker ports during auto-assign.
+- Add a conservative Redis refresh workflow:
+  - new command palette action **Recreate redis stack (pull configured image)**,
+  - new **Maintenance -> Redis indexing -> Recreate redis stack** button,
+  - the recreate action pulls the configured Redis image and force-recreates only the \`redis-stack\` service.
+- Update Docker and startup docs for Redis Insight availability and the new recreate flow.`,
+  },
+  {
     version: "0.9.17",
     markdown: `- Fix right-sidebar PDF sync recovery after the sidebar tab is closed:
   - manual PDF sync now reuses only real PDF leaves instead of hijacking unrelated sidebar tabs or spawning empty leaves/splits,

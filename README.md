@@ -226,6 +226,7 @@ Then copy the plugin folder to your vault as above.
 ### 3) Start Redis Stack
 Recommended: start from the plugin
 - Command palette -> "Start Redis Stack (Docker/Podman Compose)"
+- Command palette -> "Recreate Redis Stack (Pull Configured Image)" if you need to pull the pinned Redis image again and recreate the Redis service after an update
 - First startup can be slow: Docker/Podman may need to pull images and build worker dependencies. This can take several minutes, and on slower networks/machines can take 10+ minutes.
 
 Settings related to Redis (Settings → Prerequisites):
@@ -244,6 +245,8 @@ Notes:
    - macOS: paths under /Users are shared by default.
    - Windows: C:\Users\... is typically accessible via WSL2.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
+- The bundled Redis container now uses `redis/redis-stack`, so Redis Insight is included and exposed on `http://127.0.0.1:8001` by default.
+- If Auto-assign Redis port is enabled, the plugin also shifts the Redis Insight host port to a vault-specific value to avoid multi-vault conflicts.
 - Multiple vaults:
    - Starting from the plugin creates a per‑vault Docker Compose project and data folder.
    - With Auto‑assign Redis port enabled, each vault gets a unique local port and the Redis URL is updated automatically.

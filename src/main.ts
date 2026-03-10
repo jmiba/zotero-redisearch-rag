@@ -119,6 +119,8 @@ const PYTHON_WORKER_VAULT_ROOT = "/workspace/vault";
 const PYTHON_WORKER_API_HOST = "127.0.0.1";
 const PYTHON_WORKER_DEFAULT_API_PORT = 7379;
 const PYTHON_WORKER_API_PORT_OFFSET = 1000;
+const REDIS_INSIGHT_DEFAULT_PORT = 8001;
+const REDIS_INSIGHT_PORT_OFFSET = REDIS_INSIGHT_DEFAULT_PORT - 6379;
 const RAG_AGENTIC_FULL_DOC_CHUNKS_BUDGET = 48;
 const RAG_AGENTIC_FULL_DOC_MAX_CHARS_BUDGET = 32000;
 const RAG_WORKER_BASE_TIMEOUT_SEC = 180;
@@ -404,6 +406,12 @@ export default class ZoteroRagPlugin extends Plugin {
       id: "start-redis-stack",
       name: "Start redis stack (docker/podman compose)",
       callback: () => this.startRedisStack(),
+    });
+
+    this.addCommand({
+      id: "recreate-redis-stack",
+      name: "Recreate redis stack (pull configured image)",
+      callback: () => this.recreateRedisStack(),
     });
 
     this.addCommand({
@@ -11638,10 +11646,8 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     const dataDir = options?.dataDir || this.getRedisDataDir();
     const redisPort = options?.redisPort ?? this.getRedisPortFromUrl();
-    const workerPort = this.getPythonWorkerApiPort(redisPort);
     composeEnv.ZRR_DATA_DIR = this.toComposePath(dataDir);
-    composeEnv.ZRR_PORT = String(redisPort);
-    composeEnv.ZRR_WORKER_PORT = String(workerPort);
+    this.applyComposePortEnvironment(composeEnv, redisPort);
     composeEnv.ZRR_VAULT_DIR = this.toComposePath(this.getVaultBasePath());
     composeEnv.ZRR_PLUGIN_DIR = this.toComposePath(this.getPluginDir());
     composeEnv.ZRR_WORKER_CACHE_DIR = this.toComposePath(this.getPythonWorkerCacheDir());
@@ -11771,6 +11777,23 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private getRedisInsightPort(redisPort?: number): number {
+    const effectiveRedisPort = Number.isFinite(redisPort ?? NaN)
+      ? Number(redisPort)
+      : this.getRedisPortFromUrl();
+    const candidate = effectiveRedisPort + REDIS_INSIGHT_PORT_OFFSET;
+    if (candidate >= 1024 && candidate <= 65535) {
+      return candidate;
+    }
+    return REDIS_INSIGHT_DEFAULT_PORT;
+  }
+
+  private applyComposePortEnvironment(composeEnv: NodeJS.ProcessEnv, redisPort: number): void {
+    composeEnv.ZRR_PORT = String(redisPort);
+    composeEnv.ZRR_WORKER_PORT = String(this.getPythonWorkerApiPort(redisPort));
+    composeEnv.ZRR_INSIGHT_PORT = String(this.getRedisInsightPort(redisPort));
+  }
+
   private getVaultPreferredRedisPort(): number {
     const hash = createHash("sha1").update(this.getVaultBasePath()).digest("hex");
     const offset = Number.parseInt(hash.slice(0, 4), 16) % 2000;
@@ -11815,12 +11838,28 @@ export default class ZoteroRagPlugin extends Plugin {
     });
   }
 
-  private async findAvailablePort(host: string, startPort: number): Promise<number | null> {
+  private getRequiredComposeHostPorts(redisPort: number): number[] {
+    const ports = [redisPort, this.getRedisInsightPort(redisPort)];
+    if (this.usePythonWorker()) {
+      ports.push(this.getPythonWorkerApiPort(redisPort));
+    }
+    return Array.from(new Set(ports));
+  }
+
+  private async findAvailableComposeRedisPort(host: string, startPort: number): Promise<number | null> {
     const maxAttempts = 25;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const port = startPort + attempt;
-      if (await this.isPortFree(host, port)) {
-        return port;
+      const redisPort = startPort + attempt;
+      const requiredPorts = this.getRequiredComposeHostPorts(redisPort);
+      let allFree = true;
+      for (const port of requiredPorts) {
+        if (!(await this.isPortFree(host, port))) {
+          allFree = false;
+          break;
+        }
+      }
+      if (allFree) {
+        return redisPort;
       }
     }
     return null;
@@ -12159,7 +12198,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (autoAssign) {
         const preferredPort =
           requestedPort === 6379 ? this.getVaultPreferredRedisPort() : requestedPort;
-        const availablePort = await this.findAvailablePort(portCheckHost, preferredPort);
+        const availablePort = await this.findAvailableComposeRedisPort(portCheckHost, preferredPort);
         if (!availablePort) {
           throw new Error(`No available Redis port found starting at ${preferredPort}.`);
         }
@@ -12200,7 +12239,7 @@ export default class ZoteroRagPlugin extends Plugin {
           return;
         }
       }
-      composeEnv.ZRR_PORT = String(redisPort);
+      this.applyComposePortEnvironment(composeEnv, redisPort);
       try {
         await this.runCommand(
           composeCommand.command,
@@ -12244,6 +12283,56 @@ export default class ZoteroRagPlugin extends Plugin {
         new Notice("Failed to start redis stack. Check docker/podman and file sharing.");
       }
       console.error("Failed to start Redis Stack", error);
+    }
+  }
+
+  async recreateRedisStack(silent?: boolean): Promise<void> {
+    try {
+      if (!this.isLocalRedisHost(this.getRedisHostFromUrl())) {
+        if (!silent) {
+          new Notice("This command only works for local redis addresses managed by compose.");
+        }
+        return;
+      }
+      const context = await this.resolveComposeProjectContext({
+        dataDir: this.getRedisDataDir(),
+        redisPort: this.getRedisPortFromUrl(),
+      });
+      await this.maybeShowFirstContainerStartupNotice(silent);
+      await this.runCommand(
+        context.composeCommand.command,
+        [...context.composeCommand.argsPrefix, "-p", context.project, "-f", context.composePath, "pull", REDIS_STACK_SERVICE],
+        {
+          cwd: path.dirname(context.composePath),
+          env: context.composeEnv,
+        }
+      );
+      await this.runCommand(
+        context.composeCommand.command,
+        [
+          ...context.composeCommand.argsPrefix,
+          "-p",
+          context.project,
+          "-f",
+          context.composePath,
+          "up",
+          "-d",
+          "--force-recreate",
+          REDIS_STACK_SERVICE,
+        ],
+        {
+          cwd: path.dirname(context.composePath),
+          env: context.composeEnv,
+        }
+      );
+      if (!silent) {
+        new Notice("Redis stack recreated.");
+      }
+    } catch (error) {
+      if (!silent) {
+        new Notice("Failed to recreate redis stack. Check docker/podman and file sharing.");
+      }
+      console.error("Failed to recreate Redis Stack", error);
     }
   }
 

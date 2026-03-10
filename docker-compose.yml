@@ -1,11 +1,11 @@
 services:
   redis-stack:
-    image: docker.io/redis/redis-stack-server@sha256:798ab84d9f266936b034ab11c4d04a2b8e4b441884c5aa7d17ac951eefdf742a
-    command: ["redis-stack-server", "/redis-stack.conf", "--dir", "/data"]
+    image: docker.io/redis/redis-stack:7.4.0-v8
     environment:
       - REDIS_ARGS=
     ports:
       - "${ZRR_PORT:-6379}:6379"
+      - "${ZRR_INSIGHT_PORT:-8001}:8001"
     volumes:
       - "${ZRR_DATA_DIR:-./.zotero-redisearch-rag/redis-data}:/data"
       - "./redis-stack.conf:/redis-stack.conf:ro"

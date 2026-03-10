@@ -72,6 +72,11 @@ docker compose logs redis-stack
 docker compose logs python-worker
 ```
 
+Redis Insight:
+
+- With the bundled `redis/redis-stack` image, Redis Insight is available at [http://127.0.0.1:8001](http://127.0.0.1:8001) by default.
+- If **Auto-assign Redis port** is enabled, the plugin also chooses a matching vault-specific Redis Insight host port so multiple vaults can run without port collisions.
+
 ## Common pitfalls
 
 - **Daemon not running**: CLI exists but Docker/Podman engine is stopped.

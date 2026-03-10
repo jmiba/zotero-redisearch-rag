@@ -31,6 +31,8 @@ This page lists the main commands and what they do.
   - Reset the Redis index and rebuild from cached chunks.
 
 ## Redis diagnostics and search
+- **Recreate Redis Stack (Pull Configured Image)**
+  - Pull the configured Redis image and force-recreate the `redis-stack` service.
 - **Search Redis index for term**
   - Run a keyword search against the index.
 - **Show Redis diagnostics**

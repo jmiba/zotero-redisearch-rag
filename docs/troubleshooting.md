@@ -77,3 +77,7 @@ docker compose ps -a
 docker compose logs redis-stack
 docker compose logs python-worker
 ```
+
+In Obsidian you can also run:
+
+- **Command palette → Recreate Redis Stack (Pull Configured Image)**

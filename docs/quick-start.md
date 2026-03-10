@@ -40,6 +40,7 @@ Alternatives:
 In Obsidian, run:
 
 - **Command palette → Start Redis Stack (Docker/Podman Compose)**
+- **Command palette → Recreate Redis Stack (Pull Configured Image)** if you need to refresh the Redis container after a plugin update
 
 If Docker or Podman isn’t running, start it first.
 First startup can be slow because Docker/Podman may need to pull images and build worker dependencies. On slower networks/machines this can take 10+ minutes.
