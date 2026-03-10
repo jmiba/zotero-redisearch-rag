@@ -2,7 +2,7 @@ name: Release
 
 on:
   release:
-    types: [published, released, prereleased]
+    types: [published]
 
 permissions:
   contents: write
