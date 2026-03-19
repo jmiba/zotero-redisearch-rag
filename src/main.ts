@@ -13,6 +13,7 @@ import {
   requestUrl,
 } from "obsidian";
 import {
+  createChunkLinkNavigationExtension,
   createChunkToolsExtension,
   createSyncBadgeExtension,
 } from "./editorExtensions";
@@ -332,8 +333,12 @@ export default class ZoteroRagPlugin extends Plugin {
     this.registerPreviewScrollSyncHandlers();
     this.registerNoteDeleteMenu();
     this.registerEditorExtension(createChunkToolsExtension(this));
+    this.registerEditorExtension(createChunkLinkNavigationExtension(this));
     this.registerEditorExtension(createSyncBadgeExtension());
     this.registerEditorExtension(this.pdfSidebar.createSyncExtension());
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      this.hookChunkInternalLinks(el, ctx.sourcePath || "");
+    });
 
     try {
       await this.ensureBundledTools();
@@ -1975,7 +1980,8 @@ export default class ZoteroRagPlugin extends Plugin {
   public async formatInlineCitations(
     content: string,
     citations: ChatCitation[],
-    retrieved: ChatRetrievedChunk[] = []
+    retrieved: ChatRetrievedChunk[] = [],
+    options: { nativeObsidianAnchors?: boolean } = {}
   ): Promise<string> {
     if (!content) {
       return content;
@@ -2112,7 +2118,12 @@ export default class ZoteroRagPlugin extends Plugin {
           continue;
         }
         if (chunkId && !effectiveAnnotationKey) {
-          replacements.set(token, this.buildNoteChunkLink(display.notePath, chunkId, label));
+          replacements.set(
+            token,
+            this.buildNoteChunkLink(display.notePath, chunkId, label, {
+              nativeAnchor: Boolean(options.nativeObsidianAnchors),
+            })
+          );
           continue;
         }
       }
@@ -7606,6 +7617,9 @@ export default class ZoteroRagPlugin extends Plugin {
         currentExclude = true;
         continue;
       }
+      if (this.isChunkBlockIdLine(line)) {
+        continue;
+      }
       currentLines.push(line);
     }
 
@@ -7758,6 +7772,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private normalizeChunkText(text: string): string {
     return text
       .split(/\r?\n/)
+      .filter((line) => !this.isChunkBlockIdLine(line))
       .map((line) => line.replace(/\s+/g, " ").trim())
       .filter((line, idx, arr) => !(line === "" && arr[idx - 1] === ""))
       .join("\n")
@@ -7817,6 +7832,9 @@ export default class ZoteroRagPlugin extends Plugin {
       const sectionAttr = isSectionChunked ? " section" : "";
       const attrs = ` id=${chunkId}${sectionAttr}${pageAttr}${excluded ? " exclude" : ""}`;
       parts.push(`<!-- zrr:chunk${attrs} -->`);
+      parts.push("");
+      parts.push(`^${this.buildChunkBlockId(chunkId, docId)}`);
+      parts.push("");
       if (displayText) {
         parts.push(displayText);
       }
@@ -8992,7 +9010,39 @@ export default class ZoteroRagPlugin extends Plugin {
     return true;
   }
 
-  public async openInternalLinkInMain(linkText: string): Promise<void> {
+  private isZrrChunkInternalLink(linkText: string): boolean {
+    const normalized = String(linkText || "").replace(/\\\|/g, "|");
+    return normalized.includes("#zrr-chunk:");
+  }
+
+  public getLivePreviewSourcePath(): string {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (activeView?.file?.path) {
+      return activeView.file.path;
+    }
+    return this.app.workspace.getActiveFile()?.path ?? "";
+  }
+
+  private hookChunkInternalLinks(container: HTMLElement, sourcePath: string): void {
+    const links = container.querySelectorAll<HTMLAnchorElement>("a.internal-link");
+    for (const link of Array.from(links)) {
+      if (link.dataset.zrrChunkBound === "1") {
+        continue;
+      }
+      const href = link.getAttribute("data-href") || link.getAttribute("href") || "";
+      if (!this.isZrrChunkInternalLink(href)) {
+        continue;
+      }
+      link.dataset.zrrChunkBound = "1";
+      this.registerDomEvent(link, "click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.openInternalLinkInMain(href, sourcePath);
+      });
+    }
+  }
+
+  public async openInternalLinkInMain(linkText: string, sourcePath = ""): Promise<void> {
     const leaf = this.getMainLeaf();
     const [linkPathRaw, ...anchorParts] = linkText.split("#");
     const linkPath = linkPathRaw || "";
@@ -9005,7 +9055,7 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!candidate) {
           continue;
         }
-        const resolved = this.app.metadataCache.getFirstLinkpathDest(candidate, "");
+        const resolved = this.app.metadataCache.getFirstLinkpathDest(candidate, sourcePath);
         if (resolved instanceof TFile) {
           file = resolved;
           break;
@@ -9024,22 +9074,22 @@ export default class ZoteroRagPlugin extends Plugin {
       }
       await leaf.openFile(file, { active: true });
       if (linkText.includes("#") && !chunkId) {
-        await this.openLinkTextInLeaf(leaf, linkText);
+        await this.openLinkTextInLeaf(leaf, linkText, sourcePath);
       }
       return;
     }
-    await this.openLinkTextInLeaf(leaf, linkText);
+    await this.openLinkTextInLeaf(leaf, linkText, sourcePath);
   }
 
-  private async openLinkTextInLeaf(leaf: WorkspaceLeaf, linkText: string): Promise<void> {
+  private async openLinkTextInLeaf(leaf: WorkspaceLeaf, linkText: string, sourcePath = ""): Promise<void> {
     const leafAny = leaf as WorkspaceLeaf & {
       openLinkText?: (link: string, sourcePath: string, state?: { active?: boolean }) => Promise<void>;
     };
     if (typeof leafAny.openLinkText === "function") {
-      await leafAny.openLinkText(linkText, "", { active: true });
+      await leafAny.openLinkText(linkText, sourcePath, { active: true });
       return;
     }
-    await this.app.workspace.openLinkText(linkText, "", "tab");
+    await this.app.workspace.openLinkText(linkText, sourcePath, "tab");
   }
 
   private async openNoteInNewTab(notePath: string): Promise<void> {
@@ -9104,15 +9154,21 @@ export default class ZoteroRagPlugin extends Plugin {
     return undefined;
   }
 
-  public formatCitationsMarkdown(citations: ChatCitation[]): string {
+  public formatCitationsMarkdown(
+    citations: ChatCitation[],
+    options: { nativeObsidianAnchors?: boolean } = {}
+  ): string {
     if (!citations.length) {
       return "";
     }
-    const lines = citations.map((citation) => this.formatCitationMarkdown(citation));
+    const lines = citations.map((citation) => this.formatCitationMarkdown(citation, options));
     return lines.filter(Boolean).join("\n");
   }
 
-  private formatCitationMarkdown(citation: ChatCitation): string {
+  private formatCitationMarkdown(
+    citation: ChatCitation,
+    options: { nativeObsidianAnchors?: boolean } = {}
+  ): string {
     const docId = citation.doc_id || "?";
     const pageLabel = this.formatCitationPageLabel(citation);
     const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
@@ -9138,7 +9194,9 @@ export default class ZoteroRagPlugin extends Plugin {
         return `- ${this.buildNoteLink(entry.note_path, fullLabel)}`;
       }
       if (chunkId && !annotationKey) {
-        return `- ${this.buildNoteChunkLink(entry.note_path, chunkId, fullLabel)}`;
+        return `- ${this.buildNoteChunkLink(entry.note_path, chunkId, fullLabel, {
+          nativeAnchor: Boolean(options.nativeObsidianAnchors),
+        })}`;
       }
     }
     if (attachmentKey) {
@@ -9148,11 +9206,136 @@ export default class ZoteroRagPlugin extends Plugin {
     return `- ${fullLabel}`;
   }
 
-  private buildNoteChunkLink(notePath: string, chunkId: string, label: string): string {
+  private buildNoteChunkLink(
+    notePath: string,
+    chunkId: string,
+    label: string,
+    options: { nativeAnchor?: boolean } = {}
+  ): string {
     const target = normalizePath(notePath).replace(/\.md$/i, "");
-    const anchor = `zrr-chunk:${chunkId}`;
     const safeLabel = this.escapeWikiLabel(label);
+    if (options.nativeAnchor) {
+      return `[[${target}#^${this.buildChunkBlockId(chunkId)}|${safeLabel}]]`;
+    }
+    const anchor = `zrr-chunk:${chunkId}`;
     return `[[${target}#${anchor}|${safeLabel}]]`;
+  }
+
+  private buildChunkBlockId(chunkId: string, docId?: string): string {
+    const normalized = (this.normalizeChunkIdForNote(chunkId, docId) || chunkId || "").trim();
+    if (!normalized) {
+      return "zrr-chunk-source";
+    }
+    const encoded = Array.from(normalized).map((char) => {
+      if (/[A-Za-z0-9]/.test(char)) {
+        return char.toLowerCase();
+      }
+      if (char === "-") {
+        return "-";
+      }
+      return `-x${char.codePointAt(0)?.toString(16) || "0"}-`;
+    }).join("").replace(/-+/g, "-").replace(/^-|-$/g, "");
+    return `zrr-chunk-${encoded || "source"}`;
+  }
+
+  private isChunkBlockIdLine(line: string): boolean {
+    return /^\s*\^zrr-chunk-[A-Za-z0-9-]+\s*$/.test(line || "");
+  }
+
+  private async ensureChunkBlockIdsForChatExport(messages: ChatMessage[]): Promise<void> {
+    if (!this.settings.preferObsidianNoteForCitations) {
+      return;
+    }
+    const chunkIdsByNote = new Map<string, { docId: string; chunkIds: Set<string> }>();
+    for (const message of messages) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      for (const citation of message.citations ?? []) {
+        const docId = (citation.doc_id || "").trim();
+        if (!docId) {
+          continue;
+        }
+        const annotationKey = citation.annotation_key || this.extractAnnotationKey(citation.chunk_id);
+        if (annotationKey) {
+          continue;
+        }
+        const chunkId = this.normalizeChunkIdForNote(citation.chunk_id, docId);
+        if (!chunkId) {
+          continue;
+        }
+        const notePath = await this.resolveNotePathForDocId(docId);
+        if (!notePath) {
+          continue;
+        }
+        const entry = chunkIdsByNote.get(notePath) ?? { docId, chunkIds: new Set<string>() };
+        entry.chunkIds.add(chunkId);
+        chunkIdsByNote.set(notePath, entry);
+      }
+    }
+    for (const [notePath, entry] of chunkIdsByNote.entries()) {
+      await this.ensureChunkBlockIdsInNote(notePath, entry.docId, Array.from(entry.chunkIds));
+    }
+  }
+
+  private async ensureChunkBlockIdsInNote(
+    notePath: string,
+    docId: string,
+    chunkIds: string[]
+  ): Promise<void> {
+    const targets = new Map<string, string>();
+    for (const chunkId of chunkIds) {
+      const normalized = (this.normalizeChunkIdForNote(chunkId, docId) || chunkId || "").trim();
+      if (!normalized) {
+        continue;
+      }
+      targets.set(normalized, this.buildChunkBlockId(normalized, docId));
+    }
+    if (!targets.size) {
+      return;
+    }
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(notePath)) {
+      return;
+    }
+    const content = await adapter.read(notePath);
+    const lines = content.split(/\r?\n/);
+    let changed = false;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const markerInfo = parseChunkMarkerLine(lines[index]);
+      const chunkId = markerInfo?.chunkId
+        ? (this.normalizeChunkIdForNote(markerInfo.chunkId, docId) || markerInfo.chunkId)
+        : "";
+      if (!chunkId) {
+        continue;
+      }
+      const blockId = targets.get(chunkId);
+      if (!blockId) {
+        continue;
+      }
+      let hasBlockId = false;
+      for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+        if (ZRR_CHUNK_START_RE.test(lines[cursor]) || ZRR_CHUNK_END_RE.test(lines[cursor])) {
+          break;
+        }
+        if (new RegExp(`^\\s*\\^${this.escapeRegExp(blockId)}\\s*$`, "i").test(lines[cursor])) {
+          hasBlockId = true;
+          break;
+        }
+      }
+      if (hasBlockId) {
+        continue;
+      }
+      lines.splice(index + 1, 0, "", `^${blockId}`, "");
+      index += 3;
+      changed = true;
+    }
+
+    if (!changed) {
+      return;
+    }
+    await this.writeNoteWithSyncSuppressed(notePath, lines.join("\n"));
   }
 
   private buildNoteLink(notePath: string, label: string): string {

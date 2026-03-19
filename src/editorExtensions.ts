@@ -25,6 +25,11 @@ export type ChunkToolsActions = {
   toggleChunkExcludeFromToolbar: (startLine: number) => void;
 };
 
+export type ChunkLinkNavigationActions = {
+  openInternalLinkInMain: (linkText: string, sourcePath?: string) => Promise<void> | void;
+  getLivePreviewSourcePath: () => string;
+};
+
 const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElement | null => {
   const badge = document.createElement("div");
   badge.classList.add("zrr-sync-badge");
@@ -372,5 +377,62 @@ export const createChunkToolsExtension = (plugin: ChunkToolsActions): ViewPlugin
     },
     {
       decorations: (value) => value.decorations,
+    }
+  );
+
+const extractWikiLinkTargetAtOffset = (lineText: string, offset: number): string | null => {
+  if (!lineText || offset < 0) {
+    return null;
+  }
+  const wikiRe = /\[\[([^\]\n]+)\]\]/g;
+  for (const match of lineText.matchAll(wikiRe)) {
+    const full = match[0] ?? "";
+    const inner = match[1] ?? "";
+    const start = match.index ?? -1;
+    if (start < 0) {
+      continue;
+    }
+    const end = start + full.length;
+    if (offset < start || offset > end) {
+      continue;
+    }
+    const pipeIndex = inner.indexOf("|");
+    const target = (pipeIndex >= 0 ? inner.slice(0, pipeIndex) : inner).trim();
+    return target || null;
+  }
+  return null;
+};
+
+export const createChunkLinkNavigationExtension = (
+  plugin: ChunkLinkNavigationActions
+): ViewPlugin<object> =>
+  ViewPlugin.fromClass(
+    class {},
+    {
+      eventHandlers: {
+        click(event: MouseEvent, view: EditorView): boolean {
+          if (event.defaultPrevented || event.button !== 0) {
+            return false;
+          }
+          const sourceView = view.dom.closest(".markdown-source-view");
+          if (!sourceView || !sourceView.classList.contains("is-live-preview")) {
+            return false;
+          }
+          const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+          if (pos === null) {
+            return false;
+          }
+          const line = view.state.doc.lineAt(pos);
+          const offset = pos - line.from;
+          const target = extractWikiLinkTargetAtOffset(line.text, offset);
+          if (!target || !target.includes("#zrr-chunk:")) {
+            return false;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          void plugin.openInternalLinkInMain(target, plugin.getLivePreviewSourcePath());
+          return true;
+        },
+      },
     }
   );

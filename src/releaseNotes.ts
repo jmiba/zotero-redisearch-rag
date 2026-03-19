@@ -7,6 +7,14 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.19",
+    markdown: `- Restore copied-chat chunk citation jumps without relying on native Obsidian block refs:
+  - exported chat notes now keep legacy \`#zrr-chunk:\` wiki-links for page/section chunk citations,
+  - regular rendered markdown notes intercept those legacy links and route them through the plugin's existing chunk-marker jump logic.
+- Add live preview support for legacy chunk citation jumps by intercepting \`#zrr-chunk:\` wiki-links from the CodeMirror editor surface and opening the target chunk directly.
+- Improve internal-link resolution for copied chat-note citations by resolving relative wiki-links against the current note source path during custom navigation.`,
+  },
+  {
     version: "0.9.18",
     markdown: `- Replace the bundled Redis image with \`redis/redis-stack:7.4.0-v8\` so new and recreated local stacks include Redis Insight.
 - Add multi-vault-safe Redis Insight host-port handling by deriving the Insight port alongside the Redis and Python worker ports during auto-assign.
