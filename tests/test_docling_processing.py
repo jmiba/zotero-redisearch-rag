@@ -151,6 +151,79 @@ class DoclingProcessingTests(unittest.TestCase):
         corrected = self.docling.apply_dictionary_correction("m0dern", ["modern"])
         self.assertEqual(corrected, "modern")
 
+    def test_filter_docling_config_overrides_removes_gui_keys(self):
+        filtered = self.docling.filter_docling_config_overrides(
+            {
+                "enable_llm_correction": True,
+                "llm_cleanup_model": "test-model",
+                "quality_confidence_threshold": 0.2,
+                "analysis_max_pages": 7,
+            }
+        )
+        self.assertEqual(filtered, {"analysis_max_pages": 7})
+
+    def test_born_digital_text_layer_detection(self):
+        config = self.docling.DoclingProcessingConfig()
+        quality = self.docling.TextQuality(
+            avg_chars_per_page=3000,
+            alpha_ratio=0.85,
+            suspicious_token_ratio=0.03,
+            confidence_proxy=0.8,
+            dictionary_hit_ratio=0.85,
+            spellchecker_hit_ratio=0.92,
+            image_heavy_ratio=0.0,
+            image_page_ratio=0.2,
+            ocr_overlay_ratio=0.15,
+            digital_page_ratio=0.82,
+            layer_classification="digital",
+            effective_confidence_proxy=0.86,
+        )
+        self.assertTrue(
+            self.docling.is_born_digital_text_layer(
+                True,
+                quality,
+                False,
+                config,
+            )
+        )
+
+    def test_born_digital_text_layer_detection_overrides_mixed_classifier(self):
+        config = self.docling.DoclingProcessingConfig()
+        quality = self.docling.TextQuality(
+            avg_chars_per_page=3286,
+            alpha_ratio=0.84,
+            suspicious_token_ratio=0.03,
+            confidence_proxy=0.8,
+            dictionary_hit_ratio=0.85,
+            spellchecker_hit_ratio=0.92,
+            image_heavy_ratio=0.0,
+            image_page_ratio=0.2,
+            ocr_overlay_ratio=0.15,
+            digital_page_ratio=0.0,
+            layer_classification="mixed",
+            effective_confidence_proxy=0.84,
+        )
+        self.assertTrue(
+            self.docling.is_born_digital_text_layer(
+                True,
+                quality,
+                False,
+                config,
+            )
+        )
+
+    def test_determine_postprocess_mode_skips_born_digital(self):
+        config = self.docling.DoclingProcessingConfig()
+        self.assertEqual(
+            self.docling.determine_postprocess_mode(
+                config,
+                layout_engine_active=False,
+                prefer_layout_markdown=False,
+                born_digital_text_layer=True,
+            ),
+            "none",
+        )
+
     def test_umlaut_correction(self):
         text = "ueber"
         output = self.docling.apply_umlaut_corrections(text, "deu+eng", [])

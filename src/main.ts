@@ -127,6 +127,7 @@ const RAG_AGENTIC_FULL_DOC_MAX_CHARS_BUDGET = 32000;
 const RAG_WORKER_BASE_TIMEOUT_SEC = 180;
 const RAG_WORKER_RERANK_TIMEOUT_SEC = 120;
 const RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC = 90;
+const IMPORT_WORKER_TIMEOUT_SEC = 900;
 const MAX_CITATION_TITLE_LENGTH = 80;
 const ANNOTATION_SYNC_GRACE_MS = 120000;
 const ZRR_ANNOTATIONS_START_RE = /<!--\s*zrr:annotations-start\b[^>]*-->/i;
@@ -818,6 +819,31 @@ export default class ZoteroRagPlugin extends Plugin {
     if (existingEntry?.note_path && (await adapter.exists(existingEntry.note_path))) {
       notePath = normalizePath(existingEntry.note_path);
     }
+    const hadExistingNotePath = await adapter.exists(notePath);
+    const hadExistingItemPath = await adapter.exists(itemPath);
+    const hadExistingChunkPath = await adapter.exists(chunkPath);
+    const stagedItemPath = this.buildImportTempPath(itemPath, "item");
+    const stagedChunkPath = this.buildImportTempPath(chunkPath, "chunk");
+    const stagedNotePath = this.buildImportTempPath(notePath, "note");
+    const useStagedVaultPdf = this.settings.copyPdfToVault || !attachment.filePath;
+    const hadExistingPdfPath = useStagedVaultPdf ? await adapter.exists(pdfPath) : false;
+    const stagedPdfPath = useStagedVaultPdf ? this.buildImportTempPath(pdfPath, "pdf") : null;
+    const cleanupStagedFiles = async () => {
+      await this.removeVaultFilesIfExist([
+        stagedItemPath,
+        stagedChunkPath,
+        stagedNotePath,
+        stagedPdfPath,
+      ]);
+    };
+    const cleanupIncompleteFinalFiles = async () => {
+      await this.removeVaultFilesIfExist([
+        hadExistingItemPath ? null : itemPath,
+        hadExistingChunkPath ? null : chunkPath,
+        hadExistingNotePath ? null : notePath,
+        hadExistingPdfPath ? null : pdfPath,
+      ]);
+    };
 
     if (await adapter.exists(notePath)) {
       const confirmed = await this.confirmOverwrite(notePath);
@@ -873,8 +899,9 @@ export default class ZoteroRagPlugin extends Plugin {
             requestLocalApi: this.requestLocalApi.bind(this),
             readFile: fs.readFile,
           });
-        await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
-        pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
+        const targetPdfPath = stagedPdfPath || pdfPath;
+        await this.app.vault.adapter.writeBinary(targetPdfPath, this.bufferToArrayBuffer(buffer));
+        pdfSourcePath = this.getAbsoluteVaultPath(targetPdfPath);
       } else if (attachment.filePath) {
         pdfSourcePath = attachment.filePath;
       } else {
@@ -887,15 +914,17 @@ export default class ZoteroRagPlugin extends Plugin {
           getWebApiLibraryPath: this.getWebApiLibraryPath.bind(this),
           requestLocalApiRaw: this.requestLocalApiRaw.bind(this),
           requestWebApiRaw: this.requestWebApiRaw.bind(this),
-          requestLocalApi: this.requestLocalApi.bind(this),
-          readFile: fs.readFile,
+            requestLocalApi: this.requestLocalApi.bind(this),
+            readFile: fs.readFile,
         });
-        await this.app.vault.adapter.writeBinary(pdfPath, this.bufferToArrayBuffer(buffer));
-        pdfSourcePath = this.getAbsoluteVaultPath(pdfPath);
+        const targetPdfPath = stagedPdfPath || pdfPath;
+        await this.app.vault.adapter.writeBinary(targetPdfPath, this.bufferToArrayBuffer(buffer));
+        pdfSourcePath = this.getAbsoluteVaultPath(targetPdfPath);
         new Notice("Local PDF path unavailable; copied PDF into vault for processing.");
       }
       pdfLink = this.buildPdfLinkForNote(pdfSourcePath, attachment.key, docId);
     } catch (error) {
+      await cleanupStagedFiles();
       new Notice("Failed to download PDF attachment.");
       console.error(error);
       this.clearStatusProgress();
@@ -903,8 +932,9 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     try {
-      await this.app.vault.adapter.write(itemPath, JSON.stringify(item, null, 2));
+      await this.app.vault.adapter.write(stagedItemPath, JSON.stringify(item, null, 2));
     } catch (error) {
+      await cleanupStagedFiles();
       new Notice("Failed to write Zotero item JSON.");
       console.error(error);
       this.clearStatusProgress();
@@ -924,19 +954,22 @@ export default class ZoteroRagPlugin extends Plugin {
         await this.buildDoclingArgs(
           pdfSourcePath,
           docId,
-          chunkPath,
-          notePath,
+          stagedChunkPath,
+          stagedNotePath,
           doclingLanguageHint,
           true
         ),
         (payload) => this.handleDoclingProgress(payload, qualityLabel),
         () => {},
-        doclingLogPath
+        doclingLogPath,
+        "docling_extract",
+        undefined,
+        IMPORT_WORKER_TIMEOUT_SEC
       );
-      qualityLabel = await this.readDoclingQualityLabel(chunkPath);
-      await this.annotateChunkJsonWithAttachmentKey(chunkPath, attachment.key);
+      qualityLabel = await this.readDoclingQualityLabel(stagedChunkPath);
+      await this.annotateChunkJsonWithAttachmentKey(stagedChunkPath, attachment.key);
 
-      const metadata = await this.readDoclingMetadata(chunkPath);
+      const metadata = await this.readDoclingMetadata(stagedChunkPath);
       const layeredPath = await this.maybeCreateOcrLayeredPdf(
         pdfSourcePath,
         metadata,
@@ -945,10 +978,16 @@ export default class ZoteroRagPlugin extends Plugin {
       if (layeredPath) {
         pdfSourcePath = layeredPath;
         pdfLink = this.buildPdfLinkFromSourcePath(layeredPath);
-        await this.updateChunkJsonSourcePdf(chunkPath, layeredPath);
+        await this.updateChunkJsonSourcePdf(stagedChunkPath, layeredPath);
       }
     } catch (error) {
-      new Notice("Docling extraction failed. See console for details.");
+      const message = this.getPythonErrorMessage(error);
+      await cleanupStagedFiles();
+      if (this.isTimeoutLikeErrorMessage(message)) {
+        new Notice("Docling extraction timed out. Incomplete import files were cleaned up.");
+      } else {
+        new Notice("Docling extraction failed. Incomplete import files were cleaned up.");
+      }
       console.error(error);
       this.clearStatusProgress();
       return;
@@ -959,7 +998,7 @@ export default class ZoteroRagPlugin extends Plugin {
       this.showStatusProgress(this.formatStatusLabel("Indexing chunks...", qualityLabel), 0);
       const indexArgs = [
         "--chunks-json",
-        this.getAbsoluteVaultPath(chunkPath),
+        this.getAbsoluteVaultPath(stagedChunkPath),
         "--redis-url",
         this.settings.redisUrl,
         "--index",
@@ -1000,7 +1039,11 @@ export default class ZoteroRagPlugin extends Plugin {
             this.showStatusProgress(label, percent);
           }
         },
-        () => undefined
+        () => undefined,
+        null,
+        "docling_extract",
+        undefined,
+        IMPORT_WORKER_TIMEOUT_SEC
       );
     } catch (error) {
       const message = this.getPythonErrorMessage(error);
@@ -1045,38 +1088,59 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       }
       if (!indexingRecovered) {
+        await this.cleanupIndexedChunksForDoc(docId);
+        await cleanupStagedFiles();
         if (classification === "embed_failure") {
           this.clearStatusProgress();
           new Notice("Embedding provider error detected. Fix the provider/model settings and rerun.");
           return;
         }
+        if (this.isTimeoutLikeErrorMessage(message)) {
+          this.clearStatusProgress();
+          new Notice("Chunk indexing timed out. Incomplete import files were cleaned up.");
+          return;
+        }
         this.clearStatusProgress();
-        new Notice("Redissearch indexing failed. See console for details.");
+        new Notice("Redissearch indexing failed. Incomplete import files were cleaned up.");
         return;
       }
     }
 
     try {
-      const doclingMd = await this.app.vault.adapter.read(notePath);
-      const chunkPayload = await this.readChunkPayload(chunkPath);
-    const doclingContent = this.buildSyncedDoclingContent(docId, chunkPayload, doclingMd);
+      const finalPdfSourcePath = stagedPdfPath ? this.getAbsoluteVaultPath(pdfPath) : pdfSourcePath;
+      const finalPdfLink = stagedPdfPath
+        ? this.buildPdfLinkForNote(finalPdfSourcePath, attachment.key, docId)
+        : pdfLink;
+      const doclingMd = await this.app.vault.adapter.read(stagedNotePath);
+      const chunkPayload = await this.readChunkPayload(stagedChunkPath);
+      const doclingContent = this.buildSyncedDoclingContent(docId, chunkPayload, doclingMd);
       const noteContent = await this.buildNoteMarkdown(
         values,
         item.meta ?? {},
         docId,
-        pdfLink,
+        finalPdfLink,
         attachment.key,
         notePath,
         itemPath,
         doclingContent
       );
-      await this.writeNoteWithSyncSuppressed(notePath, noteContent);
+      await this.app.vault.adapter.write(stagedNotePath, noteContent);
+      await this.replaceVaultFile(stagedItemPath, itemPath);
+      await this.replaceVaultFile(stagedChunkPath, chunkPath);
+      if (stagedPdfPath) {
+        await this.replaceVaultFile(stagedPdfPath, pdfPath);
+        pdfSourcePath = finalPdfSourcePath;
+      }
+      await this.replaceVaultFile(stagedNotePath, notePath);
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
       if (noteFile instanceof TFile) {
         this.scheduleNoteAnnotationSync(noteFile, 2000, "save");
       }
     } catch (error) {
-      new Notice("Failed to finalize note Markdown.");
+      await this.cleanupIndexedChunksForDoc(docId);
+      await cleanupStagedFiles();
+      await cleanupIncompleteFinalFiles();
+      new Notice("Failed to finalize note Markdown. Incomplete import files were cleaned up.");
       console.error(error);
       this.clearStatusProgress();
       return;
@@ -2758,6 +2822,17 @@ export default class ZoteroRagPlugin extends Plugin {
     );
   }
 
+  private isTimeoutLikeErrorMessage(message: string): boolean {
+    const text = (message || "").toLowerCase();
+    return (
+      text.includes("timed out") ||
+      text.includes("timeout") ||
+      text.includes("request timed out") ||
+      text.includes("timeout_while_waiting") ||
+      text.includes("python worker streaming request timed out")
+    );
+  }
+
   private logOptionalLookupFailure(context: string, error: unknown): void {
     if (this.isOptionalLookupNetworkError(error)) {
       console.debug(`${context} (network unavailable)`, error);
@@ -2800,6 +2875,68 @@ export default class ZoteroRagPlugin extends Plugin {
       return preferred;
     }
     return lines.slice(-8).join("\n");
+  }
+
+  private buildImportTempPath(finalPath: string, label: string): string {
+    const dir = normalizePath(path.dirname(finalPath));
+    const ext = path.extname(finalPath);
+    const base = path.basename(finalPath, ext);
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return normalizePath(path.join(dir, `${base}.zrr-${label}-${stamp}${ext}`));
+  }
+
+  private async removeVaultFilesIfExist(paths: Array<string | null | undefined>): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    for (const candidate of paths) {
+      const target = normalizePath(candidate || "");
+      if (!target) {
+        continue;
+      }
+      try {
+        if (await adapter.exists(target)) {
+          await adapter.remove(target);
+        }
+      } catch (error) {
+        console.warn("Failed to remove temporary import file", { target, error });
+      }
+    }
+  }
+
+  private async replaceVaultFile(tempPath: string, finalPath: string): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const from = normalizePath(tempPath);
+    const to = normalizePath(finalPath);
+    if (!from || !to || from === to) {
+      return;
+    }
+    const parent = normalizePath(path.dirname(to));
+    if (parent) {
+      await this.ensureFolder(parent);
+    }
+    if (await adapter.exists(to)) {
+      await adapter.remove(to);
+    }
+    await adapter.rename(from, to);
+  }
+
+  private async cleanupIndexedChunksForDoc(docId: string): Promise<void> {
+    if (!docId) {
+      return;
+    }
+    try {
+      const pluginDir = this.getPluginDir();
+      const script = path.join(pluginDir, "tools", "delete_redis_doc_chunks.py");
+      await this.runPython(script, [
+        "--redis-url",
+        this.settings.redisUrl,
+        "--prefix",
+        this.getRedisKeyPrefix(),
+        "--doc-id",
+        docId,
+      ]);
+    } catch (error) {
+      console.warn("Failed to clean up Redis chunks after import failure", { docId, error });
+    }
   }
 
   private classifyIndexingError(message: string): "chunks_missing" | "embed_dim_mismatch" | "embed_failure" | "unknown" {
@@ -8105,6 +8242,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const adapter = this.app.vault.adapter;
     const chunkPath = normalizePath(`${CHUNK_CACHE_DIR}/${docId}.json`);
     const itemPath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+    const existingEntry = await this.getDocIndexEntry(docId);
+    let vaultPdfPath = "";
 
     let deleteIds: string[] = [];
     if (await adapter.exists(chunkPath)) {
@@ -8116,6 +8255,27 @@ export default class ZoteroRagPlugin extends Plugin {
           chunkId.startsWith(`${docId}:`) ? chunkId.slice(docId.length + 1) : chunkId
         ))
         .filter((chunkId) => chunkId);
+
+      const sourcePdf = typeof payload?.source_pdf === "string" ? payload.source_pdf : "";
+      const normalizedPdfPath = this.normalizeDocIndexPdfPath(sourcePdf);
+      if (
+        normalizedPdfPath &&
+        normalizedPdfPath.startsWith(normalizePath(this.settings.outputPdfDir)) &&
+        (await adapter.exists(normalizedPdfPath))
+      ) {
+        vaultPdfPath = normalizedPdfPath;
+      }
+    }
+
+    if (!vaultPdfPath) {
+      const normalizedPdfPath = this.normalizeDocIndexPdfPath(existingEntry?.pdf_path ?? "");
+      if (
+        normalizedPdfPath &&
+        normalizedPdfPath.startsWith(normalizePath(this.settings.outputPdfDir)) &&
+        (await adapter.exists(normalizedPdfPath))
+      ) {
+        vaultPdfPath = normalizedPdfPath;
+      }
     }
 
     if (deleteIds.length > 0) {
@@ -8130,6 +8290,14 @@ export default class ZoteroRagPlugin extends Plugin {
         await adapter.remove(itemPath);
       }
       await this.removeDocIndexEntry(docId);
+      if (vaultPdfPath) {
+        const pdfFile = this.app.vault.getAbstractFileByPath(vaultPdfPath);
+        if (pdfFile instanceof TFile) {
+          await this.app.fileManager.trashFile(pdfFile);
+        } else if (await adapter.exists(vaultPdfPath)) {
+          await adapter.remove(vaultPdfPath);
+        }
+      }
       await this.app.fileManager.trashFile(file);
       new Notice(`Deleted note and cache for ${docId}.`);
     } catch (error) {
@@ -11494,6 +11662,8 @@ export default class ZoteroRagPlugin extends Plugin {
       args.push("--llm-cleanup-temperature", String(this.settings.llmCleanupTemperature));
       args.push("--llm-cleanup-min-quality", String(this.settings.llmCleanupMinQuality));
       args.push("--llm-cleanup-max-chars", String(this.settings.llmCleanupMaxChars));
+    } else {
+      args.push("--no-llm-cleanup");
     }
     // Auto-enable dictionary-based correction if a bundled wordlist exists
     const pluginDir = this.getPluginDir();
@@ -13471,7 +13641,9 @@ export default class ZoteroRagPlugin extends Plugin {
               reject(new Error(`Python worker request canceled: ${doneError}`));
               return;
             }
-            const diagnosticText = stderr.trim() ? stderr : doneError || diagnostic;
+            const diagnosticText = /^(timeout|canceled|cancelled|client_disconnected)$/i.test(doneError)
+              ? `${doneError}\n${stderr || diagnostic}`.trim()
+              : (stderr.trim() ? stderr : doneError || diagnostic);
             this.handlePythonProcessError(diagnosticText);
             reject(
               new Error(

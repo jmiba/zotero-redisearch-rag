@@ -7,6 +7,21 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.21",
+    markdown: `- Make Zotero PDF imports transactional and self-cleaning:
+  - stage item cache, chunk cache, synced note, and vault-copied PDFs under temporary paths during import,
+  - replace final files only after note finalization succeeds,
+  - clean up staged/incomplete files plus Redis chunk keys when Docling extraction, indexing, or final note assembly fails or times out.
+- Extend cleanup for note deletion and failed imports:
+  - remove vault-local copied PDFs associated with a doc when deleting a note/cache bundle,
+  - add timeout-aware import failure notices and failed-import Redis cleanup.
+- Improve Docling PDF handling:
+  - detect born-digital text layers more reliably and skip unnecessary OCR post-processing for them,
+  - sanitize \`docling_config.json\` by removing GUI/runtime-managed keys on read/write so persisted config stays portable,
+  - add explicit \`--no-llm-cleanup\` CLI support when LLM cleanup is disabled.
+- Add regression tests for Docling config filtering and born-digital post-processing decisions.`,
+  },
+  {
     version: "0.9.20",
     markdown: `- Harden Docling LLM cleanup against repeated slow/failing requests:
   - add a total cleanup time budget so LLM cleanup disables itself after spending too much wall-clock time across chunks,

@@ -243,6 +243,44 @@ class DoclingProcessingConfig:
     hunspell_dic_path: Optional[str] = None
 
 
+DOCLING_CONFIG_FILE_EXCLUDED_FIELDS: Set[str] = {
+    # Internal/callable/runtime-only fields.
+    "dictionary_words",
+    "llm_correct",
+    # Controlled by the plugin GUI / CLI args rather than docling_config.json.
+    "enable_llm_correction",
+    "fallback_ocr_engine",
+    "force_ocr_on_low_quality_text",
+    "force_per_page_ocr",
+    "llm_cleanup_api_key",
+    "llm_cleanup_base_url",
+    "llm_cleanup_model",
+    "llm_cleanup_temperature",
+    "llm_correction_max_chars",
+    "llm_correction_min_quality",
+    "ocr_mode",
+    "paddle_structure_api_disable",
+    "paddle_structure_api_token",
+    "paddle_structure_api_url",
+    "paddle_use_paddlex_layout",
+    "paddle_use_structure_v3",
+    "paddle_use_vl",
+    "paddle_vl_api_disable",
+    "paddle_vl_api_token",
+    "paddle_vl_api_url",
+    "prefer_ocr_engine",
+    "quality_confidence_threshold",
+}
+
+
+def filter_docling_config_overrides(values: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in values.items()
+        if key not in DOCLING_CONFIG_FILE_EXCLUDED_FIELDS
+    }
+
+
 @dataclass
 class OcrRouteDecision:
     ocr_used: bool
@@ -1528,6 +1566,58 @@ def should_rasterize_text_layer(has_text_layer: bool, low_quality: bool, config:
     if config.ocr_mode == "force":
         return True
     return bool(has_text_layer and low_quality and config.force_ocr_on_low_quality_text)
+
+
+def is_born_digital_text_layer(
+    has_text_layer: bool,
+    quality: TextQuality,
+    ocr_used: bool,
+    config: DoclingProcessingConfig,
+) -> bool:
+    if not has_text_layer or ocr_used:
+        return False
+    effective_confidence = (
+        quality.effective_confidence_proxy
+        if quality.effective_confidence_proxy is not None
+        else quality.confidence_proxy
+    )
+    lexicon_ratio = max(
+        float(quality.dictionary_hit_ratio or 0.0),
+        float(quality.spellchecker_hit_ratio or 0.0),
+    )
+    digital_ratio = float(quality.digital_page_ratio or 0.0)
+    image_page_ratio = float(quality.image_page_ratio or 0.0)
+    strong_text_layer = bool(
+        effective_confidence >= max(float(config.quality_confidence_threshold), 0.75)
+        and quality.alpha_ratio >= float(config.quality_alpha_ratio_threshold)
+        and quality.suspicious_token_ratio <= float(config.quality_suspicious_token_threshold)
+        and quality.avg_chars_per_page >= max(float(config.quality_min_avg_chars_per_page), 500.0)
+        and lexicon_ratio >= 0.75
+        and image_page_ratio < float(config.quality_image_page_ratio_threshold)
+    )
+    classifier_digital = (
+        (quality.layer_classification or "").lower() == "digital"
+        and digital_ratio >= max(float(config.quality_classifier_decision_ratio), 0.7)
+    )
+    return bool(classifier_digital or strong_text_layer)
+
+
+def determine_postprocess_mode(
+    config: DoclingProcessingConfig,
+    *,
+    layout_engine_active: bool,
+    prefer_layout_markdown: bool,
+    born_digital_text_layer: bool,
+) -> str:
+    if not config.enable_post_correction:
+        return "none"
+    if born_digital_text_layer:
+        return "none"
+    if layout_engine_active:
+        return "light"
+    if not prefer_layout_markdown:
+        return "full"
+    return "none"
 
 
 def decide_per_page_ocr(
@@ -3972,6 +4062,7 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
     quality = estimate_text_quality(analysis_pages, config, languages)
     quality, classifier_info = apply_text_layer_classifier(quality, pdf_path, config)
     low_quality = is_low_quality(quality, config)
+    born_digital_text_layer = is_born_digital_text_layer(has_text_layer, quality, False, config)
     text_layer_overlay = bool(
         has_text_layer
         and (
@@ -4006,6 +4097,7 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
         "text_layer_detected": has_text_layer,
         "text_layer_low_quality": has_text_layer and low_quality,
         "text_layer_overlay": text_layer_overlay,
+        "born_digital_text_layer": born_digital_text_layer,
         "avg_chars_per_page": quality.avg_chars_per_page,
         "alpha_ratio": quality.alpha_ratio,
         "suspicious_token_ratio": quality.suspicious_token_ratio,
@@ -4055,6 +4147,7 @@ def convert_pdf_with_docling(
     )
     available_engines = detect_available_ocr_engines()
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
+    born_digital_text_layer = is_born_digital_text_layer(has_text_layer, quality, decision.ocr_used, config)
     emit(15, "route", "Selecting OCR route")
     rasterized_source = False
     rasterized_pdf_path = ""
@@ -4150,6 +4243,7 @@ def convert_pdf_with_docling(
         decision.ocr_engine,
         decision.languages,
     )
+    LOGGER.info("Born-digital text layer: %s", born_digital_text_layer)
     LOGGER.info("Per-page OCR: %s (%s)", decision.per_page_ocr, decision.per_page_reason)
     if decision.ocr_used and not decision.use_external_ocr:
         LOGGER.info("External OCR unavailable; relying on Docling OCR.")
@@ -4335,6 +4429,7 @@ def convert_pdf_with_docling(
         "text_layer_detected": has_text_layer,
         "text_layer_low_quality": has_text_layer and low_quality,
         "text_layer_overlay": text_layer_overlay,
+        "born_digital_text_layer": born_digital_text_layer,
         "rasterized_source_pdf": rasterized_source,
         "rasterize_failed": bool(rasterize_error),
         "rasterize_error": rasterize_error,
@@ -4933,6 +5028,7 @@ def main() -> int:
     )
     parser.add_argument("--quality-only", action="store_true", help="Output text-layer quality JSON and exit")
     parser.add_argument("--enable-llm-cleanup", action="store_true", help="Enable LLM cleanup for low-quality chunks")
+    parser.add_argument("--no-llm-cleanup", action="store_true", help="Disable LLM cleanup even if config file enables it")
     parser.add_argument("--llm-cleanup-base-url", help="OpenAI-compatible base URL for LLM cleanup")
     parser.add_argument("--llm-cleanup-api-key", help="API key for LLM cleanup")
     parser.add_argument("--llm-cleanup-model", help="Model name for LLM cleanup")
@@ -5084,7 +5180,22 @@ def main() -> int:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                return data
+                filtered = filter_docling_config_overrides(data)
+                removed = sorted(set(data.keys()) - set(filtered.keys()))
+                if removed:
+                    try:
+                        with open(path, "w", encoding="utf-8") as fh:
+                            json.dump(filtered, fh, indent=2)
+                            fh.write("\n")
+                        LOGGER.info(
+                            "Removed %d GUI/runtime-managed config key(s) from %s: %s",
+                            len(removed),
+                            path,
+                            ", ".join(removed),
+                        )
+                    except Exception as write_exc:
+                        LOGGER.warning("Failed to rewrite filtered config file %s: %s", path, write_exc)
+                return filtered
         except Exception as exc:
             LOGGER.warning("Failed to read config file %s: %s", path, exc)
         return {}
@@ -5098,9 +5209,11 @@ def main() -> int:
             return
         try:
             default_cfg = DoclingProcessingConfig()
+            default_payload = filter_docling_config_overrides(asdict(default_cfg))
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as fh:
-                json.dump(asdict(default_cfg), fh, indent=2)
+                json.dump(default_payload, fh, indent=2)
+                fh.write("\n")
             LOGGER.info("Wrote default Docling config to %s", path)
         except Exception as exc:
             LOGGER.warning("Failed to write default config file %s: %s", path, exc)
@@ -5280,6 +5393,8 @@ def main() -> int:
         config.chunk_overlap_chars = args.chunk_overlap_chars
     if args.enable_llm_cleanup:
         config.enable_llm_correction = True
+    if args.no_llm_cleanup:
+        config.enable_llm_correction = False
     if args.enable_dictionary_correction:
         config.enable_dictionary_correction = True
     if args.dictionary_path:
@@ -5369,14 +5484,18 @@ def main() -> int:
         layout_engine_active = layout_markdown_available or layout_engine_used or layout_engine_configured
         postprocess_fn: Optional[Callable[[str, Optional[str]], str]] = None
         ocr_used = bool(conversion.metadata.get("ocr_used"))
-        postprocess_mode = "none"
-        if config.enable_post_correction:
-            if layout_engine_active:
-                postprocess_mode = "light"
-            elif not prefer_layout_markdown:
-                postprocess_mode = "full"
+        born_digital_text_layer = bool(conversion.metadata.get("born_digital_text_layer"))
+        postprocess_mode = determine_postprocess_mode(
+            config,
+            layout_engine_active=layout_engine_active,
+            prefer_layout_markdown=prefer_layout_markdown,
+            born_digital_text_layer=born_digital_text_layer,
+        )
         if config.enable_post_correction and postprocess_mode == "none":
-            LOGGER.info("Skipping OCR post-processing to preserve Paddle layout output.")
+            if born_digital_text_layer:
+                LOGGER.info("Skipping OCR post-processing for born-digital text layer.")
+            else:
+                LOGGER.info("Skipping OCR post-processing to preserve Paddle layout output.")
         elif postprocess_mode == "light":
             LOGGER.info("Using light OCR post-processing for layout output.")
         if postprocess_mode in ("full", "light"):
