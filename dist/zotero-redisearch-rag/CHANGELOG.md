@@ -1,4 +1,13 @@
 # Changelog
+## 0.9.20 (Bugfix Release)
+- Harden Docling LLM cleanup against repeated slow/failing requests:
+  - add a total cleanup time budget so LLM cleanup disables itself after spending too much wall-clock time across chunks,
+  - cap each cleanup request timeout to the remaining cleanup budget,
+  - disable further cleanup calls after timeout failures instead of retrying the same failure mode on later chunks.
+- Improve Python error surfacing by collapsing noisy process stderr into shorter diagnostics that preserve the most relevant traceback/error lines.
+- Reduce noisy warning logs for optional network lookups (model discovery, Zotero Web API group/user resolution, annotation item fetches) by downgrading expected offline/network-unavailable failures to debug logging.
+- Add regression tests covering LLM cleanup timeout handling and cleanup-budget exhaustion.
+
 ## 0.9.19 (Bugfix Release)
 - Restore copied-chat chunk citation jumps without relying on native Obsidian block refs:
   - exported chat notes now keep legacy `#zrr-chunk:` wiki-links for page/section chunk citations,

@@ -156,6 +156,7 @@ class DoclingProcessingConfig:
     llm_cleanup_model: Optional[str] = None
     llm_cleanup_temperature: float = 0.0
     llm_cleanup_timeout_sec: int = 60
+    llm_cleanup_max_total_sec: int = 120
     llm_correction_min_quality: float = 0.35
     llm_correction_max_chars: int = 2000
     enable_boilerplate_removal: bool = True
@@ -2424,12 +2425,33 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
     base_url = config.llm_cleanup_base_url.rstrip("/")
     endpoint = f"{base_url}/chat/completions"
     api_key = (config.llm_cleanup_api_key or "").strip()
+    cleanup_budget_sec = max(0, int(config.llm_cleanup_max_total_sec or 0))
+    cleanup_elapsed_sec = 0.0
+    cleanup_disabled = False
 
     def _requires_default_temperature(model_name: str) -> bool:
         name = (model_name or "").lower()
         return "gpt-5" in name or name.startswith("gpt5")
 
+    def _disable_cleanup(reason: str) -> None:
+        nonlocal cleanup_disabled
+        if cleanup_disabled:
+            return
+        cleanup_disabled = True
+        LOGGER.warning("Disabling LLM cleanup for remaining chunks: %s", reason)
+
     def _call(text: str) -> str:
+        nonlocal cleanup_elapsed_sec
+        if cleanup_disabled:
+            return text
+        remaining_budget = None
+        if cleanup_budget_sec > 0:
+            remaining_budget = cleanup_budget_sec - cleanup_elapsed_sec
+            if remaining_budget <= 0:
+                _disable_cleanup(
+                    f"cleanup budget exhausted ({cleanup_elapsed_sec:.1f}s/{cleanup_budget_sec}s)"
+                )
+                return text
         try:
             import requests
         except Exception as exc:
@@ -2456,15 +2478,28 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
         }
         if not _requires_default_temperature(config.llm_cleanup_model) or config.llm_cleanup_temperature == 1.0:
             payload["temperature"] = config.llm_cleanup_temperature
+        effective_timeout = max(1, int(config.llm_cleanup_timeout_sec or 1))
+        if remaining_budget is not None:
+            effective_timeout = min(effective_timeout, max(1, int(math.ceil(remaining_budget))))
+        started_at = time.perf_counter()
         try:
-            response = requests.post(endpoint, headers=headers, json=payload, timeout=config.llm_cleanup_timeout_sec)
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=effective_timeout)
             response.raise_for_status()
             data = response.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content")
             if content:
                 return str(content).strip()
+        except requests.exceptions.Timeout as exc:
+            LOGGER.warning("LLM cleanup failed: %s", exc)
+            _disable_cleanup(f"request timed out after {effective_timeout}s")
         except Exception as exc:
             LOGGER.warning("LLM cleanup failed: %s", exc)
+        finally:
+            cleanup_elapsed_sec += time.perf_counter() - started_at
+            if cleanup_budget_sec > 0 and cleanup_elapsed_sec >= cleanup_budget_sec:
+                _disable_cleanup(
+                    f"cleanup budget exhausted ({cleanup_elapsed_sec:.1f}s/{cleanup_budget_sec}s)"
+                )
         return text
 
     return _call
