@@ -2743,6 +2743,29 @@ export default class ZoteroRagPlugin extends Plugin {
     return false;
   }
 
+  private isOptionalLookupNetworkError(error: unknown): boolean {
+    const text = this.getPythonErrorMessage(error).toLowerCase();
+    return (
+      text.includes("enotfound") ||
+      text.includes("getaddrinfo") ||
+      text.includes("eai_again") ||
+      text.includes("timed out") ||
+      text.includes("etimedout") ||
+      text.includes("econnrefused") ||
+      text.includes("econnreset") ||
+      text.includes("ehostunreach") ||
+      text.includes("enetunreach")
+    );
+  }
+
+  private logOptionalLookupFailure(context: string, error: unknown): void {
+    if (this.isOptionalLookupNetworkError(error)) {
+      console.debug(`${context} (network unavailable)`, error);
+      return;
+    }
+    console.warn(context, error);
+  }
+
   private getPythonErrorMessage(error: unknown): string {
     if (error instanceof Error) {
       return error.message || String(error);
@@ -2755,6 +2778,28 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch {
       return String(error);
     }
+  }
+
+  private summarizePythonDiagnostic(raw: string, fallback: string): string {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter((line) => Boolean(line.trim()));
+    if (!lines.length) {
+      return fallback;
+    }
+    const tracebackIndex = lines.findIndex((line) => line.startsWith("Traceback"));
+    if (tracebackIndex >= 0) {
+      return lines.slice(tracebackIndex).slice(-12).join("\n");
+    }
+    const preferred = [...lines].reverse().find((line) => (
+      /(^error[:\s]|exception|traceback|failed|timed out|timeout|no module named|not found|enoent|econnrefused|enotfound|valueerror|typeerror|runtimeerror|importerror)/i
+        .test(line)
+    ));
+    if (preferred) {
+      return preferred;
+    }
+    return lines.slice(-8).join("\n");
   }
 
   private classifyIndexingError(message: string): "chunks_missing" | "embed_dim_mismatch" | "embed_failure" | "unknown" {
@@ -6135,7 +6180,7 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       } catch (error) {
         hadFetchError = true;
-        console.warn("Failed to fetch Zotero annotation items from Web API", error);
+        this.logOptionalLookupFailure("Failed to fetch Zotero annotation items from Web API", error);
       }
     }
     if (!annotations.length && canUseWebApi && !webRequestSucceeded) {
@@ -7832,9 +7877,6 @@ export default class ZoteroRagPlugin extends Plugin {
       const sectionAttr = isSectionChunked ? " section" : "";
       const attrs = ` id=${chunkId}${sectionAttr}${pageAttr}${excluded ? " exclude" : ""}`;
       parts.push(`<!-- zrr:chunk${attrs} -->`);
-      parts.push("");
-      parts.push(`^${this.buildChunkBlockId(chunkId, docId)}`);
-      parts.push("");
       if (displayText) {
         parts.push(displayText);
       }
@@ -8417,7 +8459,7 @@ export default class ZoteroRagPlugin extends Plugin {
       console.debug("Resolved Zotero Web API user ID from key", { userId });
       return true;
     } catch (error) {
-      console.warn("Failed to resolve Zotero Web API user ID", error);
+      this.logOptionalLookupFailure("Failed to resolve Zotero Web API user ID", error);
       return false;
     }
   }
@@ -10087,7 +10129,7 @@ export default class ZoteroRagPlugin extends Plugin {
       }
       return modelIds;
     } catch (error) {
-      console.warn("Failed to fetch models", error);
+      this.logOptionalLookupFailure("Failed to fetch models", error);
       return [];
     }
   }
@@ -10215,7 +10257,7 @@ export default class ZoteroRagPlugin extends Plugin {
           const payload = await this.requestWebApi(url, `Zotero Web API groups fetch failed for ${url}`);
           addOptions(this.parseZoteroGroupOptions(payload));
         } catch (error) {
-          console.warn("Failed to fetch Zotero groups from Web API", error);
+          this.logOptionalLookupFailure("Failed to fetch Zotero groups from Web API", error);
         }
       }
     }
@@ -13166,7 +13208,14 @@ export default class ZoteroRagPlugin extends Plugin {
         } else {
           const diagnosticText = stderr.trim() ? stderr : diagnostic;
           this.handlePythonProcessError(diagnosticText);
-          reject(new Error(stderr || `Process exited with code ${code}`));
+          reject(
+            new Error(
+              this.summarizePythonDiagnostic(
+                diagnosticText,
+                `Process exited with code ${code}`
+              )
+            )
+          );
         }
       });
     });
@@ -13426,9 +13475,10 @@ export default class ZoteroRagPlugin extends Plugin {
             this.handlePythonProcessError(diagnosticText);
             reject(
               new Error(
-                stderr ||
-                  doneError ||
+                this.summarizePythonDiagnostic(
+                  diagnosticText,
                   `Process exited with code ${Number.isFinite(exitCode) ? exitCode : 1}`
+                )
               )
             );
           });
@@ -13852,7 +13902,14 @@ export default class ZoteroRagPlugin extends Plugin {
         } else {
           const diagnostic = stderr.trim() ? stderr : stdout;
           this.handlePythonProcessError(diagnostic);
-          reject(new Error(stderr || `Process exited with code ${code}`));
+          reject(
+            new Error(
+              this.summarizePythonDiagnostic(
+                diagnostic,
+                `Process exited with code ${code}`
+              )
+            )
+          );
         }
       });
     });

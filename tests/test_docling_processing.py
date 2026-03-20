@@ -1,6 +1,13 @@
 import importlib.util
 import pathlib
+import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+class FakeRequestsTimeout(Exception):
+    pass
 
 
 def load_module():
@@ -8,7 +15,38 @@ def load_module():
     module_path = root / "tools" / "docling_extract.py"
     spec = importlib.util.spec_from_file_location("docling_extract", module_path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    class FakeLang:
+        def __init__(self, code: str):
+            self.code = code
+
+        def to_alpha3(self):
+            mapping = {
+                "de": "deu",
+                "deu": "deu",
+                "eng": "eng",
+                "en": "eng",
+            }
+            return mapping.get(self.code, self.code)
+
+    fake_langcodes = SimpleNamespace(find=lambda value: FakeLang(str(value).lower()))
+    fake_ocr_paddle = SimpleNamespace(
+        ocr_pages_with_paddle=lambda *args, **kwargs: ([], {}),
+        ocr_pages_with_paddle_structure=lambda *args, **kwargs: ([], {}),
+        ocr_pages_with_paddle_vl=lambda *args, **kwargs: ([], {}),
+    )
+    fake_ocr_tesseract = SimpleNamespace(
+        find_tesseract_path=lambda: None,
+        ocr_pages_with_tesseract=lambda *args, **kwargs: ([], {}),
+    )
+    with patch.dict(
+        sys.modules,
+        {
+            "langcodes": fake_langcodes,
+            "ocr_paddle": fake_ocr_paddle,
+            "ocr_tesseract": fake_ocr_tesseract,
+        },
+    ):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -126,6 +164,64 @@ class DoclingProcessingTests(unittest.TestCase):
         self.assertEqual(self.docling.ocr_pages_text_chars(pages), 0)
         pages = [{"page_num": 1, "text": "hello"}]
         self.assertGreater(self.docling.ocr_pages_text_chars(pages), 0)
+
+    def test_llm_cleanup_disables_after_timeout(self):
+        config = self.docling.DoclingProcessingConfig(
+            enable_llm_correction=True,
+            llm_cleanup_base_url="http://localhost:1234/v1",
+            llm_cleanup_model="test-model",
+        )
+        calls = {"count": 0}
+
+        def post(_endpoint, **_kwargs):
+            calls["count"] += 1
+            raise FakeRequestsTimeout("timed out")
+
+        fake_requests = SimpleNamespace(
+            post=post,
+            exceptions=SimpleNamespace(Timeout=FakeRequestsTimeout),
+        )
+        callback = self.docling.build_llm_cleanup_callback(config)
+        self.assertIsNotNone(callback)
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            self.assertEqual(callback("first"), "first")
+            self.assertEqual(callback("second"), "second")
+        self.assertEqual(calls["count"], 1)
+
+    def test_llm_cleanup_budget_disables_future_calls(self):
+        config = self.docling.DoclingProcessingConfig(
+            enable_llm_correction=True,
+            llm_cleanup_base_url="http://localhost:1234/v1",
+            llm_cleanup_model="test-model",
+            llm_cleanup_timeout_sec=10,
+            llm_cleanup_max_total_sec=2,
+        )
+        calls = {"count": 0, "timeouts": []}
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "fixed"}}]}
+
+        def post(_endpoint, **kwargs):
+            calls["count"] += 1
+            calls["timeouts"].append(kwargs.get("timeout"))
+            return Response()
+
+        fake_requests = SimpleNamespace(
+            post=post,
+            exceptions=SimpleNamespace(Timeout=FakeRequestsTimeout),
+        )
+        callback = self.docling.build_llm_cleanup_callback(config)
+        self.assertIsNotNone(callback)
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            with patch.object(self.docling.time, "perf_counter", side_effect=[0.0, 3.0]):
+                self.assertEqual(callback("first"), "fixed")
+            self.assertEqual(callback("second"), "second")
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(calls["timeouts"], [2])
 
 
 if __name__ == "__main__":
