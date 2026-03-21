@@ -3,6 +3,7 @@ import {
   ButtonComponent,
   DropdownComponent,
   Notice,
+  type Plugin,
   PluginSettingTab,
   Setting,
   TextComponent,
@@ -85,6 +86,8 @@ export interface ZoteroRagSettings {
   outputPdfDir: string;
   outputNoteDir: string;
   chatOutputDir: string;
+  chatExportTemplatePath: string;
+  chatExportPostCreateCommandId: string;
   chatPaneLocation: "right" | "main";
   redisUrl: string;
   autoAssignRedisPort: boolean;
@@ -255,6 +258,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
 
   // Saved chats
   chatOutputDir: "Zotero/Chats",
+  chatExportTemplatePath: "",
+  chatExportPostCreateCommandId: "",
 
   // PDF handling
   copyPdfToVault: true,
@@ -351,7 +356,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
   constructor(
     app: App,
-    plugin: {
+    plugin: Plugin & {
       settings: ZoteroRagSettings;
       saveSettings: () => Promise<void>;
       fetchZoteroLibraryOptions: () => Promise<Array<{ value: string; label: string }>>;
@@ -374,7 +379,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       manifest: { dir?: string };
     }
   ) {
-    super(app, plugin as unknown);
+    super(app, plugin);
     this.plugin = plugin;
   }
 
@@ -870,6 +875,36 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             .setValue(this.plugin.settings.chatOutputDir)
             .onChange(async (value) => {
               this.plugin.settings.chatOutputDir = value.trim() || "zotero/chats";
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Chat export template")
+        .setDesc(
+          "Optional vault-relative template file for copied chat notes. Use {{chat_body}} to control where the transcript is inserted (otherwise template text is appended after the transcript)."
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("Path to chat export template note")
+            .setValue(this.plugin.settings.chatExportTemplatePath)
+            .onChange(async (value) => {
+              this.plugin.settings.chatExportTemplatePath = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Chat export post-create command")
+        .setDesc(
+          "Optional command ID to run after the chat note is created and opened. Useful for templater workflows that need the full note body already present."
+        )
+        .addText((text) =>
+          text
+            .setPlaceholder("Command ID to run after note creation")
+            .setValue(this.plugin.settings.chatExportPostCreateCommandId)
+            .onChange(async (value) => {
+              this.plugin.settings.chatExportPostCreateCommandId = value.trim();
               await this.plugin.saveSettings();
             })
         );

@@ -2287,11 +2287,69 @@ export default class ZoteroRagPlugin extends Plugin {
     const timestamp = this.formatTimestamp(new Date());
     const draftPath = normalizePath(`${noteDir}/${baseName}.md`);
     const notePath = await this.resolveUniqueNotePath(draftPath, `${baseName}-${timestamp}.md`);
-    const content = await this.buildChatTranscript(sessionName, messages);
+    const transcript = await this.buildChatTranscript(sessionName, messages);
+    const content = await this.applyChatExportTemplate(sessionName, transcript);
 
     await this.app.vault.adapter.write(notePath, content);
     await this.openNoteInNewTab(notePath);
+    await this.runChatExportPostCreateCommand(notePath);
     new Notice(`Chat copied to ${notePath}`);
+  }
+
+  private async applyChatExportTemplate(sessionName: string, transcript: string): Promise<string> {
+    const templatePathRaw = (this.settings.chatExportTemplatePath || "").trim();
+    if (!templatePathRaw) {
+      return transcript;
+    }
+    const templatePath = normalizePath(templatePathRaw);
+    const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
+    if (!(templateFile instanceof TFile)) {
+      new Notice(`Chat export template not found: ${templatePath}`);
+      return transcript;
+    }
+
+    let template = "";
+    try {
+      template = await this.app.vault.read(templateFile);
+    } catch (error) {
+      console.error("Failed to read chat export template", error);
+      new Notice("Failed to read chat export template.");
+      return transcript;
+    }
+
+    const body = transcript.trim();
+    const title = (sessionName || "Zotero Chat").trim();
+    const createdAt = new Date().toISOString();
+    let rendered = template
+      .replace(/{{\s*chat_title\s*}}/gi, title)
+      .replace(/{{\s*chat_created_at\s*}}/gi, createdAt);
+
+    if (/{{\s*chat_body\s*}}/i.test(rendered)) {
+      rendered = rendered.replace(/{{\s*chat_body\s*}}/gi, body);
+      return `${rendered.trim()}\n`;
+    }
+
+    // No explicit insertion token: keep transcript first so downstream template logic sees full body.
+    const templateTrimmed = rendered.trim();
+    if (!templateTrimmed) {
+      return `${body}\n`;
+    }
+    return `${body}\n\n${templateTrimmed}\n`;
+  }
+
+  private async runChatExportPostCreateCommand(notePath: string): Promise<void> {
+    const commandId = (this.settings.chatExportPostCreateCommandId || "").trim();
+    if (!commandId) {
+      return;
+    }
+
+    // Ensure the freshly written note is active before executing user-defined post-processing.
+    await this.openNoteInMain(notePath);
+    const commands = (this.app as { commands?: { executeCommandById?: (id: string) => boolean } }).commands;
+    const executed = commands?.executeCommandById ? commands.executeCommandById(commandId) : false;
+    if (!executed) {
+      new Notice(`Chat export command not found: ${commandId}`);
+    }
   }
 
   private async buildChatTranscript(sessionName: string, messages: ChatMessage[]): Promise<string> {
