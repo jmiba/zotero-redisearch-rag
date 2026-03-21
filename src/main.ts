@@ -8565,6 +8565,286 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.searchZoteroItemsWeb(trimmedQuery);
   }
 
+  public async searchIndexedZoteroItems(query: string, limit = 25): Promise<ZoteroLocalItem[]> {
+    const trimmed = query.trim();
+    const normalizedQuery = this.normalizeIndexedSearchQuery(trimmed);
+    const maxResults = Math.max(1, Math.floor(limit));
+    const index = await this.getDocIndex();
+    const metadataSnapshots = await this.getMetadataSnapshotCache();
+    const docIds = Object.keys(index);
+    if (!docIds.length) {
+      return [];
+    }
+
+    const adapter = this.app.vault.adapter;
+    const indexedEntries: Array<{
+      item: ZoteroLocalItem;
+      title: string;
+      citekey: string;
+      searchable: string;
+      updatedAt: number;
+    }> = [];
+
+    for (const docId of docIds) {
+      const docEntry = index[docId];
+      const snapshot = metadataSnapshots[docId];
+      const cachePath = normalizePath(`${ITEM_CACHE_DIR}/${docId}.json`);
+      let item: ZoteroLocalItem | null = null;
+
+      if (await adapter.exists(cachePath)) {
+        try {
+          const raw = await adapter.read(cachePath);
+          const parsed = JSON.parse(raw);
+          item = this.normalizeIndexedSearchItem(parsed, docId);
+        } catch (error) {
+          console.debug("Failed to parse indexed Zotero cache item", { docId, error });
+        }
+      }
+
+      if (!item) {
+        item = this.buildIndexedSearchFallbackItem(docId, docEntry);
+      }
+      if (!item || !this.isImportableZoteroResult(item)) {
+        continue;
+      }
+
+      const fields = this.buildIndexedSearchFields(item, docEntry, snapshot);
+      indexedEntries.push({
+        item,
+        title: fields.title,
+        citekey: fields.citekey,
+        searchable: fields.searchable,
+        updatedAt: this.parseIndexTimestamp(docEntry?.updated_at),
+      });
+    }
+
+    if (!normalizedQuery) {
+      return indexedEntries
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, maxResults)
+        .map((entry) => entry.item);
+    }
+
+    const scored = indexedEntries
+      .map((entry, idx) => ({
+        idx,
+        item: entry.item,
+        updatedAt: entry.updatedAt,
+        score: this.scoreIndexedSearchEntry(normalizedQuery, entry.title, entry.citekey, entry.searchable),
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((a, b) => {
+        if (b.score !== a.score) {
+          return b.score - a.score;
+        }
+        if (b.updatedAt !== a.updatedAt) {
+          return b.updatedAt - a.updatedAt;
+        }
+        return a.idx - b.idx;
+      });
+
+    return scored.slice(0, maxResults).map((entry) => entry.item);
+  }
+
+  private normalizeIndexedSearchItem(raw: unknown, docId: string): ZoteroLocalItem | null {
+    const container = this.asRecord(raw);
+    if (!container) {
+      return null;
+    }
+    const data = this.asRecord(container.data) ?? container;
+    const meta = this.asRecord(container.meta) ?? {};
+    const key = coerceString(container.key) || coerceString(data.key) || docId;
+    return {
+      key,
+      data,
+      meta,
+    };
+  }
+
+  private buildIndexedSearchFallbackItem(docId: string, entry: DocIndexEntry | undefined): ZoteroLocalItem | null {
+    const title =
+      coerceString(entry?.zotero_title)
+      || coerceString(entry?.short_title)
+      || coerceString(entry?.note_title);
+    if (!title) {
+      return null;
+    }
+    return {
+      key: docId,
+      data: {
+        key: docId,
+        title,
+      },
+      meta: {},
+    };
+  }
+
+  private collectIndexedSearchTags(values: Record<string, unknown>): string[] {
+    const tagsRaw = values.tags;
+    if (!Array.isArray(tagsRaw)) {
+      return [];
+    }
+    const tags: string[] = [];
+    for (const tag of tagsRaw) {
+      if (typeof tag === "string") {
+        const normalized = tag.trim();
+        if (normalized) {
+          tags.push(normalized);
+        }
+        continue;
+      }
+      if (tag && typeof tag === "object") {
+        const nested = this.asRecord(tag);
+        const normalized = nested ? coerceString(nested.tag) : "";
+        if (normalized) {
+          tags.push(normalized);
+        }
+      }
+    }
+    return tags;
+  }
+
+  private collectIndexedSearchCreators(values: Record<string, unknown>): string[] {
+    const creatorsRaw = values.creators;
+    if (!Array.isArray(creatorsRaw)) {
+      return [];
+    }
+    const creators: string[] = [];
+    for (const creator of creatorsRaw) {
+      const formatted = formatCreatorName(creator).trim();
+      if (formatted) {
+        creators.push(formatted);
+      }
+    }
+    return creators;
+  }
+
+  private buildIndexedSearchFields(
+    item: ZoteroLocalItem,
+    entry: DocIndexEntry | undefined,
+    snapshot: Partial<NoteMetadataFields> | undefined
+  ): { title: string; citekey: string; searchable: string } {
+    const values = item.data as ZoteroItemValues;
+    const title =
+      coerceString(values.title)
+      || this.normalizeMetadataString(snapshot?.title)
+      || coerceString(entry?.zotero_title)
+      || coerceString(entry?.note_title);
+    const shortTitle =
+      extractShortTitleFromValues(values)
+      || this.normalizeMetadataString(snapshot?.short_title)
+      || coerceString(entry?.short_title);
+    const citekey =
+      extractCitekey(values, item.meta)
+      || this.normalizeMetadataString(snapshot?.citekey);
+    const itemType = coerceString(values.itemType) || this.normalizeMetadataString(snapshot?.item_type);
+    const publicationTitle =
+      coerceString(values.publicationTitle)
+      || this.normalizeMetadataString(snapshot?.publication_title);
+    const bookTitle = coerceString(values.bookTitle) || this.normalizeMetadataString(snapshot?.book_title);
+    const journalAbbrev =
+      coerceString(values.journalAbbreviation)
+      || this.normalizeMetadataString(snapshot?.journal_abbrev);
+    const year = extractYear(coerceString(values.date) || this.normalizeMetadataString(snapshot?.date));
+    const tags = this.collectIndexedSearchTags(item.data);
+    const creators = this.collectIndexedSearchCreators(item.data);
+    const snapshotTags = this.normalizeMetadataList(snapshot?.tags);
+    const snapshotAuthors = this.normalizeMetadataList(snapshot?.authors);
+    const snapshotEditors = this.normalizeMetadataList(snapshot?.editors);
+    const searchable = [
+      title,
+      shortTitle,
+      citekey,
+      item.key,
+      itemType,
+      publicationTitle,
+      bookTitle,
+      journalAbbrev,
+      year,
+      ...tags,
+      ...creators,
+      ...snapshotTags,
+      ...snapshotAuthors,
+      ...snapshotEditors,
+    ]
+      .filter((value) => Boolean(value && String(value).trim()))
+      .join(" ")
+      .toLowerCase();
+    return {
+      title,
+      citekey,
+      searchable,
+    };
+  }
+
+  private scoreIndexedSearchEntry(query: string, title: string, citekey: string, searchable: string): number {
+    if (!searchable) {
+      return 0;
+    }
+    const normalizedTitle = title.toLowerCase();
+    const normalizedCitekey = citekey.toLowerCase();
+    let score = 0;
+
+    if (normalizedCitekey) {
+      if (normalizedCitekey === query) {
+        score += 140;
+      } else if (normalizedCitekey.startsWith(query)) {
+        score += 110;
+      } else if (normalizedCitekey.includes(query)) {
+        score += 90;
+      }
+    }
+
+    if (normalizedTitle) {
+      if (normalizedTitle === query) {
+        score += 90;
+      } else if (normalizedTitle.startsWith(query)) {
+        score += 65;
+      } else if (normalizedTitle.includes(query)) {
+        score += 45;
+      }
+    }
+
+    if (searchable.includes(query)) {
+      score += 25;
+    }
+
+    const tokens = query.split(/\s+/).filter(Boolean);
+    if (tokens.length > 1) {
+      let tokenHits = 0;
+      for (const token of tokens) {
+        if (searchable.includes(token)) {
+          tokenHits += 1;
+        }
+      }
+      if (tokenHits === 0) {
+        return 0;
+      }
+      score += tokenHits * 10;
+    }
+
+    return score;
+  }
+
+  private normalizeIndexedSearchQuery(query: string): string {
+    const normalized = query
+      .trim()
+      .replace(/^@+/, "")
+      .replace(/^[\s.,;:!?()[\]{}<>"'`]+/, "")
+      .replace(/[\s.,;:!?()[\]{}<>"'`]+$/, "")
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+    return normalized;
+  }
+
+  private parseIndexTimestamp(value: string | undefined): number {
+    if (!value) {
+      return 0;
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
   public async hasProcessableAttachment(item: ZoteroLocalItem): Promise<boolean> {
     const values: ZoteroItemValues = item.data ?? item;
     const itemKey = typeof item.key === "string" ? item.key : coerceString(values.key);

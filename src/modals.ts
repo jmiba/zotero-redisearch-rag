@@ -1214,7 +1214,8 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   }
 
   renderSuggestion(item: ZoteroLocalItem, el: HTMLElement): void {
-    const title = item.data?.title ?? "[No title]";
+    const rawTitle = item.data?.title;
+    const title = typeof rawTitle === "string" && rawTitle.trim() ? rawTitle : "[No title]";
     const year = extractYearFromItem(item);
     const docId = getDocIdFromItem(item);
     const isIndexed = docId ? this.indexedDocIds?.has(docId) : false;

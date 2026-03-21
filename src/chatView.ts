@@ -40,6 +40,44 @@ export type ChatRetrievedChunk = {
   text?: string;
 };
 
+const ZOTERO_ITEM_TYPE_ICON_MAP: Record<string, string> = {
+  artwork: "image",
+  audioRecording: "music",
+  bill: "file-text",
+  blogPost: "globe",
+  book: "book",
+  bookSection: "book-open",
+  case: "scale",
+  computerProgram: "code",
+  conferencePaper: "file-text",
+  dataset: "database",
+  dictionaryEntry: "book",
+  document: "file-text",
+  email: "mail",
+  encyclopediaArticle: "book",
+  film: "film",
+  forumPost: "message-circle",
+  hearing: "file-text",
+  interview: "mic",
+  journalArticle: "file-text",
+  letter: "mail",
+  magazineArticle: "file-text",
+  manuscript: "file-text",
+  map: "map",
+  newspaperArticle: "file-text",
+  patent: "award",
+  podcast: "mic",
+  preprint: "file-text",
+  presentation: "file-text",
+  radioBroadcast: "music",
+  report: "file-text",
+  statute: "scale",
+  thesis: "graduation-cap",
+  tvBroadcast: "film",
+  videoRecording: "film",
+  webpage: "globe",
+};
+
 type MessageEls = {
   wrapper: HTMLElement;
   content: HTMLElement;
@@ -70,7 +108,6 @@ export class ZoteroChatView extends ItemView {
   private mentionSuggestions: ZoteroLocalItem[] = [];
   private mentionSelectedIndex = 0;
   private mentionContext: { from: number; to: number; query: string } | null = null;
-  private mentionDocIds: Set<string> | null = null;
   private mentionQuerySequence = 0;
   private mentionDebounceHandle: number | null = null;
 
@@ -735,17 +772,12 @@ export class ZoteroChatView extends ItemView {
   }
 
   private async searchIndexedMentionItems(query: string): Promise<ZoteroLocalItem[]> {
-    if (!this.mentionDocIds) {
-      const index = await this.plugin.getDocIndex();
-      this.mentionDocIds = new Set(Object.keys(index));
-    }
-    const results = await this.plugin.searchZoteroItems(query.trim());
-    return results
-      .filter((item) => {
-        const docId = getDocIdFromItem(item);
-        return Boolean(docId && this.mentionDocIds?.has(docId));
-      })
-      .slice(0, 8);
+    return this.plugin.searchIndexedZoteroItems(query.trim(), 8);
+  }
+
+  private getMentionIconName(item: ZoteroLocalItem): string {
+    const itemType = typeof item.data?.itemType === "string" ? item.data.itemType.trim() : "";
+    return ZOTERO_ITEM_TYPE_ICON_MAP[itemType] ?? "file-text";
   }
 
   private insertSelectedMention(item: ZoteroLocalItem, context: { from: number; to: number }): void {
@@ -795,12 +827,17 @@ export class ZoteroChatView extends ItemView {
       option.setAttr("aria-selected", index === this.mentionSelectedIndex ? "true" : "false");
 
       const iconEl = option.createSpan({ cls: "zrr-chat-mention-icon" });
-      setIcon(iconEl, "book");
+      setIcon(iconEl, this.getMentionIconName(item));
       const textWrap = option.createDiv({ cls: "zrr-chat-mention-text" });
       const title = typeof item.data?.title === "string" && item.data.title.trim() ? item.data.title.trim() : "Untitled";
       textWrap.createDiv({ cls: "zrr-chat-mention-title", text: title });
       const docId = getDocIdFromItem(item);
-      textWrap.createDiv({ cls: "zrr-chat-mention-meta", text: docId ? `doc_id ${docId}` : "No doc_id" });
+      const itemType = typeof item.data?.itemType === "string" ? item.data.itemType.trim() : "";
+      const metaParts = [docId ? `doc_id ${docId}` : "No doc_id"];
+      if (itemType) {
+        metaParts.push(itemType);
+      }
+      textWrap.createDiv({ cls: "zrr-chat-mention-meta", text: metaParts.join(" - ") });
 
       option.addEventListener("mousedown", (event) => {
         event.preventDefault();

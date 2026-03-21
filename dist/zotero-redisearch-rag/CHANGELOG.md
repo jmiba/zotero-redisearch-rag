@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.23 (Bugfix Release)
+- Fix chat `@` suggestion icons to reflect Zotero item types instead of always showing a book icon.
+- Improve indexed `@` mention search reliability for metadata queries (especially `citekey`) by:
+  - searching indexed metadata snapshots in addition to cached Zotero item payloads,
+  - normalizing mention queries (leading `@` and surrounding punctuation) before scoring,
+  - improving ranking so citekey and metadata hits surface more consistently.
+
 ## 0.9.22 (Bugfix Release)
 - Improve chat citation insertion with an inline `@` picker overlay inside the chat textarea (no separate modal required).
 - Add indexed-only citation suggestions for `@` mentions so results are limited to already indexed Zotero items.

@@ -334,14 +334,14 @@
 
 .zrr-chat-mention-meta {
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: var(--font-ui-small);
 }
 
 .zrr-chat-mention-empty {
   display: none;
   color: var(--text-muted);
   padding: 0.65rem 0.75rem;
-  font-size: var(--font-ui-smaller);
+  font-size: var(--font-ui-small);
 }
 
 .zrr-chat-mention-empty.is-visible {
