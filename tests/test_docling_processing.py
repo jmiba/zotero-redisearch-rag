@@ -229,6 +229,15 @@ class DoclingProcessingTests(unittest.TestCase):
         output = self.docling.apply_umlaut_corrections(text, "deu+eng", [])
         self.assertEqual(output, "\u00fcber")
 
+    def test_escape_gender_stars_is_narrow(self):
+        text = "Liebe*r Leser*in und Pirat*innen nutzen *Markdown* und a*b."
+        output = self.docling.escape_gender_stars(text)
+        self.assertIn("Liebe\\*r", output)
+        self.assertIn("Leser\\*in", output)
+        self.assertIn("Pirat\\*innen", output)
+        self.assertIn("*Markdown*", output)
+        self.assertIn("a*b", output)
+
     def test_ocr_pages_text_chars(self):
         pages = [
             {"page_num": 1, "text": ""},

@@ -4970,8 +4970,7 @@ export default class ZoteroRagPlugin extends Plugin {
       messages: [
         {
           role: "system",
-          content:
-            "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. Do not add content. Return corrected text only. Detect footnote references and definitions and format them in Markdown as [^n] and [^n]: (for the note text). Preserve special characters and formatting. Do not create new footnotes or content; only reformat existing footnote markers/lines.",
+          content: this.getOcrCleanupSystemPrompt(),
         },
         { role: "user", content: text },
       ],
@@ -4992,7 +4991,7 @@ export default class ZoteroRagPlugin extends Plugin {
         data?.choices?.[0]?.text ??
         data?.output_text ??
         "";
-      const cleaned = String(content || "").trim();
+      const cleaned = this.escapeGenderStars(String(content || "").trim());
       if (!cleaned) {
         new Notice("Cleanup returned empty text.");
         return null;
@@ -5003,6 +5002,32 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Ocr cleanup failed. Check the cleanup model settings.");
       return null;
     }
+  }
+
+  private getOcrCleanupSystemPrompt(): string {
+    return [
+      "You clean OCR text into Markdown.",
+      "Correct OCR errors only when the intended text is clear.",
+      "Do not add, remove, or invent content.",
+      "Preserve wording, punctuation, and special characters.",
+      "Return only the corrected text.",
+      "Reformat existing footnote references as [^n].",
+      "Reformat existing footnote definitions as [^n]: ....",
+      "Do not create new footnotes; only reformat footnotes that already exist.",
+      "If paragraph breaks are completely missing, insert them only where the sentence structure clearly supports them.",
+      "Do not escape asterisks used for Markdown emphasis, list bullets, multiplication, or other non-gender uses.",
+      "Adding the backslash for escaping literal gender stars is allowed and does not count as adding content.",
+    ].join(" ");
+  }
+
+  private escapeGenderStars(text: string): string {
+    if (!text) {
+      return text;
+    }
+    return text.replace(
+      /(?<!\\)\b([A-Za-zÄÖÜäöüß]{2,})\*(in(?:nen)?|r|n|m|s)\b/g,
+      (_match, left: string, suffix: string) => `${left}\\*${suffix}`
+    );
   }
 
   private parseChunkTags(content: string, maxTags: number): string[] {

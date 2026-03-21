@@ -2401,6 +2401,27 @@ def apply_umlaut_corrections(text: str, languages: str, wordlist: Sequence[str],
     return re.sub(r"[A-Za-zÄÖÜäöüß]{4,}", lambda m: pick_best(m.group(0)), text)
 
 
+def escape_gender_stars(text: str) -> str:
+    """
+    Escape placeholder asterisks used in German gender forms so Markdown does not
+    interpret them as emphasis.
+
+    Examples:
+    - Leser*in -> Leser\\*in
+    - Pirat*innen -> Pirat\\*innen
+
+    Keep this narrow on purpose: do not touch ordinary Markdown emphasis,
+    bullets, multiplication, or arbitrary star-separated tokens.
+    """
+    if not text:
+        return text
+
+    pattern = re.compile(
+        r"(?<!\\)\b([A-Za-zÄÖÜäöüß]{2,})\*(in(?:nen)?|r|n|m|s)\b"
+    )
+    return pattern.sub(r"\1\\*\2", text)
+
+
 def restore_missing_spaces(text: str, languages: str, hs=None) -> str:
     """
     Conservatively insert spaces inside overlong tokens when a split yields two
@@ -2505,6 +2526,22 @@ def should_apply_llm_correction(text: str, config: DoclingProcessingConfig) -> b
     return quality.confidence_proxy < config.llm_correction_min_quality
 
 
+def build_ocr_cleanup_system_prompt() -> str:
+    return " ".join(
+        [
+            "You clean OCR text into Markdown.",
+            "Correct OCR errors only when the intended text is clear.",
+            "Do not add, remove, or invent content.",
+            "Preserve wording, punctuation, and special characters.",
+            "Return only the corrected text.",
+            "Reformat existing footnote references as [^n].",
+            "Reformat existing footnote definitions as [^n]: ....",
+            "Do not create new footnotes; only reformat footnotes that already exist.",
+            "If paragraph breaks are completely missing, insert them only where the sentence structure clearly supports them."
+        ]
+    )
+
+
 def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Callable[[str], str]]:
     if not config.enable_llm_correction:
         return None
@@ -2557,11 +2594,7 @@ def build_llm_cleanup_callback(config: DoclingProcessingConfig) -> Optional[Call
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are an OCR cleanup assistant. Fix OCR errors without changing meaning. "
-                        "Do not add content. Return corrected text only."
-                        "Detect footnote references and definitions and format them in Markdown as [^n] and [^n]: (for the note text). Preserve special characters and formatting. Do not create new footnotes or content; only reformat existing footnote markers/lines."
-                    ),
+                    "content": build_ocr_cleanup_system_prompt(),
                 },
                 {"role": "user", "content": text},
             ],
@@ -2749,6 +2782,7 @@ def postprocess_text(
             label = f"LLM cleanup ({progress_label})" if progress_label else "LLM cleanup..."
             progress_cb(100, "llm_cleanup", label)
         cleaned = config.llm_correct(cleaned)
+    cleaned = escape_gender_stars(cleaned)
     return cleaned
 
 def postprocess_text_light(
@@ -2770,6 +2804,7 @@ def postprocess_text_light(
     if should_apply_llm_correction(cleaned, config) and config.llm_correct:
         LOGGER.info("LLM cleanup applied (light mode)")
         cleaned = config.llm_correct(cleaned)
+    cleaned = escape_gender_stars(cleaned)
     return cleaned
 
 def export_markdown(doc: Any) -> str:
