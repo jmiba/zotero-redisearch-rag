@@ -1112,19 +1112,52 @@ export class LanguageSuggestModal extends SuggestModal<LanguageOption> {
 export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
   private plugin: ZoteroItemSuggestProvider;
   private resolveSelection: ((item: ZoteroLocalItem | null) => void) | null;
+  private initialQuery: string;
+  private includeOnlyIndexed = false;
   private lastError: string | null = null;
   private indexedDocIds: Set<string> | null = null;
   private querySequence = 0;
   private readonly queryDebounceMs = 200;
-  private readonly minQueryLength = 2;
+  private minQueryLength = 2;
   private readonly maxQueryCacheEntries = 100;
   private queryCache = new Map<string, ZoteroLocalItem[]>();
 
-  constructor(app: App, plugin: ZoteroItemSuggestProvider, onSelect: (item: ZoteroLocalItem | null) => void) {
+  constructor(
+    app: App,
+    plugin: ZoteroItemSuggestProvider,
+    onSelect: (item: ZoteroLocalItem | null) => void,
+    options?: {
+      initialQuery?: string;
+      minQueryLength?: number;
+      includeOnlyIndexed?: boolean;
+      placeholder?: string;
+    }
+  ) {
     super(app);
     this.plugin = plugin;
     this.resolveSelection = onSelect;
-    this.setPlaceholder("Search Zotero items...");
+    this.initialQuery = options?.initialQuery?.trim() ?? "";
+    this.includeOnlyIndexed = options?.includeOnlyIndexed === true;
+    if (typeof options?.minQueryLength === "number") {
+      this.minQueryLength = Math.max(1, Math.floor(options.minQueryLength));
+    }
+    this.setPlaceholder(options?.placeholder || "Search Zotero items...");
+  }
+
+  onOpen(): void {
+    void super.onOpen();
+    if (!this.initialQuery) {
+      return;
+    }
+    const modal = this as unknown as {
+      inputEl?: HTMLInputElement;
+      onInputChanged?: () => void;
+    };
+    if (!modal.inputEl) {
+      return;
+    }
+    modal.inputEl.value = this.initialQuery;
+    void modal.onInputChanged?.();
   }
 
   async getSuggestions(query: string): Promise<ZoteroLocalItem[]> {
@@ -1155,14 +1188,20 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
       if (sequence !== this.querySequence) {
         return [];
       }
-      this.queryCache.set(cacheKey, results);
+      const filtered = this.includeOnlyIndexed
+        ? results.filter((item) => {
+          const docId = getDocIdFromItem(item);
+          return Boolean(docId && this.indexedDocIds?.has(docId));
+        })
+        : results;
+      this.queryCache.set(cacheKey, filtered);
       if (this.queryCache.size > this.maxQueryCacheEntries) {
         const oldestKey = this.queryCache.keys().next().value;
         if (oldestKey !== undefined) {
           this.queryCache.delete(oldestKey);
         }
       }
-      return results;
+      return filtered;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (this.lastError !== message) {

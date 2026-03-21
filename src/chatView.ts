@@ -1,5 +1,7 @@
 import { App, ItemView, MarkdownRenderer, Modal, Notice, Setting, WorkspaceLeaf, setIcon } from "obsidian";
 import type ZoteroRagPlugin from "./main";
+import type { ZoteroLocalItem } from "./types";
+import { getDocIdFromItem } from "./zoteroItemHelpers";
 
 export const VIEW_TYPE_ZOTERO_CHAT = "zotero-redisearch-rag-chat";
 
@@ -48,6 +50,7 @@ export class ZoteroChatView extends ItemView {
   private plugin: ZoteroRagPlugin;
   private messages: ChatMessage[] = [];
   private messagesEl!: HTMLElement;
+  private inputWrapEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendButton!: HTMLButtonElement;
   private newButton!: HTMLButtonElement;
@@ -61,6 +64,15 @@ export class ZoteroChatView extends ItemView {
   private pendingThinking = new Set<string>();
   private busy = false;
   private cancelPending = false;
+  private mentionOverlayEl: HTMLElement | null = null;
+  private mentionListEl: HTMLElement | null = null;
+  private mentionEmptyEl: HTMLElement | null = null;
+  private mentionSuggestions: ZoteroLocalItem[] = [];
+  private mentionSelectedIndex = 0;
+  private mentionContext: { from: number; to: number; query: string } | null = null;
+  private mentionDocIds: Set<string> | null = null;
+  private mentionQuerySequence = 0;
+  private mentionDebounceHandle: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: ZoteroRagPlugin) {
     super(leaf);
@@ -128,25 +140,47 @@ export class ZoteroChatView extends ItemView {
 
     this.messagesEl = containerEl.createEl("div", { cls: "zrr-chat-messages" });
 
-    const inputWrap = containerEl.createEl("div", { cls: "zrr-chat-input" });
-    this.inputEl = inputWrap.createEl("textarea", {
+    this.inputWrapEl = containerEl.createEl("div", { cls: "zrr-chat-input" });
+    this.inputEl = this.inputWrapEl.createEl("textarea", {
       cls: "zrr-chat-textarea",
       attr: { placeholder: "Ask your Zotero library..." },
     });
-    this.sendButton = inputWrap.createEl("button", {
+    this.sendButton = this.inputWrapEl.createEl("button", {
       cls: "zrr-chat-send",
       attr: { "aria-label": "Send message", title: "Send message" },
     });
+    this.createMentionOverlay();
     this.updateSendButtonState();
     this.sendButton.addEventListener("click", () => {
       void this.handleSendButtonClick();
     });
     this.inputEl.addEventListener("keydown", (event) => {
+      if (this.handleMentionOverlayKeydown(event)) {
+        return;
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         if (!this.busy) {
           void this.handleSend();
         }
+      }
+    });
+    this.inputEl.addEventListener("input", () => {
+      this.scheduleZoteroMentionPicker();
+    });
+    this.inputEl.addEventListener("click", () => {
+      this.scheduleZoteroMentionPicker();
+    });
+    this.inputEl.addEventListener("keyup", () => {
+      this.scheduleZoteroMentionPicker();
+    });
+    this.registerDomEvent(document, "mousedown", (event) => {
+      if (!this.inputWrapEl) {
+        return;
+      }
+      const target = event.target;
+      if (target instanceof Node && !this.inputWrapEl.contains(target)) {
+        this.closeMentionOverlay();
       }
     });
 
@@ -157,6 +191,11 @@ export class ZoteroChatView extends ItemView {
 
   focusInput(): void {
     this.inputEl?.focus();
+  }
+
+  async onClose(): Promise<void> {
+    this.closeMentionOverlay();
+    this.clearMentionPickerDebounce();
   }
 
   private async loadHistory(): Promise<void> {
@@ -531,6 +570,8 @@ export class ZoteroChatView extends ItemView {
     }
 
     this.inputEl.value = "";
+    this.clearMentionPickerDebounce();
+    this.closeMentionOverlay();
     this.busy = true;
     this.cancelPending = false;
     this.updateSendButtonState();
@@ -623,6 +664,208 @@ export class ZoteroChatView extends ItemView {
       return crypto.randomUUID();
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  private scheduleZoteroMentionPicker(): void {
+    if (this.busy) {
+      this.closeMentionOverlay();
+      return;
+    }
+    const context = this.getMentionContextAtCursor();
+    if (context && context.query.length === 0) {
+      this.clearMentionPickerDebounce();
+      void this.updateMentionSuggestions();
+      return;
+    }
+    this.clearMentionPickerDebounce();
+    this.mentionDebounceHandle = window.setTimeout(() => {
+      this.mentionDebounceHandle = null;
+      void this.updateMentionSuggestions();
+    }, 180);
+  }
+
+  private clearMentionPickerDebounce(): void {
+    if (this.mentionDebounceHandle !== null) {
+      window.clearTimeout(this.mentionDebounceHandle);
+      this.mentionDebounceHandle = null;
+    }
+  }
+
+  private getMentionContextAtCursor(): { from: number; to: number; query: string } | null {
+    const value = this.inputEl.value;
+    const cursor = this.inputEl.selectionStart ?? value.length;
+    const before = value.slice(0, cursor);
+    const after = value.slice(cursor);
+    const lastWhitespace = before.search(/\S+$/);
+    const from = lastWhitespace === -1 ? cursor : lastWhitespace;
+    const nextWhitespaceOffset = after.search(/\s/);
+    const to = nextWhitespaceOffset === -1 ? value.length : cursor + nextWhitespaceOffset;
+    const token = value.slice(from, to);
+    if (!token || !token.startsWith("@")) {
+      return null;
+    }
+    const query = token.slice(1).trim();
+    return { from, to, query };
+  }
+
+  private async updateMentionSuggestions(): Promise<void> {
+    if (this.busy) {
+      this.closeMentionOverlay();
+      return;
+    }
+    const context = this.getMentionContextAtCursor();
+    if (!context) {
+      this.closeMentionOverlay();
+      return;
+    }
+    const sequence = ++this.mentionQuerySequence;
+    try {
+      const suggestions = await this.searchIndexedMentionItems(context.query);
+      if (sequence !== this.mentionQuerySequence) {
+        return;
+      }
+      this.mentionContext = context;
+      this.mentionSuggestions = suggestions;
+      this.mentionSelectedIndex = 0;
+      this.renderMentionOverlay();
+    } catch (error) {
+      console.error("Failed to fetch mention suggestions", error);
+      this.closeMentionOverlay();
+    }
+  }
+
+  private async searchIndexedMentionItems(query: string): Promise<ZoteroLocalItem[]> {
+    if (!this.mentionDocIds) {
+      const index = await this.plugin.getDocIndex();
+      this.mentionDocIds = new Set(Object.keys(index));
+    }
+    const results = await this.plugin.searchZoteroItems(query.trim());
+    return results
+      .filter((item) => {
+        const docId = getDocIdFromItem(item);
+        return Boolean(docId && this.mentionDocIds?.has(docId));
+      })
+      .slice(0, 8);
+  }
+
+  private insertSelectedMention(item: ZoteroLocalItem, context: { from: number; to: number }): void {
+    const docId = getDocIdFromItem(item);
+    const rawTitle = typeof item.data?.title === "string" ? item.data.title.trim() : "";
+    const title = rawTitle || "Untitled";
+    const replacement = docId ? `"${title}" (doc_id ${docId})` : `"${title}"`;
+    const value = this.inputEl.value;
+    const next = `${value.slice(0, context.from)}${replacement}${value.slice(context.to)}`;
+    this.inputEl.value = next;
+    const caret = context.from + replacement.length;
+    this.inputEl.setSelectionRange(caret, caret);
+    this.inputEl.focus();
+    this.closeMentionOverlay();
+  }
+
+  private createMentionOverlay(): void {
+    this.mentionOverlayEl = this.inputWrapEl.createDiv({ cls: "zrr-chat-mention-overlay" });
+    this.mentionOverlayEl.setAttr("role", "listbox");
+    this.mentionOverlayEl.setAttr("aria-label", "Indexed Zotero citation suggestions");
+    this.mentionListEl = this.mentionOverlayEl.createDiv({ cls: "zrr-chat-mention-list" });
+    this.mentionEmptyEl = this.mentionOverlayEl.createDiv({
+      cls: "zrr-chat-mention-empty",
+      text: "No indexed Zotero notes found.",
+    });
+    this.closeMentionOverlay();
+  }
+
+  private renderMentionOverlay(): void {
+    if (!this.mentionOverlayEl || !this.mentionListEl || !this.mentionEmptyEl || !this.mentionContext) {
+      return;
+    }
+    this.mentionListEl.empty();
+    const hasSuggestions = this.mentionSuggestions.length > 0;
+    this.mentionEmptyEl.toggleClass("is-visible", !hasSuggestions);
+    if (!hasSuggestions) {
+      this.mentionOverlayEl.addClass("is-open");
+      return;
+    }
+
+    this.mentionSuggestions.forEach((item, index) => {
+      const option = this.mentionListEl!.createDiv({ cls: "zrr-chat-mention-item" });
+      if (index === this.mentionSelectedIndex) {
+        option.addClass("is-active");
+      }
+      option.setAttr("role", "option");
+      option.setAttr("aria-selected", index === this.mentionSelectedIndex ? "true" : "false");
+
+      const iconEl = option.createSpan({ cls: "zrr-chat-mention-icon" });
+      setIcon(iconEl, "book");
+      const textWrap = option.createDiv({ cls: "zrr-chat-mention-text" });
+      const title = typeof item.data?.title === "string" && item.data.title.trim() ? item.data.title.trim() : "Untitled";
+      textWrap.createDiv({ cls: "zrr-chat-mention-title", text: title });
+      const docId = getDocIdFromItem(item);
+      textWrap.createDiv({ cls: "zrr-chat-mention-meta", text: docId ? `doc_id ${docId}` : "No doc_id" });
+
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!this.mentionContext) {
+          return;
+        }
+        this.insertSelectedMention(item, this.mentionContext);
+      });
+    });
+
+    this.mentionOverlayEl.addClass("is-open");
+  }
+
+  private closeMentionOverlay(): void {
+    this.mentionSuggestions = [];
+    this.mentionSelectedIndex = 0;
+    this.mentionContext = null;
+    if (this.mentionOverlayEl) {
+      this.mentionOverlayEl.removeClass("is-open");
+    }
+  }
+
+  private handleMentionOverlayKeydown(event: KeyboardEvent): boolean {
+    if (!this.mentionOverlayEl?.hasClass("is-open") || !this.mentionContext) {
+      if (event.key === "Escape") {
+        this.closeMentionOverlay();
+      }
+      return false;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (this.mentionSuggestions.length > 0) {
+        this.mentionSelectedIndex = (this.mentionSelectedIndex + 1) % this.mentionSuggestions.length;
+        this.renderMentionOverlay();
+      }
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (this.mentionSuggestions.length > 0) {
+        this.mentionSelectedIndex =
+          (this.mentionSelectedIndex - 1 + this.mentionSuggestions.length) % this.mentionSuggestions.length;
+        this.renderMentionOverlay();
+      }
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (this.mentionSuggestions.length === 0) {
+        return false;
+      }
+      event.preventDefault();
+      const selected = this.mentionSuggestions[this.mentionSelectedIndex] ?? this.mentionSuggestions[0];
+      if (!selected || !this.mentionContext) {
+        return true;
+      }
+      this.insertSelectedMention(selected, this.mentionContext);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.closeMentionOverlay();
+      return true;
+    }
+    return false;
   }
 }
 
