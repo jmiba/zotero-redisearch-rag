@@ -323,6 +323,7 @@
 .zrr-chat-mention-text {
   min-width: 0;
   flex: 1 1 auto;
+  font-size: var(--font-ui-smaller);
 }
 
 .zrr-chat-mention-title {
@@ -341,7 +342,7 @@
   display: none;
   color: var(--text-muted);
   padding: 0.65rem 0.75rem;
-  font-size: var(--font-ui-small);
+  font-size: var(--font-ui-smaller);
 }
 
 .zrr-chat-mention-empty.is-visible {
