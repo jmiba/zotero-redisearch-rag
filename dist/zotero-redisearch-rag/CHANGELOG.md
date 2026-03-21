@@ -1,4 +1,14 @@
 # Changelog
+## 0.9.22 (Bugfix Release)
+- Improve chat citation insertion with an inline `@` picker overlay inside the chat textarea (no separate modal required).
+- Add indexed-only citation suggestions for `@` mentions so results are limited to already indexed Zotero items.
+- Expand mention triggering behavior:
+  - trigger suggestions for `@` followed by any token,
+  - open the picker immediately when only `@` is typed,
+  - show recent indexed suggestions even before a first search character is entered.
+- Add keyboard interaction for the overlay picker (Arrow Up/Down, Enter/Tab to insert, Escape to close).
+- Add follow-up lint hardening for suggest modal prefill callbacks to satisfy no-floating-promises checks.
+
 ## 0.9.21 (Bugfix Release)
 - Make Zotero PDF imports transactional and self-cleaning:
   - stage item cache, chunk cache, synced note, and vault-copied PDFs under temporary paths during import,
