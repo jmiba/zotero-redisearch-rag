@@ -15,6 +15,7 @@ export default defineConfig([
     },
     rules: {
       "no-undef": "off",
+      "@typescript-eslint/require-await": "error",
       "@typescript-eslint/unbound-method": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-member-access": "off",

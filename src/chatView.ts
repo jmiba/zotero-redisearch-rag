@@ -230,9 +230,10 @@ export class ZoteroChatView extends ItemView {
     this.inputEl?.focus();
   }
 
-  async onClose(): Promise<void> {
+  onClose(): Promise<void> {
     this.closeMentionOverlay();
     this.clearMentionPickerDebounce();
+    return Promise.resolve();
   }
 
   private async loadHistory(): Promise<void> {
