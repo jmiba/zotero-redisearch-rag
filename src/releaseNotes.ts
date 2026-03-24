@@ -7,6 +7,20 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.24",
+    markdown: `- Add chat export post-processing controls:
+  - new \`Chat export template\` setting to wrap copied chat notes in an optional vault template,
+  - support \`{{chat_title}}\`, \`{{chat_created_at}}\`, and \`{{chat_body}}\` placeholders,
+  - new \`Chat export post-create command\` setting to run a user-selected command after the copied chat note is created and opened.
+- Improve copied-chat export behavior:
+  - if the template omits \`{{chat_body}}\`, keep the transcript first so downstream templater workflows can operate on the full note body,
+  - activate the freshly created note before running any configured post-create command.
+- Clean up the chunk-citation implementation by removing the unused native \`^zrr-chunk-...\` export path and keeping plugin-driven \`#zrr-chunk:\` jumps as the only page/section citation mechanism.
+- Minor chat UI and code-quality follow-up:
+  - reduce mention picker text sizing slightly for better readability,
+  - enforce \`@typescript-eslint/require-await\` and remove the unnecessary async \`onClose()\` implementation in the chat view.`,
+  },
+  {
     version: "0.9.23",
     markdown: `- Fix chat \`@\` suggestion icons to reflect Zotero item types instead of always showing a book icon.
 - Improve indexed \`@\` mention search reliability for metadata queries (especially \`citekey\`) by:
