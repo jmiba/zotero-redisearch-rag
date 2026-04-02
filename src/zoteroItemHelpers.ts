@@ -2,6 +2,13 @@ import type { ZoteroItemValues, ZoteroLocalItem } from "./types";
 
 export type PdfStatus = "yes" | "no" | "unknown";
 
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+};
+
 export const coerceString = (value: unknown): string => {
   if (typeof value === "string") {
     return value.trim();
@@ -63,14 +70,16 @@ export const extractYearFromItem = (item: ZoteroLocalItem): string => {
 };
 
 export const formatCreatorName = (creator: unknown): string => {
-  if (!creator || typeof creator !== "object") {
+  const record = asRecord(creator);
+  if (!record) {
     return "";
   }
-  if (creator.name) {
-    return String(creator.name);
+  const literalName = coerceString(record.name);
+  if (literalName) {
+    return literalName;
   }
-  const first = creator.firstName ? String(creator.firstName) : "";
-  const last = creator.lastName ? String(creator.lastName) : "";
+  const first = coerceString(record.firstName);
+  const last = coerceString(record.lastName);
   const combined = [last, first].filter(Boolean).join(", ");
   return combined || `${first} ${last}`.trim();
 };
@@ -128,10 +137,10 @@ export const extractCitekeyFromCsl = (csl: Record<string, unknown> | null): stri
   }
   const candidates = [
     csl["citation-key"],
-    (csl as unknown).citationKey,
-    (csl as unknown).citationkey,
-    (csl as unknown).citekey,
-    (csl as unknown).citation_key,
+    csl.citationKey,
+    csl.citationkey,
+    csl.citekey,
+    csl.citation_key,
   ];
   for (const candidate of candidates) {
     const resolved = coerceString(candidate);
@@ -151,15 +160,15 @@ export const extractShortTitleFromCsl = (csl: Record<string, unknown> | null): s
 };
 
 export const extractShortTitleFromValues = (values: ZoteroItemValues): string => {
-  const direct = coerceString((values as unknown).shortTitle);
+  const direct = coerceString(values.shortTitle);
   if (direct) {
     return direct;
   }
-  const underscored = coerceString((values as unknown).short_title);
+  const underscored = coerceString(values.short_title);
   if (underscored) {
     return underscored;
   }
-  const hyphenated = coerceString((values as unknown)["title-short"]);
+  const hyphenated = coerceString(values["title-short"]);
   if (hyphenated) {
     return hyphenated;
   }
@@ -201,8 +210,8 @@ export const collectItemAttachments = (data: Record<string, unknown> | undefined
     data.attachments,
     data.children,
     data.items,
-    (data as unknown).attachment,
-    (data as unknown).allAttachments,
+    data.attachment,
+    data.allAttachments,
   ];
   const collected: unknown[] = [];
   for (const bucket of buckets) {
@@ -219,18 +228,20 @@ export const collectItemAttachments = (data: Record<string, unknown> | undefined
 };
 
 export const isPdfAttachment = (entry: unknown): boolean => {
+  const record = asRecord(entry);
+  const data = asRecord(record?.data);
   const contentType =
-    entry?.contentType ?? entry?.mimeType ?? entry?.data?.contentType ?? entry?.data?.mimeType ?? "";
+    record?.contentType ?? record?.mimeType ?? data?.contentType ?? data?.mimeType ?? "";
   if (contentType === "application/pdf") {
     return true;
   }
   const filename =
-    entry?.filename ??
-    entry?.fileName ??
-    entry?.data?.filename ??
-    entry?.data?.fileName ??
-    entry?.path ??
-    entry?.data?.path ??
+    record?.filename ??
+    record?.fileName ??
+    data?.filename ??
+    data?.fileName ??
+    record?.path ??
+    data?.path ??
     "";
   if (typeof filename === "string" && filename.toLowerCase().endsWith(".pdf")) {
     return true;

@@ -7,6 +7,18 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.25",
+    markdown: `- Improve provider rate-limit handling across chat and indexing workflows:
+  - detect common 429 / quota-exceeded failures more reliably,
+  - show explicit retry messages for chat provider limits and embedding provider limits,
+  - stop treating embedding rate limits as generic provider failures during imports, reindexing, and chat-triggered rebuilds.
+- Tighten RAG query typing by introducing a dedicated final-payload type for streamed chat responses.
+- Harden Zotero item and PDF attachment helpers:
+  - normalize object access through safe record coercion instead of loose unknown-property reads,
+  - validate PDF attachment keys more strictly before use,
+  - keep citekey, short-title, creator-name, and attachment-path extraction logic working against more heterogeneous payload shapes.`,
+  },
+  {
     version: "0.9.24",
     markdown: `- Add chat export post-processing controls:
   - new \`Chat export template\` setting to wrap copied chat notes in an optional vault template,

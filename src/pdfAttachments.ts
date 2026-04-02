@@ -23,6 +23,13 @@ export type PdfDownloadDeps = {
   readFile: (path: string) => Promise<Buffer>;
 };
 
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  return value as Record<string, unknown>;
+};
+
 export const resolvePdfAttachment = async (
   values: ZoteroItemValues,
   itemKey: string,
@@ -64,8 +71,8 @@ export const collectAttachmentCandidates = (values: ZoteroItemValues): unknown[]
     values.attachments,
     values.children,
     values.items,
-    (values as unknown).attachment,
-    (values as unknown).allAttachments,
+    values["attachment"],
+    values["allAttachments"],
   ];
   const collected: unknown[] = [];
   for (const bucket of buckets) {
@@ -82,12 +89,14 @@ export const collectAttachmentCandidates = (values: ZoteroItemValues): unknown[]
 };
 
 export const toPdfAttachment = (attachment: unknown): PdfAttachment | null => {
-  const contentType = attachment?.contentType ?? attachment?.mimeType ?? attachment?.data?.contentType;
+  const record = asRecord(attachment);
+  const data = asRecord(record?.data);
+  const contentType = record?.contentType ?? record?.mimeType ?? data?.contentType;
   if (contentType !== "application/pdf") {
     return null;
   }
-  const key = attachment?.key ?? attachment?.attachmentKey ?? attachment?.data?.key;
-  if (!key) {
+  const key = record?.key ?? record?.attachmentKey ?? data?.key;
+  if (typeof key !== "string" || !key.trim()) {
     return null;
   }
   const filePath = extractAttachmentPath(attachment);
@@ -95,10 +104,14 @@ export const toPdfAttachment = (attachment: unknown): PdfAttachment | null => {
 };
 
 export const extractAttachmentPath = (attachment: unknown): string | null => {
-  const href =
-    attachment?.links?.enclosure?.href ??
-    attachment?.enclosure?.href ??
-    attachment?.data?.links?.enclosure?.href;
+  const record = asRecord(attachment);
+  const links = asRecord(record?.links);
+  const enclosure = asRecord(record?.enclosure);
+  const data = asRecord(record?.data);
+  const dataLinks = asRecord(data?.links);
+  const linksEnclosure = asRecord(links?.enclosure);
+  const dataEnclosure = asRecord(dataLinks?.enclosure);
+  const href = linksEnclosure?.href ?? enclosure?.href ?? dataEnclosure?.href;
   if (typeof href === "string" && href.startsWith("file://")) {
     try {
       return fileURLToPath(href);

@@ -95,7 +95,7 @@ import {
   isPdfAttachment,
 } from "./zoteroItemHelpers";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
-import type { ChatCitation, ChatMessage, ChatRetrievedChunk } from "./chatView";
+import type { ChatCitation, ChatMessage, ChatRetrievedChunk, RagQueryFinalPayload } from "./chatView";
 import { RELEASE_NOTES_LOG, type ReleaseNotesEntry } from "./releaseNotes";
 
 const ISO_639_1_TO_3: Record<string, string> = {
@@ -293,6 +293,7 @@ export default class ZoteroRagPlugin extends Plugin {
     | "redis_unavailable"
     | "no_cache"
     | "embed_dim_mismatch"
+    | "rate_limited"
     | "embed_failure"
     | "unknown"
     | null = null;
@@ -1060,7 +1061,9 @@ export default class ZoteroRagPlugin extends Plugin {
             const rebuilt = await this.reindexRedisFromCache();
             if (!rebuilt) {
               this.clearStatusProgress();
-              if (this.lastReindexFailure === "embed_failure") {
+              if (this.lastReindexFailure === "rate_limited") {
+                new Notice(this.getEmbeddingRateLimitMessage("retry_import"));
+              } else if (this.lastReindexFailure === "embed_failure") {
                 new Notice(
                   "Embedding provider error detected while rebuilding the Redis index. " +
                     "Fix the provider/model settings and retry import."
@@ -1090,6 +1093,11 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!indexingRecovered) {
         await this.cleanupIndexedChunksForDoc(docId);
         await cleanupStagedFiles();
+        if (classification === "rate_limited") {
+          this.clearStatusProgress();
+          new Notice(this.getEmbeddingRateLimitMessage("retry_import"));
+          return;
+        }
         if (classification === "embed_failure") {
           this.clearStatusProgress();
           new Notice("Embedding provider error detected. Fix the provider/model settings and rerun.");
@@ -1732,7 +1740,7 @@ export default class ZoteroRagPlugin extends Plugin {
   async runRagQueryStreaming(
     query: string,
     onDelta: (delta: string) => void,
-    onFinal: (payload: unknown) => void,
+    onFinal: (payload: RagQueryFinalPayload) => void,
     historyMessages: ChatMessage[] = []
   ): Promise<void> {
     this.activeChatQueryProcess = null;
@@ -1847,7 +1855,10 @@ export default class ZoteroRagPlugin extends Plugin {
               onFinal(event);
             }
           },
-          onFinal,
+          (payload) => {
+            const event = this.asRecord(payload);
+            onFinal(event ?? {});
+          },
           undefined,
           "rag_query_redisearch",
           (child) => {
@@ -1879,6 +1890,15 @@ export default class ZoteroRagPlugin extends Plugin {
             return;
           }
           const classification = this.classifyIndexingError(message);
+          if (this.isRateLimitErrorMessage(message)) {
+            onFinal({
+              answer:
+                classification === "rate_limited"
+                  ? this.getEmbeddingRateLimitMessage("retry")
+                  : this.getChatRateLimitMessage(),
+            });
+            return;
+          }
           if (classification === "embed_dim_mismatch") {
             if (attemptedRebuild) {
               onFinal({
@@ -1902,7 +1922,9 @@ export default class ZoteroRagPlugin extends Plugin {
               const rebuilt = await this.reindexRedisFromCache();
               if (!rebuilt) {
                 const answer =
-                  this.lastReindexFailure === "embed_failure"
+                  this.lastReindexFailure === "rate_limited"
+                    ? this.getEmbeddingRateLimitMessage("rebuild")
+                    : this.lastReindexFailure === "embed_failure"
                     ? "Embedding provider error detected while rebuilding the index. Fix settings and retry."
                     : "Redis index rebuild did not complete. Chat query stopped.";
                 onFinal({ answer });
@@ -1917,6 +1939,12 @@ export default class ZoteroRagPlugin extends Plugin {
             }
             attemptedRebuild = true;
             continue;
+          }
+          if (classification === "rate_limited") {
+            onFinal({
+              answer: this.getEmbeddingRateLimitMessage("retry"),
+            });
+            return;
           }
           if (classification === "embed_failure") {
             onFinal({
@@ -2885,6 +2913,39 @@ export default class ZoteroRagPlugin extends Plugin {
     );
   }
 
+  private isRateLimitErrorMessage(message: string): boolean {
+    const text = (message || "").toLowerCase();
+    return (
+      /\b429\b/.test(text) ||
+      text.includes("status 429") ||
+      text.includes("too many requests") ||
+      text.includes("rate limit") ||
+      text.includes("rate-limit") ||
+      text.includes("rate limited") ||
+      text.includes("rate-limited") ||
+      text.includes("retry-after") ||
+      text.includes("quota exceeded")
+    );
+  }
+
+  private getEmbeddingRateLimitMessage(action: "retry" | "rerun" | "rebuild" | "retry_import"): string {
+    switch (action) {
+      case "rerun":
+        return "Embedding provider rate limit exceeded. Wait and rerun.";
+      case "rebuild":
+        return "Embedding provider rate limit exceeded while rebuilding the index. Wait and retry.";
+      case "retry_import":
+        return "Embedding provider rate limit exceeded. Wait and retry import.";
+      case "retry":
+      default:
+        return "Embedding provider rate limit exceeded. Wait and retry.";
+    }
+  }
+
+  private getChatRateLimitMessage(): string {
+    return "Chat provider rate limit exceeded. Wait and retry.";
+  }
+
   private logOptionalLookupFailure(context: string, error: unknown): void {
     if (this.isOptionalLookupNetworkError(error)) {
       console.debug(`${context} (network unavailable)`, error);
@@ -2991,13 +3052,19 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  private classifyIndexingError(message: string): "chunks_missing" | "embed_dim_mismatch" | "embed_failure" | "unknown" {
+  private classifyIndexingError(message: string): "chunks_missing" | "embed_dim_mismatch" | "rate_limited" | "embed_failure" | "unknown" {
     const text = message.toLowerCase();
     if (text.includes("embedding dim mismatch") || text.includes("dim mismatch")) {
       return "embed_dim_mismatch";
     }
     if (text.includes("chunks json not found")) {
       return "chunks_missing";
+    }
+    if (
+      this.isRateLimitErrorMessage(message) &&
+      (text.includes("embedding request failed") || text.includes("failed to embed query"))
+    ) {
+      return "rate_limited";
     }
     if (
       text.includes("embedding failed") ||
@@ -3270,6 +3337,13 @@ export default class ZoteroRagPlugin extends Plugin {
           };
           break;
         }
+        if (classification === "rate_limited") {
+          abortReason = {
+            kind: "embed_failure",
+            message,
+          };
+          break;
+        }
         if (classification === "embed_failure") {
           abortReason = {
             kind: "embed_failure",
@@ -3301,10 +3375,15 @@ export default class ZoteroRagPlugin extends Plugin {
         }
         this.lastReindexFailure = "embed_dim_mismatch";
       } else {
-        new Notice(
-          "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
-        );
-        this.lastReindexFailure = "embed_failure";
+        if (this.isRateLimitErrorMessage(abortReason.message)) {
+          new Notice(this.getEmbeddingRateLimitMessage("rerun"));
+          this.lastReindexFailure = "rate_limited";
+        } else {
+          new Notice(
+            "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
+          );
+          this.lastReindexFailure = "embed_failure";
+        }
       }
       return false;
     }
@@ -3440,6 +3519,11 @@ export default class ZoteroRagPlugin extends Plugin {
             }
           }
         }
+      } else if (classification === "rate_limited") {
+        this.lastReindexFailure = "rate_limited";
+        if (showNotices) {
+          new Notice(this.getEmbeddingRateLimitMessage("rerun"));
+        }
       } else if (classification === "embed_failure") {
         this.lastReindexFailure = "embed_failure";
         if (showNotices) {
@@ -3525,6 +3609,10 @@ export default class ZoteroRagPlugin extends Plugin {
             console.error(dropError);
           }
         }
+        return;
+      }
+      if (classification === "rate_limited") {
+        new Notice(this.getEmbeddingRateLimitMessage("rerun"));
         return;
       }
       if (classification === "embed_failure") {

@@ -40,6 +40,13 @@ export type ChatRetrievedChunk = {
   text?: string;
 };
 
+export type RagQueryFinalPayload = {
+  canceled?: boolean;
+  answer?: string;
+  citations?: ChatCitation[];
+  retrieved?: ChatRetrievedChunk[];
+};
+
 const ZOTERO_ITEM_TYPE_ICON_MAP: Record<string, string> = {
   artwork: "image",
   audioRecording: "music",
