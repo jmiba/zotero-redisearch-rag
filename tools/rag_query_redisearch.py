@@ -10,9 +10,15 @@ import sys
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import redis
 import requests
+
+_LM_STUDIO_APPROX_CHARS_PER_TOKEN = 3
+_LM_STUDIO_CONTEXT_OVERHEAD_TOKENS = 128
+_LM_STUDIO_MIN_OUTPUT_TOKENS = 256
+_LM_STUDIO_MAX_OUTPUT_TOKENS = 2048
 
 
 def eprint(message: str) -> None:
@@ -35,6 +41,398 @@ def is_stream_unsupported(message: str) -> bool:
     return "stream" in lowered and ("not supported" in lowered or "unsupported" in lowered or "unknown parameter" in lowered)
 
 
+def is_responses_endpoint_unsupported(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "404" in lowered
+        or "not found" in lowered
+        or "unknown endpoint" in lowered
+        or "responses response missing content" in lowered
+    )
+
+
+def is_lm_studio_provider(base_url: str) -> bool:
+    try:
+        parsed = urlparse((base_url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return host in {"127.0.0.1", "localhost"} and port == 1234
+
+
+def build_lm_studio_models_url(base_url: str) -> Optional[str]:
+    try:
+        parsed = urlparse((base_url or "").strip())
+    except Exception:
+        return None
+    path = re.sub(r"/+$", "", parsed.path or "")
+    base_path = path[:-3] if path.endswith("/v1") else path
+    model_path = re.sub(r"/{2,}", "/", f"{base_path}/api/v1/models")
+    return urlunparse((parsed.scheme, parsed.netloc, model_path, "", "", ""))
+
+
+def estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / _LM_STUDIO_APPROX_CHARS_PER_TOKEN))
+
+
+def trim_text_to_token_budget(text: str, max_tokens: int) -> str:
+    safe_tokens = max(0, int(max_tokens))
+    if safe_tokens <= 0 or not text:
+        return ""
+    max_chars = safe_tokens * _LM_STUDIO_APPROX_CHARS_PER_TOKEN
+    if len(text) <= max_chars:
+        return text
+    trimmed = text[:max_chars]
+    paragraph_break = trimmed.rfind("\n\n")
+    line_break = trimmed.rfind("\n")
+    sentence_break = max(trimmed.rfind(". "), trimmed.rfind("? "), trimmed.rfind("! "))
+    breakpoint = max(paragraph_break, line_break, sentence_break)
+    if breakpoint >= int(max_chars * 0.7):
+        trimmed = trimmed[:breakpoint].rstrip()
+    else:
+        trimmed = trimmed.rstrip()
+    return trimmed
+
+
+def get_lm_studio_context_budget(base_url: str, api_key: str, model: str, prompt_hint: str = "") -> Optional[Dict[str, int]]:
+    if not is_lm_studio_provider(base_url):
+        return None
+    url = build_lm_studio_models_url(base_url)
+    if not url:
+        return None
+    headers: Dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        response.encoding = "utf-8"
+        if response.status_code >= 400:
+            return None
+        data = response.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    models = data.get("models")
+    if not isinstance(models, list):
+        return None
+    for candidate in models:
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("key", "") or "").strip() != model:
+            continue
+        loaded_instances = candidate.get("loaded_instances")
+        context_length = 0
+        if isinstance(loaded_instances, list):
+            for instance in loaded_instances:
+                if not isinstance(instance, dict):
+                    continue
+                loaded_id = str(instance.get("id", "") or "").strip()
+                if loaded_id and loaded_id != model:
+                    continue
+                config = instance.get("config")
+                if isinstance(config, dict):
+                    value = config.get("context_length")
+                    if isinstance(value, (int, float)) and value > 0:
+                        context_length = int(value)
+                        break
+        max_context_value = candidate.get("max_context_length")
+        max_context_length = int(max_context_value) if isinstance(max_context_value, (int, float)) and max_context_value > 0 else 0
+        if context_length <= 0:
+            context_length = max_context_length
+        if context_length <= 0:
+            return None
+        prompt_hint_tokens = estimate_text_tokens(prompt_hint)
+        desired_output_tokens = max(
+            _LM_STUDIO_MIN_OUTPUT_TOKENS,
+            min(
+                _LM_STUDIO_MAX_OUTPUT_TOKENS,
+                max(math.ceil(prompt_hint_tokens * 0.5), math.floor(context_length * 0.2)),
+            ),
+        )
+        max_output_tokens = max(64, min(desired_output_tokens, max(64, context_length - 256)))
+        return {
+            "context_length": context_length,
+            "max_context_length": max_context_length,
+            "max_output_tokens": int(max_output_tokens),
+        }
+    return None
+
+
+def extract_text_segments(value: Any) -> List[str]:
+    segments: List[str] = []
+    if isinstance(value, str):
+        if value:
+            segments.append(value)
+        return segments
+    if isinstance(value, list):
+        for item in value:
+            segments.extend(extract_text_segments(item))
+        return segments
+    if not isinstance(value, dict):
+        return segments
+
+    item_type = str(value.get("type", "") or "").strip().lower()
+    if item_type in {"reasoning", "reasoning_content", "thinking"}:
+        return segments
+
+    for key in ("text", "output_text", "content", "value"):
+        nested = value.get(key)
+        if isinstance(nested, str) and nested:
+            segments.append(nested)
+        elif isinstance(nested, (list, dict)):
+            segments.extend(extract_text_segments(nested))
+    return segments
+
+
+def extract_text_from_chat_payload(data: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first.get("message"), dict) else {}
+        parts.extend(extract_text_segments(message.get("content")))
+        parts.extend(extract_text_segments(first.get("text")))
+    parts.extend(extract_text_segments(data.get("output_text")))
+    return "".join(parts).strip()
+
+
+def extract_text_from_responses_payload(data: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    parts.extend(extract_text_segments(data.get("output_text")))
+    output = data.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "") or "").strip().lower()
+            if item_type == "message":
+                parts.extend(extract_text_segments(item.get("content")))
+                continue
+            parts.extend(extract_text_segments(item))
+    response = data.get("response")
+    if isinstance(response, dict):
+        parts.extend(extract_text_segments(response.get("output_text")))
+        nested_output = response.get("output")
+        if isinstance(nested_output, list):
+            for item in nested_output:
+                if isinstance(item, dict):
+                    parts.extend(extract_text_segments(item))
+    return "".join(parts).strip()
+
+
+def extract_error_message(payload: Any) -> str:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+            return json.dumps(error, ensure_ascii=False)
+        if payload.get("type") == "error":
+            message = payload.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+    return ""
+
+
+def request_responses(
+    base_url: str,
+    api_key: str,
+    model: str,
+    temperature: float,
+    system_prompt: str,
+    user_prompt: str,
+    max_output_tokens: Optional[int] = None,
+    timing: Optional[Dict[str, Any]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> str:
+    started_at = time.perf_counter()
+    if should_abort is not None and should_abort():
+        raise AbortRequested("Request aborted before non-stream responses request.")
+    url = base_url.rstrip("/") + "/responses"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    base_payload = {
+        "model": model,
+        "instructions": system_prompt,
+        "input": user_prompt,
+    }
+    if max_output_tokens is not None and max_output_tokens > 0:
+        base_payload["max_output_tokens"] = int(max_output_tokens)
+    payload = dict(base_payload)
+    payload["temperature"] = temperature
+
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+    response_open_ms = int((time.perf_counter() - started_at) * 1000)
+    response.encoding = "utf-8"
+    if response.status_code >= 400:
+        error_text = response.text
+        if is_temperature_unsupported(error_text):
+            if should_abort is not None and should_abort():
+                raise AbortRequested("Request aborted before non-stream responses retry.")
+            response = requests.post(url, json=base_payload, headers=headers, timeout=120)
+            response_open_ms = int((time.perf_counter() - started_at) * 1000)
+            response.encoding = "utf-8"
+            if response.status_code >= 400:
+                raise RuntimeError(f"Responses request failed: {response.status_code} {response.text}")
+        else:
+            raise RuntimeError(f"Responses request failed: {response.status_code} {error_text}")
+
+    data = response.json()
+    error_message = extract_error_message(data)
+    if error_message:
+        raise RuntimeError(f"Responses request failed: {error_message}")
+    content = extract_text_from_responses_payload(data if isinstance(data, dict) else {})
+    if not content:
+        raise RuntimeError("Responses response missing content")
+    if timing is not None:
+        timing["chat_mode"] = "responses_non_stream"
+        timing["chat_response_open_ms"] = response_open_ms
+        timing["chat_first_token_ms"] = response_open_ms
+        timing["chat_total_ms"] = int((time.perf_counter() - started_at) * 1000)
+        timing["chat_fallback_to_non_stream"] = bool(timing.get("chat_fallback_to_non_stream", False))
+    return content
+
+
+def request_responses_stream(
+    base_url: str,
+    api_key: str,
+    model: str,
+    temperature: float,
+    system_prompt: str,
+    user_prompt: str,
+    on_delta,
+    max_output_tokens: Optional[int] = None,
+    timing: Optional[Dict[str, Any]] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+) -> str:
+    started_at = time.perf_counter()
+    if should_abort is not None and should_abort():
+        raise AbortRequested("Request aborted before stream responses request.")
+    url = base_url.rstrip("/") + "/responses"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    base_payload = {
+        "model": model,
+        "instructions": system_prompt,
+        "input": user_prompt,
+        "stream": True,
+    }
+    if max_output_tokens is not None and max_output_tokens > 0:
+        base_payload["max_output_tokens"] = int(max_output_tokens)
+    payload = dict(base_payload)
+    payload["temperature"] = temperature
+
+    response = requests.post(url, json=payload, headers=headers, timeout=120, stream=True)
+    response_open_ms = int((time.perf_counter() - started_at) * 1000)
+    response.encoding = "utf-8"
+    if response.status_code >= 400:
+        error_text = response.text
+        if is_temperature_unsupported(error_text):
+            if should_abort is not None and should_abort():
+                raise AbortRequested("Request aborted before stream responses retry.")
+            response = requests.post(url, json=base_payload, headers=headers, timeout=120, stream=True)
+            response_open_ms = int((time.perf_counter() - started_at) * 1000)
+            response.encoding = "utf-8"
+            if response.status_code >= 400:
+                raise RuntimeError(f"Responses request failed: {response.status_code} {response.text}")
+        else:
+            raise RuntimeError(f"Responses request failed: {response.status_code} {error_text}")
+
+    content_parts: List[str] = []
+    first_token_ms: Optional[int] = None
+    current_event: Optional[str] = None
+    current_data: List[str] = []
+    completed_payload: Optional[Dict[str, Any]] = None
+    stream_error_message: Optional[str] = None
+
+    def flush_event() -> bool:
+        nonlocal current_event, current_data, first_token_ms, completed_payload, stream_error_message
+        if not current_event and not current_data:
+            return False
+        data_text = "\n".join(current_data).strip()
+        event_name = current_event or ""
+        current_event = None
+        current_data = []
+        if not data_text:
+          return False
+        if data_text == "[DONE]":
+            return True
+        try:
+            payload_data = json.loads(data_text)
+        except Exception:
+            return False
+        if not isinstance(payload_data, dict):
+            return False
+        error_message = extract_error_message(payload_data)
+        if error_message:
+            stream_error_message = error_message
+            return True
+        if event_name == "response.output_text.delta":
+            piece = payload_data.get("delta")
+            if isinstance(piece, str) and piece:
+                if first_token_ms is None:
+                    first_token_ms = int((time.perf_counter() - started_at) * 1000)
+                content_parts.append(piece)
+                on_delta(piece)
+            return False
+        if event_name == "response.completed":
+            completed_payload = payload_data
+            return False
+        if not content_parts:
+            piece = extract_text_from_responses_payload(payload_data)
+            if piece:
+                if first_token_ms is None:
+                    first_token_ms = int((time.perf_counter() - started_at) * 1000)
+                content_parts.append(piece)
+                on_delta(piece)
+        return False
+
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if should_abort is not None and should_abort():
+            raise AbortRequested("Request aborted while waiting for responses stream tokens.")
+        if raw_line is None:
+            continue
+        line = raw_line.rstrip("\r")
+        if not line:
+            if flush_event():
+                break
+            continue
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+            continue
+        if line.startswith("data:"):
+            current_data.append(line[5:].strip())
+            continue
+
+    flush_event()
+    if stream_error_message:
+        raise RuntimeError(f"Responses request failed: {stream_error_message}")
+    if not content_parts and completed_payload:
+        completed_error = extract_error_message(completed_payload)
+        if completed_error:
+            raise RuntimeError(f"Responses request failed: {completed_error}")
+        fallback = extract_text_from_responses_payload(completed_payload)
+        if fallback:
+            content_parts.append(fallback)
+
+    if timing is not None:
+        timing["chat_mode"] = "responses_stream"
+        timing["chat_response_open_ms"] = response_open_ms
+        timing["chat_first_token_ms"] = first_token_ms
+        timing["chat_total_ms"] = int((time.perf_counter() - started_at) * 1000)
+        timing["chat_fallback_to_non_stream"] = False
+    return "".join(content_parts)
+
+
 def request_chat(
     base_url: str,
     api_key: str,
@@ -42,9 +440,27 @@ def request_chat(
     temperature: float,
     system_prompt: str,
     user_prompt: str,
+    max_output_tokens: Optional[int] = None,
     timing: Optional[Dict[str, Any]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
+    endpoint_mode: str = "chat",
 ) -> str:
+    if endpoint_mode == "responses":
+        try:
+            return request_responses(
+                base_url,
+                api_key,
+                model,
+                temperature,
+                system_prompt,
+                user_prompt,
+                max_output_tokens=max_output_tokens,
+                timing=timing,
+                should_abort=should_abort,
+            )
+        except Exception as exc:
+            if not is_responses_endpoint_unsupported(str(exc)):
+                raise
     started_at = time.perf_counter()
     if should_abort is not None and should_abort():
         raise AbortRequested("Request aborted before non-stream chat request.")
@@ -60,6 +476,8 @@ def request_chat(
             {"role": "user", "content": user_prompt},
         ],
     }
+    if max_output_tokens is not None and max_output_tokens > 0:
+        base_payload["max_tokens"] = int(max_output_tokens)
     payload = dict(base_payload)
     payload["temperature"] = temperature
 
@@ -80,11 +498,13 @@ def request_chat(
             raise RuntimeError(f"Chat request failed: {response.status_code} {error_text}")
 
     data = response.json()
+    error_message = extract_error_message(data)
+    if error_message:
+        raise RuntimeError(f"Chat request failed: {error_message}")
     choices = data.get("choices")
     if not choices:
         raise RuntimeError("Chat response missing choices")
-    message = choices[0].get("message") or {}
-    content = message.get("content")
+    content = extract_text_from_chat_payload(data if isinstance(data, dict) else {})
     if not content:
         raise RuntimeError("Chat response missing content")
     if timing is not None:
@@ -104,9 +524,28 @@ def request_chat_stream(
     system_prompt: str,
     user_prompt: str,
     on_delta,
+    max_output_tokens: Optional[int] = None,
     timing: Optional[Dict[str, Any]] = None,
     should_abort: Optional[Callable[[], bool]] = None,
+    endpoint_mode: str = "chat",
 ) -> str:
+    if endpoint_mode == "responses":
+        try:
+            return request_responses_stream(
+                base_url,
+                api_key,
+                model,
+                temperature,
+                system_prompt,
+                user_prompt,
+                on_delta,
+                max_output_tokens=max_output_tokens,
+                timing=timing,
+                should_abort=should_abort,
+            )
+        except Exception as exc:
+            if not is_responses_endpoint_unsupported(str(exc)):
+                raise
     started_at = time.perf_counter()
     if should_abort is not None and should_abort():
         raise AbortRequested("Request aborted before stream chat request.")
@@ -123,6 +562,8 @@ def request_chat_stream(
         ],
         "stream": True,
     }
+    if max_output_tokens is not None and max_output_tokens > 0:
+        base_payload["max_tokens"] = int(max_output_tokens)
     payload = dict(base_payload)
     payload["temperature"] = temperature
 
@@ -144,6 +585,7 @@ def request_chat_stream(
 
     content_parts: List[str] = []
     first_token_ms: Optional[int] = None
+    last_payload: Optional[Dict[str, Any]] = None
     for raw_line in response.iter_lines(decode_unicode=True):
         if should_abort is not None and should_abort():
             raise AbortRequested("Request aborted while waiting for stream tokens.")
@@ -159,17 +601,37 @@ def request_chat_stream(
             payload = json.loads(data)
         except Exception:
             continue
+        if isinstance(payload, dict):
+            last_payload = payload
+            error_message = extract_error_message(payload)
+            if error_message:
+                raise RuntimeError(f"Chat request failed: {error_message}")
         choices = payload.get("choices") or []
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
-        piece = delta.get("content")
+        piece = extract_text_from_chat_payload({"choices": [{"message": {"content": delta.get("content")}}]})
+        if not piece:
+            piece = extract_text_segments(delta.get("content"))
+            piece = "".join(piece)
+        if not piece:
+            piece = "".join(extract_text_segments(delta))
+        if not piece:
+            piece = "".join(extract_text_segments(choices[0].get("text")))
         if not piece:
             continue
         if first_token_ms is None:
             first_token_ms = int((time.perf_counter() - started_at) * 1000)
         content_parts.append(piece)
         on_delta(piece)
+
+    if not content_parts and last_payload:
+        last_error = extract_error_message(last_payload)
+        if last_error:
+            raise RuntimeError(f"Chat request failed: {last_error}")
+        fallback = extract_text_from_chat_payload(last_payload)
+        if fallback:
+            content_parts.append(fallback)
 
     if timing is not None:
         timing["chat_mode"] = "stream"
@@ -1396,6 +1858,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chat-base-url", required=True)
     parser.add_argument("--chat-api-key", default="")
     parser.add_argument("--chat-model", required=True)
+    parser.add_argument("--chat-endpoint-mode", choices=["chat", "responses"], default="chat")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--history-file", help="Optional JSON file with recent chat history")
@@ -1836,6 +2299,24 @@ def run_with_args(
         history_block = f"Chat history (for reference only):\n{history_block}\n\n"
     def build_user_prompt(context_block: str) -> str:
         return f"{history_block}Question: {args.query}\n\nContext:\n{context_block}"
+    lm_studio_budget = get_lm_studio_context_budget(
+        args.chat_base_url,
+        args.chat_api_key,
+        args.chat_model,
+        f"{system_prompt}\n\n{history_block}\n{args.query}\n{context}",
+    )
+    max_output_tokens: Optional[int] = None
+    if lm_studio_budget:
+        max_output_tokens = int(lm_studio_budget.get("max_output_tokens") or 0) or None
+        prompt_budget = max(
+            64,
+            int(lm_studio_budget.get("context_length") or 0) - int(max_output_tokens or 0) - _LM_STUDIO_CONTEXT_OVERHEAD_TOKENS,
+        )
+        static_prompt_tokens = estimate_text_tokens(system_prompt) + estimate_text_tokens(build_user_prompt(""))
+        available_context_tokens = max(64, prompt_budget - static_prompt_tokens)
+        trimmed_context = trim_text_to_token_budget(context, available_context_tokens)
+        if trimmed_context:
+            context = trimmed_context
 
     user_prompt = build_user_prompt(context)
 
@@ -1862,8 +2343,10 @@ def run_with_args(
                 system_prompt,
                 user_prompt,
                 lambda chunk: emit({"type": "delta", "content": chunk}),
+                max_output_tokens=max_output_tokens,
                 timing=chat_timing,
                 should_abort=should_abort,
+                endpoint_mode=args.chat_endpoint_mode,
             )
             record_phase("chat_request", phase_started_at)
             emit_phase("chat_stream", "done", chars=len(answer))
@@ -1889,8 +2372,10 @@ def run_with_args(
                 args.temperature,
                 system_prompt,
                 user_prompt,
+                max_output_tokens=max_output_tokens,
                 timing=chat_timing,
                 should_abort=should_abort,
+                endpoint_mode=args.chat_endpoint_mode,
             )
             record_phase("chat_request", phase_started_at)
             emit_phase("chat_non_stream", "done", chars=len(answer))

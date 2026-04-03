@@ -7,6 +7,20 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.9.26",
+    markdown: `- Improve LM Studio compatibility for chat requests and title generation:
+  - use the \`/responses\` API automatically for LM Studio chat/title requests when appropriate,
+  - fall back to classic chat completions when the responses endpoint is unavailable,
+  - parse streamed and non-streamed response payloads more robustly.
+- Add LM Studio-aware context budgeting for chat:
+  - inspect local model metadata to estimate context length,
+  - trim oversized prompts/context blocks automatically,
+  - pass explicit output-token budgets to reduce context-overflow failures.
+- Add cleanup reasoning-mode controls for LLM cleanup:
+  - new \`Cleanup reasoning mode\` setting with \`Automatic\`, \`Reasoning on\`, and \`Reasoning off\`,
+  - in automatic mode, learn the preferred LM Studio native cleanup reasoning mode per provider/model and reprobe it every 30 days.`,
+  },
+  {
     version: "0.9.25",
     markdown: `- Improve provider rate-limit handling across chat and indexing workflows:
   - detect common 429 / quota-exceeded failures more reliably,

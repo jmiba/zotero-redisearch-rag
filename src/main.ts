@@ -10,7 +10,6 @@ import {
   WorkspaceLeaf,
   addIcon,
   normalizePath,
-  requestUrl,
 } from "obsidian";
 import {
   createChunkLinkNavigationExtension,
@@ -35,6 +34,9 @@ import {
   METADATA_SNAPSHOT_PATH,
   ANNOTATION_SNAPSHOT_PATH,
   AnnotationColorMap,
+  CleanupLearnedMode,
+  CleanupModeMemoryEntry,
+  CleanupReasoningMode,
   OcrEngineAvailability,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
@@ -130,6 +132,7 @@ const RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC = 90;
 const IMPORT_WORKER_TIMEOUT_SEC = 900;
 const MAX_CITATION_TITLE_LENGTH = 80;
 const ANNOTATION_SYNC_GRACE_MS = 120000;
+const CLEANUP_MODE_REPROBE_MS = 30 * 24 * 60 * 60 * 1000;
 const ZRR_ANNOTATIONS_START_RE = /<!--\s*zrr:annotations-start\b[^>]*-->/i;
 const ZRR_ANNOTATIONS_END_RE = /<!--\s*zrr:annotations-end\s*-->/i;
 
@@ -1611,43 +1614,23 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     }
     try {
-      const url = `${normalizedBase}/chat/completions`;
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (this.settings.chatApiKey) {
-        headers["Authorization"] = `Bearer ${this.settings.chatApiKey}`;
-      }
       const sample = messages
         .slice(-8)
         .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
         .join("\n")
         .slice(0, 4000);
-      const payload = {
+      const text = await this.requestLlmText({
+        baseUrl: normalizedBase,
+        apiKey: (this.settings.chatApiKey || "").trim(),
         model,
         temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content:
-              "Generate a short, specific title (3-7 words) for the chat. No quotes, no punctuation at the end.",
-          },
-          { role: "user", content: sample },
-        ],
-      };
-      const res = await requestUrl({
-        url,
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        throw: false,
+        systemPrompt:
+          "Generate a short, specific title (3-7 words) for the chat. No quotes, no punctuation at the end.",
+        userPrompt: sample,
+        endpointMode: this.isLmStudioProvider(normalizedBase, this.settings.chatProviderProfileId)
+          ? "responses"
+          : "chat",
       });
-      if (res.status >= 400) {
-        return null;
-      }
-      const data = res.json;
-      const text = data?.choices?.[0]?.message?.content;
-      if (typeof text !== "string") {
-        return null;
-      }
       return this.normalizeChatTitle(text.replace(/^"|"$/g, "").trim());
     } catch (error) {
       console.warn("Chat title suggestion failed", error);
@@ -1773,6 +1756,10 @@ export default class ZoteroRagPlugin extends Plugin {
       this.settings.chatApiKey,
       "--chat-model",
       this.settings.chatModel,
+      "--chat-endpoint-mode",
+      this.isLmStudioProvider(this.settings.chatBaseUrl, this.settings.chatProviderProfileId)
+        ? "responses"
+        : "chat",
       "--temperature",
       String(this.settings.chatTemperature),
       "--stream",
@@ -2944,6 +2931,688 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private getChatRateLimitMessage(): string {
     return "Chat provider rate limit exceeded. Wait and retry.";
+  }
+
+  private isLmStudioProvider(baseUrlRaw: string, profileId = ""): boolean {
+    if ((profileId || "").trim() === "lm-studio") {
+      return true;
+    }
+    const baseUrl = (baseUrlRaw || "").trim();
+    if (!baseUrl) {
+      return false;
+    }
+    try {
+      const parsed = new URL(baseUrl);
+      const host = parsed.hostname.toLowerCase();
+      const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+      return (host === "127.0.0.1" || host === "localhost") && port === "1234";
+    } catch {
+      return false;
+    }
+  }
+
+  private isTemperatureUnsupportedMessage(message: string): boolean {
+    const text = (message || "").toLowerCase();
+    return text.includes("temperature") && (
+      text.includes("unsupported") ||
+      text.includes("not supported") ||
+      text.includes("unknown parameter") ||
+      text.includes("default")
+    );
+  }
+
+  private isResponsesEndpointUnsupportedMessage(message: string): boolean {
+    const text = (message || "").toLowerCase();
+    return (
+      text.includes("404") ||
+      text.includes("not found") ||
+      text.includes("unknown endpoint") ||
+      text.includes("responses response missing content")
+    );
+  }
+
+  private buildLmStudioModelsUrl(baseUrlRaw: string): string | null {
+    try {
+      const parsed = new URL((baseUrlRaw || "").trim());
+      const pathname = parsed.pathname.replace(/\/+$/, "");
+      const basePath = pathname.endsWith("/v1") ? pathname.slice(0, -3) : pathname;
+      parsed.pathname = `${basePath || ""}/api/v1/models`.replace(/\/{2,}/g, "/");
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  private buildLmStudioNativeChatUrl(baseUrlRaw: string): string | null {
+    try {
+      const parsed = new URL((baseUrlRaw || "").trim());
+      const pathname = parsed.pathname.replace(/\/+$/, "");
+      const basePath = pathname.endsWith("/v1") ? pathname.slice(0, -3) : pathname;
+      parsed.pathname = `${basePath || ""}/api/v1/chat`.replace(/\/{2,}/g, "/");
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  private estimateTextTokens(text: string): number {
+    if (!text) {
+      return 0;
+    }
+    return Math.max(1, Math.ceil(text.length / 3));
+  }
+
+  private async getLmStudioModelMetadata(
+    baseUrlRaw: string,
+    apiKey: string,
+    model: string
+  ): Promise<{
+    contextLength: number;
+    maxContextLength: number;
+    reasoningAllowedOptions: string[];
+    reasoningDefault: string;
+  } | null> {
+    if (!this.isLmStudioProvider(baseUrlRaw)) {
+      return null;
+    }
+    const url = this.buildLmStudioModelsUrl(baseUrlRaw);
+    if (!url) {
+      return null;
+    }
+    try {
+      const headers: Record<string, string> = {};
+      if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`;
+      }
+      const response = await this.requestLocalApiRaw(url, { headers, timeoutMs: 3000 });
+      if (response.statusCode >= 400) {
+        return null;
+      }
+      const parsed = JSON.parse(response.body.toString("utf8"));
+      const root = this.asRecord(parsed);
+      const models = Array.isArray(root?.models) ? root.models : [];
+      for (const candidate of models) {
+        const entry = this.asRecord(candidate);
+        if (!entry || coerceString(entry.key).trim() !== model) {
+          continue;
+        }
+        const loadedInstances = Array.isArray(entry.loaded_instances) ? entry.loaded_instances : [];
+        let contextLength = 0;
+        for (const instance of loadedInstances) {
+          const loaded = this.asRecord(instance);
+          if (!loaded) {
+            continue;
+          }
+          const loadedId = coerceString(loaded.id).trim();
+          if (loadedId && loadedId !== model) {
+            continue;
+          }
+          const config = this.asRecord(loaded.config);
+          const value = Number(config?.context_length);
+          if (Number.isFinite(value) && value > 0) {
+            contextLength = Math.trunc(value);
+            break;
+          }
+        }
+        const maxContextLengthValue = Number(entry.max_context_length);
+        const maxContextLength = Number.isFinite(maxContextLengthValue) && maxContextLengthValue > 0
+          ? Math.trunc(maxContextLengthValue)
+          : 0;
+        if (contextLength <= 0) {
+          contextLength = maxContextLength;
+        }
+        const capabilities = this.asRecord(entry.capabilities);
+        const reasoning = this.asRecord(capabilities?.reasoning);
+        const reasoningAllowedOptions = Array.isArray(reasoning?.allowed_options)
+          ? reasoning.allowed_options.map((value) => coerceString(value).trim()).filter((value) => value)
+          : [];
+        const reasoningDefault = coerceString(reasoning?.default).trim();
+        return {
+          contextLength,
+          maxContextLength,
+          reasoningAllowedOptions,
+          reasoningDefault,
+        };
+      }
+    } catch (error) {
+      console.debug("Failed to read LM Studio model metadata", error);
+    }
+    return null;
+  }
+
+  private trimTextToApproxTokenBudget(text: string, maxTokens: number): string {
+    const safeTokens = Math.max(0, Math.trunc(maxTokens));
+    if (safeTokens <= 0 || !text) {
+      return "";
+    }
+    const maxChars = safeTokens * 3;
+    if (text.length <= maxChars) {
+      return text;
+    }
+    let trimmed = text.slice(0, maxChars);
+    const paragraphBreak = trimmed.lastIndexOf("\n\n");
+    const lineBreak = trimmed.lastIndexOf("\n");
+    const sentenceBreak = Math.max(trimmed.lastIndexOf(". "), trimmed.lastIndexOf("? "), trimmed.lastIndexOf("! "));
+    const breakpoint = Math.max(paragraphBreak, lineBreak, sentenceBreak);
+    if (breakpoint >= Math.floor(maxChars * 0.7)) {
+      trimmed = trimmed.slice(0, breakpoint).trimEnd();
+    } else {
+      trimmed = trimmed.trimEnd();
+    }
+    return trimmed;
+  }
+
+  private async getLmStudioPromptBudget(
+    baseUrlRaw: string,
+    apiKey: string,
+    model: string,
+    systemPrompt: string,
+    userPrompt: string
+  ): Promise<{ systemPrompt: string; userPrompt: string; maxOutputTokens: number } | null> {
+    if (!this.isLmStudioProvider(baseUrlRaw)) {
+      return null;
+    }
+    const metadata = await this.getLmStudioModelMetadata(baseUrlRaw, apiKey, model);
+    if (!metadata || metadata.contextLength <= 0) {
+      return null;
+    }
+    const contextLength = metadata.contextLength;
+    const estimatedUserTokens = this.estimateTextTokens(userPrompt);
+    const desiredOutputTokens = Math.max(
+      256,
+      Math.min(2048, Math.max(Math.ceil(estimatedUserTokens * 1.1), Math.floor(contextLength * 0.2)))
+    );
+    const maxOutputTokens = Math.max(64, Math.min(desiredOutputTokens, Math.max(64, contextLength - 256)));
+    const promptBudget = Math.max(64, contextLength - maxOutputTokens - 128);
+    const maxSystemTokens = Math.max(64, Math.floor(promptBudget * 0.25));
+    const trimmedSystemPrompt = this.trimTextToApproxTokenBudget(systemPrompt, maxSystemTokens);
+    const remainingUserTokens = Math.max(64, promptBudget - this.estimateTextTokens(trimmedSystemPrompt));
+    const trimmedUserPrompt = this.trimTextToApproxTokenBudget(userPrompt, remainingUserTokens);
+    return {
+      systemPrompt: trimmedSystemPrompt || systemPrompt,
+      userPrompt: trimmedUserPrompt,
+      maxOutputTokens,
+    };
+  }
+
+  private async resolveLmStudioReasoningValue(
+    baseUrl: string,
+    apiKey: string,
+    model: string,
+    requestedMode: "on" | "off"
+  ): Promise<string | null> {
+    const metadata = await this.getLmStudioModelMetadata(baseUrl, apiKey, model);
+    const allowed = metadata?.reasoningAllowedOptions ?? [];
+    const normalizedAllowed = allowed.map((value) => value.toLowerCase());
+    if (normalizedAllowed.length === 0) {
+      return requestedMode === "off" ? null : "on";
+    }
+    if (requestedMode === "off") {
+      const offIndex = normalizedAllowed.indexOf("off");
+      return offIndex >= 0 ? allowed[offIndex] : null;
+    }
+    const onIndex = normalizedAllowed.indexOf("on");
+    if (onIndex >= 0) {
+      return allowed[onIndex];
+    }
+    const preferredReasoningLevels = ["low", "medium", "high"];
+    for (const level of preferredReasoningLevels) {
+      const idx = normalizedAllowed.indexOf(level);
+      if (idx >= 0) {
+        return allowed[idx];
+      }
+    }
+    const defaultValue = (metadata?.reasoningDefault || "").trim();
+    if (defaultValue) {
+      return defaultValue;
+    }
+    return allowed[0] ?? null;
+  }
+
+  private extractTextSegments(value: unknown): string[] {
+    if (typeof value === "string") {
+      return value ? [value] : [];
+    }
+    if (Array.isArray(value)) {
+      return value.flatMap((item) => this.extractTextSegments(item));
+    }
+    const record = this.asRecord(value);
+    if (!record) {
+      return [];
+    }
+    const itemType = coerceString(record.type).trim().toLowerCase();
+    if (itemType === "reasoning" || itemType === "reasoning_content" || itemType === "thinking") {
+      return [];
+    }
+    const segments: string[] = [];
+    for (const key of ["text", "output_text", "content", "value"]) {
+      const nested = record[key];
+      if (typeof nested === "string") {
+        if (nested) {
+          segments.push(nested);
+        }
+      } else if (nested !== undefined) {
+        segments.push(...this.extractTextSegments(nested));
+      }
+    }
+    return segments;
+  }
+
+  private extractTextFromChatCompletionsPayload(payload: unknown): string {
+    const record = this.asRecord(payload);
+    if (!record) {
+      return "";
+    }
+    const parts: string[] = [];
+    const choices = Array.isArray(record.choices) ? record.choices : [];
+    const firstChoice = this.asRecord(choices[0]);
+    const message = this.asRecord(firstChoice?.message);
+    parts.push(...this.extractTextSegments(message?.content));
+    parts.push(...this.extractTextSegments(firstChoice?.text));
+    parts.push(...this.extractTextSegments(record.output_text));
+    return parts.join("").trim();
+  }
+
+  private extractTextFromResponsesPayload(payload: unknown): string {
+    const record = this.asRecord(payload);
+    if (!record) {
+      return "";
+    }
+    const parts: string[] = [];
+    parts.push(...this.extractTextSegments(record.output_text));
+    const output = Array.isArray(record.output) ? record.output : [];
+    for (const item of output) {
+      const outputItem = this.asRecord(item);
+      if (!outputItem) {
+        continue;
+      }
+      if (coerceString(outputItem.type).trim().toLowerCase() === "message") {
+        parts.push(...this.extractTextSegments(outputItem.content));
+      } else {
+        parts.push(...this.extractTextSegments(outputItem));
+      }
+    }
+    const nestedResponse = this.asRecord(record.response);
+    if (nestedResponse) {
+      parts.push(...this.extractTextSegments(nestedResponse.output_text));
+      const nestedOutput = Array.isArray(nestedResponse.output) ? nestedResponse.output : [];
+      for (const item of nestedOutput) {
+        parts.push(...this.extractTextSegments(item));
+      }
+    }
+    return parts.join("").trim();
+  }
+
+  private extractTextFromLmStudioNativeChatPayload(payload: unknown): string {
+    const record = this.asRecord(payload);
+    if (!record) {
+      return "";
+    }
+    const parts: string[] = [];
+    const output = Array.isArray(record.output) ? record.output : [];
+    for (const item of output) {
+      parts.push(...this.extractTextSegments(item));
+    }
+    return parts.join("").trim();
+  }
+
+  private async requestLmStudioNativeText(opts: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    systemPrompt: string;
+    userPrompt: string;
+    reasoningMode: "on" | "off";
+  }): Promise<string> {
+    const endpoint = this.buildLmStudioNativeChatUrl(opts.baseUrl);
+    if (!endpoint) {
+      throw new Error("LM Studio native chat endpoint is invalid.");
+    }
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (opts.apiKey) {
+      headers.Authorization = `Bearer ${opts.apiKey}`;
+    }
+    const lmStudioBudget = await this.getLmStudioPromptBudget(
+      opts.baseUrl,
+      opts.apiKey,
+      opts.model,
+      opts.systemPrompt,
+      opts.userPrompt
+    );
+    const effectiveSystemPrompt = lmStudioBudget?.systemPrompt ?? opts.systemPrompt;
+    const effectiveUserPrompt = lmStudioBudget?.userPrompt ?? opts.userPrompt;
+    const maxOutputTokens = lmStudioBudget?.maxOutputTokens;
+    const reasoningValue = await this.resolveLmStudioReasoningValue(
+      opts.baseUrl,
+      opts.apiKey,
+      opts.model,
+      opts.reasoningMode
+    );
+    const input = `${effectiveSystemPrompt}\n\n${effectiveUserPrompt}`.trim();
+    const payload: Record<string, unknown> = {
+      model: opts.model,
+      input,
+    };
+    if (reasoningValue) {
+      payload.reasoning = reasoningValue;
+    }
+    if (maxOutputTokens && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
+      payload.max_output_tokens = maxOutputTokens;
+    }
+    const response = await this.requestLocalApiRaw(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (response.statusCode >= 400) {
+      const details = response.body.toString("utf8");
+      throw new Error(`LM Studio native chat request failed (${response.statusCode}): ${details || "no response body"}`);
+    }
+    const parsed = JSON.parse(response.body.toString("utf8"));
+    const text = this.extractTextFromLmStudioNativeChatPayload(parsed);
+    if (!text) {
+      throw new Error("LM Studio native chat response missing content");
+    }
+    return text;
+  }
+
+  private buildCleanupModeMemoryKey(baseUrl: string, profileId: string, model: string): string {
+    return JSON.stringify({
+      provider: (profileId || "").trim() || (this.isLmStudioProvider(baseUrl, profileId) ? "lm-studio" : "custom"),
+      baseUrl: (baseUrl || "").trim().replace(/\/+$/, "").toLowerCase(),
+      model: (model || "").trim(),
+    });
+  }
+
+  private getCleanupModeMemoryEntry(key: string): CleanupModeMemoryEntry | null {
+    const record = this.asRecord(this.settings.llmCleanupModeMemory?.[key]);
+    if (!record) {
+      return null;
+    }
+    const mode = coerceString(record.mode).trim();
+    const lastPreferredProbeAt = Number(record.lastPreferredProbeAt);
+    const updatedAt = Number(record.updatedAt);
+    if (
+      (mode !== "lmstudio_native_reasoning_on" && mode !== "lmstudio_native_reasoning_off")
+      || !Number.isFinite(lastPreferredProbeAt)
+      || !Number.isFinite(updatedAt)
+    ) {
+      return null;
+    }
+    return {
+      mode,
+      lastPreferredProbeAt: Math.trunc(lastPreferredProbeAt),
+      updatedAt: Math.trunc(updatedAt),
+    };
+  }
+
+  private async setCleanupModeMemoryEntry(key: string, entry: CleanupModeMemoryEntry): Promise<void> {
+    const current = this.getCleanupModeMemoryEntry(key);
+    if (
+      current
+      && current.mode === entry.mode
+      && current.lastPreferredProbeAt === entry.lastPreferredProbeAt
+      && current.updatedAt === entry.updatedAt
+    ) {
+      return;
+    }
+    this.settings.llmCleanupModeMemory = {
+      ...(this.settings.llmCleanupModeMemory || {}),
+      [key]: entry,
+    };
+    await this.saveSettings();
+  }
+
+  private shouldReprobeCleanupPreferredMode(entry: CleanupModeMemoryEntry | null, now = Date.now()): boolean {
+    if (!entry) {
+      return true;
+    }
+    if (entry.mode === "lmstudio_native_reasoning_on") {
+      return false;
+    }
+    return now - entry.lastPreferredProbeAt >= CLEANUP_MODE_REPROBE_MS;
+  }
+
+  private isCleanupModeSwitchableError(message: string): boolean {
+    const text = (message || "").toLowerCase();
+    return (
+      text.includes("compute error")
+      || text.includes("internal_error")
+      || text.includes("reasoning setting")
+      || text.includes("not supported by model")
+      || text.includes("missing content")
+      || text.includes("response missing")
+    );
+  }
+
+  private buildLmStudioCleanupAttemptModes(
+    baseUrl: string,
+    profileId: string,
+    model: string
+  ): Array<CleanupLearnedMode> {
+    const cleanupMode: CleanupReasoningMode = this.settings.llmCleanupReasoningMode || "auto";
+    if (cleanupMode === "on") {
+      return ["lmstudio_native_reasoning_on"];
+    }
+    if (cleanupMode === "off") {
+      return ["lmstudio_native_reasoning_off"];
+    }
+    const key = this.buildCleanupModeMemoryKey(baseUrl, profileId, model);
+    const entry = this.getCleanupModeMemoryEntry(key);
+    const attempts: CleanupLearnedMode[] = [];
+    const push = (mode: CleanupLearnedMode): void => {
+      if (!attempts.includes(mode)) {
+        attempts.push(mode);
+      }
+    };
+    if (!entry) {
+      push("lmstudio_native_reasoning_on");
+      push("lmstudio_native_reasoning_off");
+      return attempts;
+    }
+    if (entry.mode === "lmstudio_native_reasoning_off") {
+      if (this.shouldReprobeCleanupPreferredMode(entry)) {
+        push("lmstudio_native_reasoning_on");
+      }
+      push("lmstudio_native_reasoning_off");
+      push("lmstudio_native_reasoning_on");
+      return attempts;
+    }
+    push("lmstudio_native_reasoning_on");
+    push("lmstudio_native_reasoning_off");
+    return attempts;
+  }
+
+  private async requestCleanupText(systemPrompt: string, userPrompt: string): Promise<string> {
+    const baseUrl = (this.settings.llmCleanupBaseUrl || "").trim().replace(/\/$/, "");
+    const model = (this.settings.llmCleanupModel || "").trim();
+    const apiKey = (this.settings.llmCleanupApiKey || "").trim();
+    const profileId = this.settings.llmCleanupProviderProfileId;
+    const isLmStudioCleanup = this.isLmStudioProvider(baseUrl, profileId);
+    if (!isLmStudioCleanup) {
+      return this.requestLlmText({
+        baseUrl,
+        apiKey,
+        model,
+        temperature: Number(this.settings.llmCleanupTemperature ?? 0),
+        systemPrompt,
+        userPrompt,
+        endpointMode: "chat",
+      });
+    }
+
+    const cleanupMode: CleanupReasoningMode = this.settings.llmCleanupReasoningMode || "auto";
+    const key = this.buildCleanupModeMemoryKey(baseUrl, profileId, model);
+    const attempts = this.buildLmStudioCleanupAttemptModes(baseUrl, profileId, model);
+    let preferredAttempted = false;
+    let lastError: unknown = null;
+
+    for (const mode of attempts) {
+      if (mode === "lmstudio_native_reasoning_on") {
+        preferredAttempted = true;
+      }
+      try {
+        const text = await this.requestLmStudioNativeText({
+          baseUrl,
+          apiKey,
+          model,
+          systemPrompt,
+          userPrompt,
+          reasoningMode: mode === "lmstudio_native_reasoning_on" ? "on" : "off",
+        });
+        if (cleanupMode === "auto") {
+          const now = Date.now();
+          const entry: CleanupModeMemoryEntry = {
+            mode,
+            lastPreferredProbeAt:
+              mode === "lmstudio_native_reasoning_on" || preferredAttempted
+                ? now
+                : (this.getCleanupModeMemoryEntry(key)?.lastPreferredProbeAt ?? 0),
+            updatedAt: now,
+          };
+          await this.setCleanupModeMemoryEntry(key, entry);
+        }
+        return text;
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const isLastAttempt = mode === attempts[attempts.length - 1];
+        if (cleanupMode !== "auto" || !this.isCleanupModeSwitchableError(message) || isLastAttempt) {
+          if (cleanupMode === "auto" && preferredAttempted && isLastAttempt) {
+            const existing = this.getCleanupModeMemoryEntry(key);
+            if (existing && existing.mode === "lmstudio_native_reasoning_off") {
+              await this.setCleanupModeMemoryEntry(key, {
+                ...existing,
+                lastPreferredProbeAt: Date.now(),
+                updatedAt: existing.updatedAt,
+              });
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    if (cleanupMode === "auto" && preferredAttempted) {
+      const existing = this.getCleanupModeMemoryEntry(key);
+      if (existing && existing.mode === "lmstudio_native_reasoning_off") {
+        await this.setCleanupModeMemoryEntry(key, {
+          ...existing,
+          lastPreferredProbeAt: Date.now(),
+        });
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async requestLlmText(opts: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    systemPrompt: string;
+    userPrompt: string;
+    temperature?: number;
+    endpointMode: "chat" | "responses";
+  }): Promise<string> {
+    const normalizedBase = (opts.baseUrl || "").trim().replace(/\/$/, "");
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (opts.apiKey) {
+      headers.Authorization = `Bearer ${opts.apiKey}`;
+    }
+    const lmStudioBudget = await this.getLmStudioPromptBudget(
+      normalizedBase,
+      opts.apiKey,
+      opts.model,
+      opts.systemPrompt,
+      opts.userPrompt
+    );
+    const effectiveSystemPrompt = lmStudioBudget?.systemPrompt ?? opts.systemPrompt;
+    const effectiveUserPrompt = lmStudioBudget?.userPrompt ?? opts.userPrompt;
+    const maxOutputTokens = lmStudioBudget?.maxOutputTokens;
+
+    const send = async (endpointMode: "chat" | "responses", includeTemperature: boolean): Promise<string> => {
+      const endpoint = `${normalizedBase}/${endpointMode === "responses" ? "responses" : "chat/completions"}`;
+      const payload: Record<string, unknown> = endpointMode === "responses"
+        ? {
+            model: opts.model,
+            instructions: effectiveSystemPrompt,
+            input: effectiveUserPrompt,
+          }
+        : {
+            model: opts.model,
+            messages: [
+              { role: "system", content: effectiveSystemPrompt },
+              { role: "user", content: effectiveUserPrompt },
+            ],
+          };
+      if (maxOutputTokens && Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
+        if (endpointMode === "responses") {
+          payload.max_output_tokens = maxOutputTokens;
+        } else {
+          payload.max_tokens = maxOutputTokens;
+        }
+      }
+      if (includeTemperature && Number.isFinite(opts.temperature ?? NaN)) {
+        payload.temperature = Number(opts.temperature);
+      }
+      const response = await this.requestLocalApiRaw(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (response.statusCode >= 400) {
+        const details = response.body.toString("utf8");
+        throw new Error(
+          `${endpointMode === "responses" ? "Responses" : "Chat"} request failed (${response.statusCode}): ${details || "no response body"}`
+        );
+      }
+      const parsed = JSON.parse(response.body.toString("utf8"));
+      const text = endpointMode === "responses"
+        ? this.extractTextFromResponsesPayload(parsed)
+        : this.extractTextFromChatCompletionsPayload(parsed);
+      if (!text) {
+        throw new Error(
+          endpointMode === "responses"
+            ? "Responses response missing content"
+            : "Chat response missing content"
+        );
+      }
+      return text;
+    };
+
+    const tryMode = async (endpointMode: "chat" | "responses"): Promise<string> => {
+      try {
+        return await send(endpointMode, true);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.isTemperatureUnsupportedMessage(message)) {
+          return send(endpointMode, false);
+        }
+        throw error;
+      }
+    };
+
+    if (opts.endpointMode === "responses") {
+      try {
+        return await tryMode("responses");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.isResponsesEndpointUnsupportedMessage(message)) {
+          return tryMode("chat");
+        }
+        throw error;
+      }
+    }
+
+    return tryMode("chat");
   }
 
   private logOptionalLookupFailure(context: string, error: unknown): void {
@@ -5096,47 +5765,14 @@ export default class ZoteroRagPlugin extends Plugin {
       this.openPluginSettings();
       return null;
     }
-    const endpoint = `${baseUrl}/chat/completions`;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    const apiKey = (this.settings.llmCleanupApiKey || "").trim();
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-    }
-    const payload = {
-      model,
-      temperature: Number(this.settings.llmCleanupTemperature ?? 0),
-      messages: [
-        {
-          role: "system",
-          content: this.getOcrCleanupSystemPrompt(),
-        },
-        { role: "user", content: text },
-      ],
-    };
     try {
-      const response = await this.requestLocalApiRaw(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      });
-      if (response.statusCode >= 400) {
-        const details = response.body.toString("utf8");
-        throw new Error(`Cleanup request failed (${response.statusCode}): ${details || "no response body"}`);
-      }
-      const data = JSON.parse(response.body.toString("utf8"));
-      const content =
-        data?.choices?.[0]?.message?.content ??
-        data?.choices?.[0]?.text ??
-        data?.output_text ??
-        "";
-      const cleaned = this.escapeGenderStars(String(content || "").trim());
-      if (!cleaned) {
+      const cleaned = await this.requestCleanupText(this.getOcrCleanupSystemPrompt(), text);
+      const escaped = this.escapeGenderStars(String(cleaned || "").trim());
+      if (!escaped) {
         new Notice("Cleanup returned empty text.");
         return null;
       }
-      return cleaned;
+      return escaped;
     } catch (error) {
       console.error("OCR cleanup failed", error);
       new Notice("Ocr cleanup failed. Check the cleanup model settings.");
@@ -5223,14 +5859,6 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!snippet) {
       return [];
     }
-    const endpoint = `${baseUrl}/chat/completions`;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    const apiKey = (this.settings.llmCleanupApiKey || "").trim();
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-    }
     const maxTags = 5;
     const systemPrompt = (
       "Return 3 to 5 high-signal, concrete noun-phrase tags. "
@@ -5238,56 +5866,9 @@ export default class ZoteroRagPlugin extends Plugin {
       + "Prefer specific entities, methods, datasets, and named concepts. "
       + "Output comma-separated tags only. No extra text."
     );
-    const temperatureRaw = Number(this.settings.llmCleanupTemperature ?? 0);
-    const basePayload: Record<string, unknown> = {
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: snippet },
-      ],
-    };
-    if (Number.isFinite(temperatureRaw)) {
-      basePayload.temperature = temperatureRaw;
-    }
     this.showStatusProgress("Generating tags...", null);
     try {
-      const send = async (payload: Record<string, unknown>): Promise<Buffer> => {
-        const response = await this.requestLocalApiRaw(endpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(payload),
-        });
-        if (response.statusCode >= 400) {
-          const details = response.body.toString("utf8");
-          throw new Error(`Tag request failed (${response.statusCode}): ${details || "no response body"}`);
-        }
-        return response.body;
-      };
-
-      let body: Buffer;
-      try {
-        body = await send(basePayload);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (
-          "temperature" in basePayload
-          && /temperature/i.test(message)
-          && /unsupported|default/i.test(message)
-        ) {
-          const retryPayload = { ...basePayload };
-          delete retryPayload.temperature;
-          body = await send(retryPayload);
-        } else {
-          throw error;
-        }
-      }
-
-      const data = JSON.parse(body.toString("utf8"));
-      const content =
-        data?.choices?.[0]?.message?.content ??
-        data?.choices?.[0]?.text ??
-        data?.output_text ??
-        "";
+      const content = await this.requestCleanupText(systemPrompt, snippet);
       const tags = this.parseChunkTags(String(content || ""), maxTags);
       if (!tags.length) {
         new Notice("Tag generation returned no tags.");

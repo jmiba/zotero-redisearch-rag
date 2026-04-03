@@ -23,6 +23,13 @@ export type OcrEngine =
   | "paddle_vl_api";
 export type ChunkingMode = "page" | "section";
 export type AnnotationColorMap = Record<string, { heading: string; callout: string }>;
+export type CleanupReasoningMode = "auto" | "on" | "off";
+export type CleanupLearnedMode = "lmstudio_native_reasoning_on" | "lmstudio_native_reasoning_off";
+export type CleanupModeMemoryEntry = {
+  mode: CleanupLearnedMode;
+  lastPreferredProbeAt: number;
+  updatedAt: number;
+};
 
 export type OcrEngineAvailability = {
   tesseract: boolean;
@@ -135,6 +142,8 @@ export interface ZoteroRagSettings {
   llmCleanupTemperature: number;
   llmCleanupMinQuality: number;
   llmCleanupMaxChars: number;
+  llmCleanupReasoningMode: CleanupReasoningMode;
+  llmCleanupModeMemory: Record<string, CleanupModeMemoryEntry>;
   enableFileLogging: boolean;
   logFilePath: string;
   createOcrLayeredPdf: boolean;
@@ -285,6 +294,8 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   llmCleanupTemperature: 0.0,
   llmCleanupMinQuality: 0.35,
   llmCleanupMaxChars: 2000,
+  llmCleanupReasoningMode: "auto",
+  llmCleanupModeMemory: {},
 
   // Text Embedding
   embedProviderProfileId: "lm-studio",
@@ -1635,6 +1646,22 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             .onChange(async (value) => {
               const parsed = Number.parseFloat(value);
               this.plugin.settings.llmCleanupTemperature = Number.isFinite(parsed) ? parsed : 0.0;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(tabEl)
+        .setName("Cleanup reasoning mode")
+        .setDesc("Automatically learn the best cleanup mode for the selected provider and model, and reprobe reasoning every 30 days.")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("auto", "Automatic")
+            .addOption("on", "Reasoning on")
+            .addOption("off", "Reasoning off")
+            .setValue(this.plugin.settings.llmCleanupReasoningMode)
+            .onChange(async (value) => {
+              this.plugin.settings.llmCleanupReasoningMode =
+                value === "on" || value === "off" ? value : "auto";
               await this.plugin.saveSettings();
             })
         );
