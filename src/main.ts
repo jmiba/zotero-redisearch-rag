@@ -130,6 +130,9 @@ const RAG_WORKER_BASE_TIMEOUT_SEC = 180;
 const RAG_WORKER_RERANK_TIMEOUT_SEC = 120;
 const RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC = 90;
 const IMPORT_WORKER_TIMEOUT_SEC = 900;
+const IMPORT_WORKER_TIMEOUT_PER_PAGE_SEC = 12;
+const IMPORT_WORKER_TIMEOUT_MAX_SEC = 10800;
+const PDF_PAGE_COUNT_TIMEOUT_SEC = 30;
 const MAX_CITATION_TITLE_LENGTH = 80;
 const ANNOTATION_SYNC_GRACE_MS = 120000;
 const CLEANUP_MODE_REPROBE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -949,6 +952,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
     let qualityLabel: string | null = null;
+    const importWorkerTimeoutSec = await this.getImportWorkerTimeoutSec(pdfSourcePath);
 
     try {
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
@@ -968,7 +972,7 @@ export default class ZoteroRagPlugin extends Plugin {
         doclingLogPath,
         "docling_extract",
         undefined,
-        IMPORT_WORKER_TIMEOUT_SEC
+        importWorkerTimeoutSec
       );
       qualityLabel = await this.readDoclingQualityLabel(stagedChunkPath);
       await this.annotateChunkJsonWithAttachmentKey(stagedChunkPath, attachment.key);
@@ -1047,7 +1051,7 @@ export default class ZoteroRagPlugin extends Plugin {
         null,
         "docling_extract",
         undefined,
-        IMPORT_WORKER_TIMEOUT_SEC
+        importWorkerTimeoutSec
       );
     } catch (error) {
       const message = this.getPythonErrorMessage(error);
@@ -1099,6 +1103,11 @@ export default class ZoteroRagPlugin extends Plugin {
         if (classification === "rate_limited") {
           this.clearStatusProgress();
           new Notice(this.getEmbeddingRateLimitMessage("retry_import"));
+          return;
+        }
+        if (this.isLmStudioTagModelUnloadedMessage(message)) {
+          this.clearStatusProgress();
+          new Notice(this.getLmStudioTagModelUnloadedMessage("retry_import"));
           return;
         }
         if (classification === "embed_failure") {
@@ -1679,6 +1688,40 @@ export default class ZoteroRagPlugin extends Plugin {
       timeoutSec += Math.max(RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC, iters * RAG_WORKER_AGENTIC_STEP_TIMEOUT_SEC);
     }
     return Math.min(3600, Math.max(60, timeoutSec));
+  }
+
+  private async getPdfPageCount(pdfPath: string): Promise<number | null> {
+    const pluginDir = this.getPluginDir();
+    const scriptPath = path.join(pluginDir, "tools", "pdf_page_count.py");
+    try {
+      const output = await this.runPythonWithOutput(
+        scriptPath,
+        ["--pdf", pdfPath],
+        null,
+        "pdf_page_count",
+        PDF_PAGE_COUNT_TIMEOUT_SEC
+      );
+      const parsed = JSON.parse(output || "{}");
+      const pages = Number((parsed as { pages?: unknown }).pages);
+      if (Number.isFinite(pages) && pages > 0) {
+        return Math.trunc(pages);
+      }
+    } catch (error) {
+      console.debug("Failed to read PDF page count for timeout budgeting", error);
+    }
+    return null;
+  }
+
+  private async getImportWorkerTimeoutSec(pdfPath: string): Promise<number> {
+    const pages = await this.getPdfPageCount(pdfPath);
+    if (!pages) {
+      return IMPORT_WORKER_TIMEOUT_SEC;
+    }
+    const scaled = Math.max(
+      IMPORT_WORKER_TIMEOUT_SEC,
+      300 + pages * IMPORT_WORKER_TIMEOUT_PER_PAGE_SEC
+    );
+    return Math.min(IMPORT_WORKER_TIMEOUT_MAX_SEC, scaled);
   }
 
   private isRagQueryCancellationMessage(message: string): boolean {
@@ -2933,6 +2976,36 @@ export default class ZoteroRagPlugin extends Plugin {
     return "Chat provider rate limit exceeded. Wait and retry.";
   }
 
+  private isLmStudioTagModelUnloadedMessage(message: string): boolean {
+    if (
+      !this.isLmStudioProvider(
+        this.settings.llmCleanupBaseUrl,
+        this.settings.llmCleanupProviderProfileId
+      )
+    ) {
+      return false;
+    }
+    const text = (message || "").toLowerCase();
+    return (
+      text.includes("tag request failed") &&
+      text.includes("model unloaded")
+    );
+  }
+
+  private getLmStudioTagModelUnloadedMessage(
+    action: "retry" | "retry_import" | "rerun_reindexing"
+  ): string {
+    switch (action) {
+      case "retry_import":
+        return "LM Studio tagging model is unloaded. Load the cleanup/tagging model in LM Studio and retry import.";
+      case "rerun_reindexing":
+        return "LM Studio tagging model is unloaded. Load the cleanup/tagging model in LM Studio and rerun reindexing.";
+      case "retry":
+      default:
+        return "LM Studio tagging model is unloaded. Load the cleanup/tagging model in LM Studio and retry.";
+    }
+  }
+
   private isLmStudioProvider(baseUrlRaw: string, profileId = ""): boolean {
     if ((profileId || "").trim() === "lm-studio") {
       return true;
@@ -4049,7 +4122,9 @@ export default class ZoteroRagPlugin extends Plugin {
           this.lastReindexFailure = "rate_limited";
         } else {
           new Notice(
-            "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
+            this.isLmStudioTagModelUnloadedMessage(abortReason.message)
+              ? this.getLmStudioTagModelUnloadedMessage("rerun_reindexing")
+              : "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
           );
           this.lastReindexFailure = "embed_failure";
         }
@@ -4197,7 +4272,9 @@ export default class ZoteroRagPlugin extends Plugin {
         this.lastReindexFailure = "embed_failure";
         if (showNotices) {
           new Notice(
-            "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
+            this.isLmStudioTagModelUnloadedMessage(message)
+              ? this.getLmStudioTagModelUnloadedMessage("rerun_reindexing")
+              : "Embedding provider error detected. Fix the provider/model settings and rerun reindexing."
           );
         }
       } else if (showNotices) {
@@ -4285,7 +4362,11 @@ export default class ZoteroRagPlugin extends Plugin {
         return;
       }
       if (classification === "embed_failure") {
-        new Notice("Embedding provider error detected. Fix the provider/model settings and rerun.");
+        new Notice(
+          this.isLmStudioTagModelUnloadedMessage(message)
+            ? this.getLmStudioTagModelUnloadedMessage("retry")
+            : "Embedding provider error detected. Fix the provider/model settings and rerun."
+        );
       }
     }
   }
@@ -5876,7 +5957,12 @@ export default class ZoteroRagPlugin extends Plugin {
       return tags;
     } catch (error) {
       console.error("Tag generation failed", error);
-      new Notice("Tag generation failed. Check the cleanup model settings.");
+      const message = this.getPythonErrorMessage(error);
+      new Notice(
+        this.isLmStudioTagModelUnloadedMessage(message)
+          ? this.getLmStudioTagModelUnloadedMessage("retry")
+          : "Tag generation failed. Check the cleanup model settings."
+      );
       return null;
     } finally {
       this.clearStatusProgress();

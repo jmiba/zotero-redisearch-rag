@@ -1,4 +1,15 @@
 # Changelog
+## 0.9.27 (Bugfix Release)
+- Scale Docling/import worker timeouts with PDF length:
+  - add a small PDF page-count helper to estimate document size before import,
+  - increase the worker timeout automatically for longer PDFs while keeping sensible minimum and maximum caps.
+- Improve LM Studio tagging/cleanup error handling:
+  - detect unloaded LM Studio tagging models more explicitly,
+  - show targeted notices for imports, reindexing, and tag generation instead of generic embedding-provider failures.
+- Improve Hunspell dictionary discovery and caching for Docling cleanup:
+  - search both bundled and temp-cache Hunspell directories,
+  - download fallback dictionaries into a shared cache directory instead of the bundled tools folder.
+
 ## 0.9.26 (Bugfix Release)
 - Improve LM Studio compatibility for chat requests and title generation:
   - use the `/responses` API automatically for LM Studio chat/title requests when appropriate,

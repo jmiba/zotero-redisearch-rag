@@ -12,6 +12,7 @@ import random
 import re
 import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -42,6 +43,17 @@ LOGGER = logging.getLogger("docling_extract")
 # Example: {"backend": "spylls", "aff": "/path/en_GB.aff", "dic": "/path/en_GB.dic"}
 LAST_SPELLCHECKER_INFO: Dict[str, Any] = {}
 SPELLCHECKER_CACHE: Dict[str, Any] = {}
+
+
+def get_hunspell_bundle_dir() -> str:
+    return os.path.join(os.path.dirname(__file__), "hunspell")
+
+
+def get_hunspell_cache_dir() -> str:
+    override = os.environ.get("ZRR_HUNSPELL_CACHE_DIR", "").strip()
+    if override:
+        return override
+    return os.path.join(tempfile.gettempdir(), "zrr-hunspell")
 
 
 def eprint(message: str) -> None:
@@ -1909,7 +1921,7 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         if aff and dic and os.path.isfile(aff) and os.path.isfile(dic):
             pairs.append((aff, dic))
             return pairs
-        base_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        base_dirs = [get_hunspell_bundle_dir(), get_hunspell_cache_dir()]
         lang = (languages or "").lower()
         try_codes: List[str] = []
         if any(t in lang for t in ("de", "deu", "german", "deutsch")):
@@ -1919,22 +1931,25 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         if not try_codes:
             try_codes = ["en_US"]
         # Exact matches first
-        for code in try_codes:
-            aff_path = os.path.join(base_dir, f"{code}.aff")
-            dic_path = os.path.join(base_dir, f"{code}.dic")
-            if os.path.isfile(aff_path) and os.path.isfile(dic_path):
-                pairs.append((aff_path, dic_path))
+        for base_dir in base_dirs:
+            for code in try_codes:
+                aff_path = os.path.join(base_dir, f"{code}.aff")
+                dic_path = os.path.join(base_dir, f"{code}.dic")
+                if os.path.isfile(aff_path) and os.path.isfile(dic_path):
+                    pairs.append((aff_path, dic_path))
         if pairs:
             return pairs
 
         # Flexible matching: accept stems like de_DE_frami.* or en_US-large.* when both files share the same stem
-        try:
-            names = os.listdir(base_dir)
-        except Exception:
-            names = []
-        stems_with_aff = {n[:-4] for n in names if n.endswith(".aff")}
-        stems_with_dic = {n[:-4] for n in names if n.endswith(".dic")}
-        common_stems = list(stems_with_aff & stems_with_dic)
+        common_stems: List[Tuple[str, str]] = []
+        for base_dir in base_dirs:
+            try:
+                names = os.listdir(base_dir)
+            except Exception:
+                names = []
+            stems_with_aff = {n[:-4] for n in names if n.endswith(".aff")}
+            stems_with_dic = {n[:-4] for n in names if n.endswith(".dic")}
+            common_stems.extend((base_dir, stem) for stem in (stems_with_aff & stems_with_dic))
 
         def stem_priority(stem: str, code: str) -> int:
             # Higher number = higher priority
@@ -1948,11 +1963,11 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
 
         for code in try_codes:
             candidates = sorted(
-                [s for s in common_stems if stem_priority(s, code) > 0],
-                key=lambda s: stem_priority(s, code),
+                [(base_dir, stem) for base_dir, stem in common_stems if stem_priority(stem, code) > 0],
+                key=lambda item: stem_priority(item[1], code),
                 reverse=True,
             )
-            for stem in candidates:
+            for base_dir, stem in candidates:
                 aff_path = os.path.join(base_dir, f"{stem}.aff")
                 dic_path = os.path.join(base_dir, f"{stem}.dic")
                 if os.path.isfile(aff_path) and os.path.isfile(dic_path):
@@ -2023,7 +2038,7 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         dic_name = f"{prefix}.dic"
         aff_url = base_url + aff_name
         dic_url = base_url + dic_name
-        out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        out_dir = get_hunspell_cache_dir()
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as exc:
@@ -2203,17 +2218,20 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
                 LOGGER.warning("Naive .dic load failed for %s: %s", path, exc)
             return None
 
-        # Prefer .dic paths discovered via resolve_paths(); otherwise scan tools/hunspell
+        # Prefer .dic paths discovered via resolve_paths(); otherwise scan bundled/cache hunspell dirs
         dic_paths: List[str] = []
         for _aff, _dic in pairs:
             if os.path.isfile(_dic):
                 dic_paths.append(_dic)
         if not dic_paths:
-            base_dir = os.path.join(os.path.dirname(__file__), "hunspell")
-            try:
-                candidates = [os.path.join(base_dir, name) for name in os.listdir(base_dir) if name.endswith(".dic")]
-            except Exception:
-                candidates = []
+            candidates: List[str] = []
+            for base_dir in [get_hunspell_bundle_dir(), get_hunspell_cache_dir()]:
+                try:
+                    candidates.extend(
+                        os.path.join(base_dir, name) for name in os.listdir(base_dir) if name.endswith(".dic")
+                    )
+                except Exception:
+                    continue
             lang = (languages or "").lower()
             filtered: List[str] = []
             for p in candidates:
@@ -5098,7 +5116,7 @@ def main() -> int:
         dic_name = f"{prefix}.dic"
         aff_url = base_url + aff_name
         dic_url = base_url + dic_name
-        out_dir = os.path.join(os.path.dirname(__file__), "hunspell")
+        out_dir = get_hunspell_cache_dir()
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as exc:
