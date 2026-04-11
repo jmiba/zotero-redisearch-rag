@@ -7,6 +7,19 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.10.0",
+    markdown: `- Add optional follow-up query rewriting for retrieval:
+  - new \`Rewrite follow-up queries\` setting rewrites the current chat turn into a standalone retrieval query using recent chat history,
+  - the rewritten query is used for retrieval, query expansion, reranking, and annotation lookup,
+  - the original user wording is still preserved for answer generation.
+- Improve chat-session safety while a response is streaming:
+  - disable switching, renaming, deleting, and creating chat sessions while the current response is still in flight,
+  - show clearer notices when a session action is blocked until the response is finished or canceled.
+- Improve chat request parsing and docs:
+  - preserve streamed whitespace more reliably when parsing chat/responses payloads,
+  - document follow-up query rewriting in the README, chat-panel docs, retrieval-ranking docs, and settings reference.`,
+  },
+  {
     version: "0.9.28",
     markdown: `- Surface import timeout budgeting more clearly during Docling imports:
   - compute a page-aware timeout budget up front,

@@ -45,6 +45,11 @@ export type RagQueryFinalPayload = {
   answer?: string;
   citations?: ChatCitation[];
   retrieved?: ChatRetrievedChunk[];
+  query?: string;
+  raw_query?: string;
+  retrieval_query?: string;
+  query_rewritten?: boolean;
+  expanded_queries?: string[];
 };
 
 const ZOTERO_ITEM_TYPE_ICON_MAP: Record<string, string> = {
@@ -262,6 +267,25 @@ export class ZoteroChatView extends ItemView {
     }
   }
 
+  private updateSessionControlsState(): void {
+    const busyTitle = "Finish or cancel the current response first";
+    const setBusyState = (
+      control: HTMLButtonElement | HTMLSelectElement | undefined,
+      defaultTitle: string
+    ): void => {
+      if (!control) {
+        return;
+      }
+      control.disabled = this.busy;
+      control.setAttr("title", this.busy ? busyTitle : defaultTitle);
+    };
+
+    setBusyState(this.sessionSelect, "Switch chat session");
+    setBusyState(this.renameButton, "Rename the current chat");
+    setBusyState(this.deleteButton, "Delete this chat");
+    setBusyState(this.newButton, "Start a new chat session");
+  }
+
   private async loadSessions(): Promise<void> {
     const sessions = await this.plugin.listChatSessions();
     this.activeSessionId = await this.plugin.getActiveChatSessionId();
@@ -278,9 +302,14 @@ export class ZoteroChatView extends ItemView {
       await this.plugin.setActiveChatSessionId(this.activeSessionId);
       this.sessionSelect.value = this.activeSessionId;
     }
+    this.updateSessionControlsState();
   }
 
   private async promptRenameSession(): Promise<void> {
+    if (this.busy) {
+      new Notice("Finish or cancel the current response before renaming this chat.");
+      return;
+    }
     const sessions = await this.plugin.listChatSessions();
     const current = sessions.find((s) => s.id === this.activeSessionId);
     const modal = new RenameChatModal(this.app, current?.name ?? "New chat", async (name) => {
@@ -291,6 +320,10 @@ export class ZoteroChatView extends ItemView {
   }
 
   private async startNewChat(): Promise<void> {
+    if (this.busy) {
+      new Notice("Finish or cancel the current response before starting a new chat.");
+      return;
+    }
     await this.plugin.saveChatHistoryForSession(this.activeSessionId, this.messages);
     await this.plugin.finalizeChatSessionNameIfNeeded(this.activeSessionId, this.messages, { force: true });
     const sessionId = await this.plugin.createChatSession("New chat");
@@ -298,6 +331,10 @@ export class ZoteroChatView extends ItemView {
   }
 
   private async deleteChat(): Promise<void> {
+    if (this.busy) {
+      new Notice("Finish or cancel the current response before deleting this chat.");
+      return;
+    }
     const sessions = await this.plugin.listChatSessions();
     if (sessions.length <= 1) {
       new Notice("You must keep at least one chat.");
@@ -319,6 +356,11 @@ export class ZoteroChatView extends ItemView {
     sessionId: string,
     options: { skipSave?: boolean } = {}
   ): Promise<void> {
+    if (this.busy) {
+      this.sessionSelect.value = this.activeSessionId;
+      new Notice("Finish or cancel the current response before switching chats.");
+      return;
+    }
     if (!sessionId || sessionId === this.activeSessionId) {
       return;
     }
@@ -556,6 +598,7 @@ export class ZoteroChatView extends ItemView {
     if (!this.sendButton) {
       return;
     }
+    this.updateSessionControlsState();
     if (this.busy) {
       this.sendButton.disabled = this.cancelPending;
       setIcon(this.sendButton, this.cancelPending ? "loader-2" : "square");

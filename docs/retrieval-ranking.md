@@ -13,6 +13,17 @@ Results from both are combined using **RRF (Reciprocal Rank Fusion)**, which bal
 ## Retrieval fallback (auto‑broadening)
 If the first search looks weak (too few chunks, too little text, or weak scores), the plugin automatically broadens the search and tries again with more candidates.
 
+## Optional chat-history query rewriting
+You can enable **Rewrite follow-up queries** to normalize the current chat turn into a standalone retrieval query before search.
+
+This is useful when your current question depends on earlier chat context, for example:
+
+- pronoun-heavy follow-ups
+- short refinement questions
+- multilingual follow-ups that refer back to previous turns
+
+The rewritten query is used only for retrieval. The answer prompt still uses your original wording, so the assistant responds to what you asked rather than to the rewritten form.
+
 ## Optional agentic RAG planner
 You can enable **agentic retrieval** to run a lightweight planner step before answer generation.
 
@@ -32,6 +43,11 @@ Notes:
 
 ## Optional query expansion
 You can enable **query expansion** to generate a few alternative queries for short or ambiguous questions. This can improve recall when the exact wording isn’t present in the PDFs.
+
+Query rewriting and query expansion are separate:
+
+- **Query rewriting** resolves conversational context into one standalone retrieval query.
+- **Query expansion** generates additional alternative retrieval variants from that query.
 
 ## Optional cross‑encoder reranking
 You can enable a **cross‑encoder reranker** to re‑score the candidate chunks with a more precise model. This is slower but can improve ranking quality.

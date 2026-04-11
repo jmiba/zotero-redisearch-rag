@@ -1862,6 +1862,9 @@ export default class ZoteroRagPlugin extends Plugin {
         String(Math.max(1, Math.trunc(this.settings.queryExpansionCount)))
       );
     }
+    if (this.settings.enableFollowUpRewrite) {
+      args.push("--rewrite-followups");
+    }
     if (this.settings.enableCrossEncoderRerank) {
       args.push("--rerank");
       const model = (this.settings.rerankModel || "").trim();

@@ -119,6 +119,7 @@ export interface ZoteroRagSettings {
   lastSeenReleaseNotesVersion: string;
   enableAgenticRag: boolean;
   agenticMaxIters: number;
+  enableFollowUpRewrite: boolean;
   enableQueryExpansion: boolean;
   queryExpansionCount: number;
   enableCrossEncoderRerank: boolean;
@@ -320,6 +321,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatPaneLocation: "right",
   enableAgenticRag: false,
   agenticMaxIters: 2,
+  enableFollowUpRewrite: false,
   enableQueryExpansion: false,
   queryExpansionCount: 3,
   enableCrossEncoderRerank: false,
@@ -2132,6 +2134,16 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.enableQueryExpansion).onChange(async (value) => {
             this.plugin.settings.enableQueryExpansion = value;
+            await this.plugin.saveSettings();
+          })
+        );
+
+      new Setting(tabEl)
+        .setName("Rewrite follow-up queries")
+        .setDesc("Rewrite chat queries into standalone retrieval queries using recent chat history.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableFollowUpRewrite).onChange(async (value) => {
+            this.plugin.settings.enableFollowUpRewrite = value;
             await this.plugin.saveSettings();
           })
         );

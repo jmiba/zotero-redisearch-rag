@@ -49,7 +49,14 @@ If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-
 - **Chat**: Model selection, temperature, history size, panel location.
 - **Cleanup**: Model and thresholds for OCR cleanup.
 - **Tagging**: Optional LLM‑generated chunk tags.
-- **Retrieval tuning**: Agentic planner mode, query expansion, reranking, RRF, max‑per‑doc caps.
+- **Retrieval tuning**: Chat-history query rewriting, agentic planner mode, query expansion, reranking, RRF, max‑per‑doc caps.
+
+### Retrieval tuning details
+- **Rewrite follow-up queries**: Rewrites the current chat message into a standalone retrieval query using recent chat history before search. This is useful for follow-up questions and multilingual chat threads.
+- **Enable agentic retrieval**: Lets a lightweight planner decide whether to keep current context, retry with broader retrieval, or pull more chunks from one document.
+- **Enable query expansion**: Generates additional retrieval variants from the current retrieval query.
+- **Enable cross-encoder reranking**: Re-scores retrieved candidates with a more precise reranker model.
+- **RRF / max-per-doc**: Controls rank fusion and how strongly one document can dominate the final context set.
 
 ## Maintenance
 - **Use local runtime (legacy)**: One-click switch to local interpreter/venv mode and enables advanced runtime settings.

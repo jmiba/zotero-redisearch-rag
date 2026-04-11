@@ -188,7 +188,7 @@ def extract_text_segments(value: Any) -> List[str]:
     return segments
 
 
-def extract_text_from_chat_payload(data: Dict[str, Any]) -> str:
+def extract_text_from_chat_payload(data: Dict[str, Any], preserve_whitespace: bool = False) -> str:
     parts: List[str] = []
     choices = data.get("choices")
     if isinstance(choices, list) and choices:
@@ -197,10 +197,11 @@ def extract_text_from_chat_payload(data: Dict[str, Any]) -> str:
         parts.extend(extract_text_segments(message.get("content")))
         parts.extend(extract_text_segments(first.get("text")))
     parts.extend(extract_text_segments(data.get("output_text")))
-    return "".join(parts).strip()
+    content = "".join(parts)
+    return content if preserve_whitespace else content.strip()
 
 
-def extract_text_from_responses_payload(data: Dict[str, Any]) -> str:
+def extract_text_from_responses_payload(data: Dict[str, Any], preserve_whitespace: bool = False) -> str:
     parts: List[str] = []
     parts.extend(extract_text_segments(data.get("output_text")))
     output = data.get("output")
@@ -221,7 +222,8 @@ def extract_text_from_responses_payload(data: Dict[str, Any]) -> str:
             for item in nested_output:
                 if isinstance(item, dict):
                     parts.extend(extract_text_segments(item))
-    return "".join(parts).strip()
+    content = "".join(parts)
+    return content if preserve_whitespace else content.strip()
 
 
 def extract_error_message(payload: Any) -> str:
@@ -388,7 +390,7 @@ def request_responses_stream(
             completed_payload = payload_data
             return False
         if not content_parts:
-            piece = extract_text_from_responses_payload(payload_data)
+            piece = extract_text_from_responses_payload(payload_data, preserve_whitespace=True)
             if piece:
                 if first_token_ms is None:
                     first_token_ms = int((time.perf_counter() - started_at) * 1000)
@@ -420,7 +422,7 @@ def request_responses_stream(
         completed_error = extract_error_message(completed_payload)
         if completed_error:
             raise RuntimeError(f"Responses request failed: {completed_error}")
-        fallback = extract_text_from_responses_payload(completed_payload)
+        fallback = extract_text_from_responses_payload(completed_payload, preserve_whitespace=True)
         if fallback:
             content_parts.append(fallback)
 
@@ -591,10 +593,12 @@ def request_chat_stream(
             raise AbortRequested("Request aborted while waiting for stream tokens.")
         if not raw_line:
             continue
-        line = raw_line.strip()
+        line = raw_line.rstrip("\r")
         if not line.startswith("data:"):
             continue
-        data = line[5:].strip()
+        data = line[5:]
+        if data.startswith(" "):
+            data = data[1:]
         if data == "[DONE]":
             break
         try:
@@ -610,7 +614,10 @@ def request_chat_stream(
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
-        piece = extract_text_from_chat_payload({"choices": [{"message": {"content": delta.get("content")}}]})
+        piece = extract_text_from_chat_payload(
+            {"choices": [{"message": {"content": delta.get("content")}}]},
+            preserve_whitespace=True,
+        )
         if not piece:
             piece = extract_text_segments(delta.get("content"))
             piece = "".join(piece)
@@ -668,6 +675,76 @@ def parse_json_list(raw: str) -> List[str]:
     return [line for line in lines if line]
 
 
+def parse_single_text_value(raw: str) -> str:
+    if not raw:
+        return ""
+    text = raw.strip()
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        for key in ("query", "rewritten_query", "rewrite", "text", "output"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                break
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, str) and item.strip():
+                text = item.strip()
+                break
+    lines = [line.strip(" `\"'\t") for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return lines[0].strip(" `\"'")
+
+
+def rewrite_follow_up_query(
+    base_url: str,
+    api_key: str,
+    model: str,
+    query: str,
+    history_messages: List[Dict[str, Any]],
+    should_abort: Optional[Callable[[], bool]] = None,
+    endpoint_mode: str = "chat",
+) -> str:
+    if not base_url or not model or not query or not history_messages:
+        return query
+    history_block = format_history_block(history_messages)
+    if not history_block:
+        return query
+    system_prompt = (
+        "Rewrite the user's latest message into a standalone retrieval query. "
+        "Resolve pronouns and omitted subjects using the chat history. "
+        "Do not answer the question. Output only the rewritten query as a single line. "
+        "If the latest message is already standalone, repeat it."
+    )
+    user_prompt = (
+        f"Chat history:\n{history_block}\n\n"
+        f"Latest user message: {query}\n\n"
+        "Standalone retrieval query:"
+    )
+    try:
+        response = request_chat(
+            base_url,
+            api_key,
+            model,
+            0.0,
+            system_prompt,
+            user_prompt,
+            should_abort=should_abort,
+            endpoint_mode=endpoint_mode,
+        )
+    except Exception as exc:
+        eprint(f"Follow-up rewrite failed: {exc}")
+        return query
+    rewritten = parse_single_text_value(response)
+    if not rewritten:
+        return query
+    return rewritten
+
+
 def expand_query(
     base_url: str,
     api_key: str,
@@ -675,6 +752,7 @@ def expand_query(
     query: str,
     count: int,
     should_abort: Optional[Callable[[], bool]] = None,
+    endpoint_mode: str = "chat",
 ) -> List[str]:
     if not base_url or not model or not query or count <= 0:
         return []
@@ -696,6 +774,7 @@ def expand_query(
             system_prompt,
             user_prompt,
             should_abort=should_abort,
+            endpoint_mode=endpoint_mode,
         )
         expanded = parse_json_list(response)
     except Exception as exc:
@@ -1862,6 +1941,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--history-file", help="Optional JSON file with recent chat history")
+    parser.add_argument("--rewrite-followups", action="store_true")
     parser.add_argument("--expand-query", action="store_true")
     parser.add_argument("--expand-count", type=int, default=3)
     parser.add_argument("--rerank", action="store_true")
@@ -1915,6 +1995,8 @@ def run_with_args(
     expanded_queries: List[str] = []
     raw_query = args.query
     query_for_display = raw_query
+    retrieval_query = raw_query
+    query_rewritten = False
     index_dim_cache: Optional[int] = None
     rrf_k = max(1, int(args.rrf_k or _RRF_K))
     rrf_log_top = max(0, int(args.rrf_log_top or 0))
@@ -1928,6 +2010,36 @@ def run_with_args(
     agentic_full_doc_chunks = max(1, int(args.agentic_full_doc_chunks or _AGENTIC_FULL_DOC_MAX_CHUNKS_DEFAULT))
     agentic_full_doc_max_chars = max(0, int(args.agentic_full_doc_max_chars or _AGENTIC_FULL_DOC_MAX_CHARS_DEFAULT))
     strategy_trace: List[Dict[str, Any]] = []
+
+    if args.history_file:
+        check_abort("load_history")
+        emit_phase("load_history", "start")
+        phase_started_at = time.perf_counter()
+        history_messages = load_history_messages(args.history_file)
+        record_phase("load_history", phase_started_at)
+        emit_phase("load_history", "done", messages=len(history_messages))
+    else:
+        history_messages = []
+
+    if args.rewrite_followups and history_messages:
+        check_abort("rewrite_followup")
+        emit_phase("rewrite_followup", "start", query=raw_query)
+        phase_started_at = time.perf_counter()
+        rewritten_query = rewrite_follow_up_query(
+            args.chat_base_url,
+            args.chat_api_key,
+            args.chat_model,
+            raw_query,
+            history_messages,
+            should_abort=should_abort,
+            endpoint_mode=args.chat_endpoint_mode,
+        )
+        record_phase("rewrite_followup", phase_started_at)
+        if rewritten_query and rewritten_query.strip() and rewritten_query.strip().lower() != raw_query.strip().lower():
+            retrieval_query = rewritten_query.strip()
+            query_for_display = retrieval_query
+            query_rewritten = True
+        emit_phase("rewrite_followup", "done", rewritten=query_rewritten, retrieval_query=retrieval_query)
 
     def embed_query(query_text: str) -> bytes:
         nonlocal client, index_dim_cache
@@ -1948,15 +2060,16 @@ def run_with_args(
     if use_combo:
         if args.expand_query:
             check_abort("expand_query")
-            emit_phase("expand_query", "start", query=raw_query)
+            emit_phase("expand_query", "start", query=retrieval_query)
             phase_started_at = time.perf_counter()
             expanded_queries = expand_query(
                 args.chat_base_url,
                 args.chat_api_key,
                 args.chat_model,
-                raw_query,
+                retrieval_query,
                 max(1, int(args.expand_count or 0)),
                 should_abort=should_abort,
+                endpoint_mode=args.chat_endpoint_mode,
             )
             record_phase("expand_query", phase_started_at)
             emit_phase("expand_query", "done", count=len(expanded_queries))
@@ -1964,7 +2077,7 @@ def run_with_args(
             query_for_display = expanded_queries[0]
         candidate_multiplier = max(1, int(args.rerank_candidates or 1))
         candidate_k = max(base_k * candidate_multiplier, base_k)
-        query_variants = [raw_query] + expanded_queries
+        query_variants = [retrieval_query] + expanded_queries
         candidates_map: Dict[str, Dict[str, Any]] = {}
         try:
             emit_phase("retrieve_candidates", "start", variants=len(query_variants), k=candidate_k)
@@ -2004,7 +2117,7 @@ def run_with_args(
 
         candidates = list(candidates_map.values())
         if args.rerank:
-            rerank_query = query_for_display or raw_query
+            rerank_query = query_for_display or retrieval_query
             check_abort("reranker_load")
             emit_phase("reranker_load", "start", model=args.rerank_model)
             phase_started_at = time.perf_counter()
@@ -2024,14 +2137,14 @@ def run_with_args(
             emit_phase("rerank_score", "done", reranked=len(reranked))
             retrieved = apply_doc_cap(reranked, max_per_doc)[:base_k]
         else:
-            ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
+            ordered = apply_tag_boosting(candidates, extract_keywords(retrieval_query))
             retrieved = apply_doc_cap(ordered, max_per_doc)[:base_k]
         if annotation_k > 0:
             try:
                 check_abort("retrieve_annotations")
                 emit_phase("retrieve_annotations", "start", k=annotation_k)
-                vec = embed_query(raw_query)
-                keywords = extract_keywords(raw_query)
+                vec = embed_query(retrieval_query)
+                keywords = extract_keywords(retrieval_query)
                 phase_started_at = time.perf_counter()
                 annotations = retrieve_annotation_chunks(
                     client,
@@ -2049,11 +2162,11 @@ def run_with_args(
         check_abort("retrieve_primary")
         emit_phase("retrieve_primary", "start", k=base_k)
         try:
-            vec = embed_query(raw_query)
+            vec = embed_query(retrieval_query)
         except Exception as exc:
             eprint(f"Failed to embed query: {exc}")
             return 2
-        keywords = extract_keywords(raw_query)
+        keywords = extract_keywords(retrieval_query)
         try:
             phase_started_at = time.perf_counter()
             retrieved, _ = retrieve_with_broadening(
@@ -2129,14 +2242,15 @@ def run_with_args(
                     args.chat_base_url,
                     args.chat_api_key,
                     args.chat_model,
-                    raw_query,
+                    retrieval_query,
                     max(1, int(args.expand_count or 0)),
                     should_abort=should_abort,
+                    endpoint_mode=args.chat_endpoint_mode,
                 )
                 record_phase("expand_query", phase_started_at)
                 emit_phase("agentic_expand_retry", "done", step=step, expanded=len(retry_expanded))
                 step_trace["expanded_queries"] = retry_expanded
-                query_variants = [raw_query] + retry_expanded
+                query_variants = [retrieval_query] + retry_expanded
                 candidate_multiplier = max(2, int(args.rerank_candidates or 1))
                 candidate_k = max(base_k * candidate_multiplier, base_k)
                 candidates_map: Dict[str, Dict[str, Any]] = {}
@@ -2190,7 +2304,7 @@ def run_with_args(
                     phase_started_at = time.perf_counter()
                     reranked = rerank_candidates(
                         reranker,
-                        query_for_display or raw_query,
+                        query_for_display or retrieval_query,
                         candidates,
                         max(200, int(args.rerank_max_chars or _RERANK_MAX_CHARS_DEFAULT)),
                     )
@@ -2198,14 +2312,14 @@ def run_with_args(
                     emit_phase("agentic_rerank_score", "done", step=step, reranked=len(reranked))
                     updated = apply_doc_cap(reranked, max_per_doc)[:base_k]
                 else:
-                    ordered = apply_tag_boosting(candidates, extract_keywords(raw_query))
+                    ordered = apply_tag_boosting(candidates, extract_keywords(retrieval_query))
                     updated = apply_doc_cap(ordered, max_per_doc)[:base_k]
                 if annotation_k > 0 and updated:
                     try:
                         check_abort("agentic_annotations")
                         emit_phase("agentic_annotations", "start", step=step, k=annotation_k)
-                        vec = embed_query(raw_query)
-                        keywords = extract_keywords(raw_query)
+                        vec = embed_query(retrieval_query)
+                        keywords = extract_keywords(retrieval_query)
                         phase_started_at = time.perf_counter()
                         annotations = retrieve_annotation_chunks(
                             client,
@@ -2285,15 +2399,6 @@ def run_with_args(
         "Add inline citations using this exact format: [[cite:DOC_ID:PAGE_START-PAGE_END]]. "
         "Example: ... [[cite:ABC123:12-13]]."
     )
-    if args.history_file:
-        check_abort("load_history")
-        emit_phase("load_history", "start")
-        phase_started_at = time.perf_counter()
-        history_messages = load_history_messages(args.history_file)
-        record_phase("load_history", phase_started_at)
-        emit_phase("load_history", "done", messages=len(history_messages))
-    else:
-        history_messages = []
     history_block = format_history_block(history_messages)
     if history_block:
         history_block = f"Chat history (for reference only):\n{history_block}\n\n"
@@ -2393,7 +2498,9 @@ def run_with_args(
 
     output = {
         "query": query_for_display,
-        "raw_query": raw_query if expanded_queries else "",
+        "raw_query": raw_query if (query_rewritten or bool(expanded_queries)) else "",
+        "retrieval_query": retrieval_query if query_rewritten else "",
+        "query_rewritten": query_rewritten,
         "expanded_queries": expanded_queries,
         "rerank_used": bool(args.rerank),
         "rerank_model": args.rerank_model if args.rerank else "",
