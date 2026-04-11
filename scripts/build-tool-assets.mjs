@@ -20,6 +20,7 @@ const tools = [
   { name: "python-worker.Dockerfile", path: "tools/python-worker.Dockerfile" },
   { name: "python-worker-entrypoint.sh", path: "tools/python-worker-entrypoint.sh" },
   { name: "python-worker-api.py", path: "tools/python-worker-api.py" },
+  { name: "pdf_page_count.py", path: "tools/pdf_page_count.py" },
   { name: "redis-stack.conf", path: "redis-stack.conf" },
 ];
 

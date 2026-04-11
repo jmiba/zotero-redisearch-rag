@@ -1,4 +1,11 @@
 # Changelog
+## 0.9.28 (Bugfix Release)
+- Surface import timeout budgeting more clearly during Docling imports:
+  - compute a page-aware timeout budget up front,
+  - show a notice with the chosen timeout budget before running the import worker,
+  - log the same budget details to the console for troubleshooting.
+- Bundle the new `pdf_page_count.py` helper into generated tool assets so packaged/plugin builds include the page-count utility used for timeout scaling.
+
 ## 0.9.27 (Bugfix Release)
 - Scale Docling/import worker timeouts with PDF length:
   - add a small PDF page-count helper to estimate document size before import,

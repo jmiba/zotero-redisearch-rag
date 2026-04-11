@@ -952,7 +952,9 @@ export default class ZoteroRagPlugin extends Plugin {
     const doclingScript = path.join(pluginDir, "tools", "docling_extract.py");
     const indexScript = path.join(pluginDir, "tools", "index_redisearch.py");
     let qualityLabel: string | null = null;
-    const importWorkerTimeoutSec = await this.getImportWorkerTimeoutSec(pdfSourcePath);
+    const importWorkerBudget = await this.getImportWorkerBudget(pdfSourcePath);
+    const importWorkerTimeoutSec = importWorkerBudget.timeoutSec;
+    this.logImportWorkerBudget(pdfSourcePath, importWorkerBudget);
 
     try {
       this.showStatusProgress(this.formatStatusLabel("Docling extraction...", qualityLabel), 0);
@@ -1712,16 +1714,62 @@ export default class ZoteroRagPlugin extends Plugin {
     return null;
   }
 
-  private async getImportWorkerTimeoutSec(pdfPath: string): Promise<number> {
+  private formatDurationShort(totalSeconds: number): string {
+    const seconds = Math.max(0, Math.round(totalSeconds));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    const parts: string[] = [];
+    if (hours > 0) {
+      parts.push(`${hours}h`);
+    }
+    if (minutes > 0) {
+      parts.push(`${minutes}m`);
+    }
+    if (!parts.length || secs > 0) {
+      parts.push(`${secs}s`);
+    }
+    return parts.join(" ");
+  }
+
+  private async getImportWorkerBudget(
+    pdfPath: string
+  ): Promise<{ pages: number | null; timeoutSec: number }> {
     const pages = await this.getPdfPageCount(pdfPath);
     if (!pages) {
-      return IMPORT_WORKER_TIMEOUT_SEC;
+      return { pages: null, timeoutSec: IMPORT_WORKER_TIMEOUT_SEC };
     }
     const scaled = Math.max(
       IMPORT_WORKER_TIMEOUT_SEC,
       300 + pages * IMPORT_WORKER_TIMEOUT_PER_PAGE_SEC
     );
-    return Math.min(IMPORT_WORKER_TIMEOUT_MAX_SEC, scaled);
+    return {
+      pages,
+      timeoutSec: Math.min(IMPORT_WORKER_TIMEOUT_MAX_SEC, scaled),
+    };
+  }
+
+  private logImportWorkerBudget(
+    pdfPath: string,
+    budget: { pages: number | null; timeoutSec: number }
+  ): void {
+    const timeoutLabel = this.formatDurationShort(budget.timeoutSec);
+    if (budget.pages && budget.pages > 0) {
+      console.debug("Import worker timeout budget", {
+        pdfPath,
+        pages: budget.pages,
+        timeoutSec: budget.timeoutSec,
+      });
+      new Notice(`Import timeout budget: ${budget.pages} pages, ${timeoutLabel}.`, 5000);
+      return;
+    }
+    console.debug("Import worker timeout budget", {
+      pdfPath,
+      pages: null,
+      timeoutSec: budget.timeoutSec,
+      fallback: "page_count_unavailable",
+    });
+    new Notice(`Import timeout budget: page count unavailable, using ${timeoutLabel}.`, 5000);
   }
 
   private isRagQueryCancellationMessage(message: string): boolean {
