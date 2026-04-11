@@ -3,13 +3,13 @@
     "zrr-companion@zotero-redisearch-rag": {
       "updates": [
         {
-          "version": "0.1.4",
+          "version": "0.1.5",
           "update_link": "https://raw.githubusercontent.com/jmiba/zotero-redisearch-rag/main/zotero-companion/zrr-companion.xpi",
-          "update_hash": "sha256:02585bd692c0837091212c59e64f16f528f09cd388016ff7f4da53467fcc467d",
+          "update_hash": "sha256:e16b00ca85f147509b1cdce1adf71e1798983d50f7976fb3064a221de92eb925",
           "applications": {
             "zotero": {
               "strict_min_version": "7.0",
-              "strict_max_version": "8.*"
+              "strict_max_version": "9.*"
             }
           }
         }

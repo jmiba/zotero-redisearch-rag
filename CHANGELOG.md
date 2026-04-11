@@ -1,4 +1,9 @@
 # Changelog
+## 0.10.1
+- Update the Zotero Research Assistant Companion add-on to `0.1.5`.
+- Extend companion compatibility to Zotero `9.*` by raising the add-on `strict_max_version` from `8.*` to `9.*`.
+- Refresh the companion update manifest/hash for the rebuilt `zrr-companion.xpi`.
+
 ## 0.10.0 (Minor Release)
 - Add optional follow-up query rewriting for retrieval:
   - new `Rewrite follow-up queries` setting rewrites the current chat turn into a standalone retrieval query using recent chat history,
