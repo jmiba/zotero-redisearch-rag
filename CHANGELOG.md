@@ -1,4 +1,12 @@
 # Changelog
+## 0.10.2
+- Address Obsidian community review findings:
+  - raise the minimum Obsidian version to `1.7.2` for APIs used by the plugin,
+  - remove an unsafe PDF sidebar icon HTML fallback,
+  - update DOM helper usage for Obsidian lint compatibility.
+- Reduce fingerprinting concerns by removing environment-variable and system-identity reads from the plugin bundle and bundled Python helpers.
+- Keep community release packaging limited to the supported assets: `main.js`, `manifest.json`, and `styles.css`.
+
 ## 0.10.1
 - Update the Zotero Research Assistant Companion add-on to `0.1.5`.
 - Extend companion compatibility to Zotero `9.*` by raising the add-on `strict_max_version` from `8.*` to `9.*`.
