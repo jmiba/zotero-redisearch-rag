@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -26,11 +28,28 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/generate-release-notes.mjs
-      - run: npm run package-release
-      - name: Verify release artifacts
+      - run: npm run build:release
+      - name: Verify community release artifacts
         run: |
-          ls -lah main.js manifest.json versions.json styles.css
-          ls -lah dist
+          ls -lah main.js manifest.json styles.css
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - name: Remove unsupported release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets" \
+            --jq '.[] | select(.name != "main.js" and .name != "manifest.json" and .name != "styles.css") | [.id, .name] | @tsv' |
+          while IFS=$'\t' read -r asset_id asset_name; do
+            echo "Deleting unsupported release asset: ${asset_name}"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          done
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
@@ -39,6 +58,4 @@ jobs:
           files: |
             main.js
             manifest.json
-            versions.json
             styles.css
-            dist/*.zip

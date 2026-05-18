@@ -205,11 +205,10 @@ In Zotero:
 3) No API key is needed for the local API.
 
 ### 2) Install the plugin
-Option A (recommended):
-1) Download the latest release zip.
-2) Unzip to your vault:  
-   `<vault>/.obsidian/plugins/zotero-redisearch-rag/`
-3) The folder must contain `main.js`, `manifest.json`, `versions.json`, and `tools/`.
+Option A (manual release assets):
+1) Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
+2) Place them in `<vault>/.obsidian/plugins/zotero-redisearch-rag/`.
+3) Enable the plugin. Bundled helper files are written into `tools/` on first load.
 
 Option B (BRAT, beta testing):
 1) Install the BRAT plugin in Obsidian.
