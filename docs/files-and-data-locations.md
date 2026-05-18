@@ -34,3 +34,12 @@ When using **Python worker container** runtime, the worker keeps a persistent vi
 - `.zotero-redisearch-rag/python-worker-cache/`
 
 If multiple vaults share one Redis instance, the plugin namespaces the index and key prefix to avoid conflicts.
+
+## Other local filesystem access
+
+Some plugin workflows use local filesystem access outside Obsidian's vault API:
+
+- Zotero PDF attachments may be read from Zotero's local storage path before they are copied into the vault.
+- Optional companion add-on downloads are stored under the plugin data folder.
+- Optional file logs are written only when file logging is enabled and use the configured log path.
+- Docker/Podman and Python worker cache folders are created only for the configured runtime mode.

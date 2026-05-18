@@ -7,6 +7,11 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.10.3",
+    markdown: `- Add explicit privacy/security documentation for filesystem access, process execution, and write-only clipboard actions.
+- Normalize Zotero companion preferences colors to 6-digit hex values for CSS lint compatibility.`,
+  },
+  {
     version: "0.10.2",
     markdown: `- Address Obsidian community review findings:
   - raise the minimum Obsidian version to \`1.7.2\` for APIs used by the plugin,

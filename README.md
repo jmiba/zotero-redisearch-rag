@@ -160,6 +160,32 @@ The plugin can make network/API calls only when relevant features are enabled or
 - PaddleOCR API endpoints (if you choose Paddle API OCR engines).
 - Container registry pulls via Docker/Podman when Redis images are missing.
 
+### Local filesystem access
+
+The plugin uses Node.js filesystem APIs because several core workflows need files that the Obsidian vault API cannot access:
+
+- reading Zotero PDF attachments from local Zotero file paths before optionally copying them into the vault,
+- writing bundled helper scripts into the plugin data folder on first load,
+- creating and maintaining Redis/Python worker cache folders under the vault/plugin data area,
+- writing optional diagnostic logs when file logging is enabled,
+- downloading the optional Zotero companion add-on into the plugin data folder when requested.
+
+The plugin does not scan arbitrary user directories. File access is tied to Zotero item attachments, configured output/cache locations, and explicit user actions in the plugin.
+
+### External process execution
+
+The plugin uses `child_process.spawn` to run local tools for user-triggered workflows:
+
+- Docker or Podman for Redis Stack and the Python worker container,
+- Python helper scripts for Docling/OCR/indexing in legacy local runtime mode,
+- platform open commands for opening PDFs/Zotero targets from plugin actions.
+
+Commands are launched as explicit executable-plus-argument arrays, not through shell string evaluation.
+
+### Clipboard access
+
+Clipboard access is write-only and user-triggered. The plugin writes to the clipboard only when you click a copy action, such as copying chat output, copying diagnostic/output modal text, or generating a Zotero companion token. It does not read clipboard contents.
+
 ### Third-party services
 
 Depending on your configuration, the plugin may interact with:
