@@ -145,15 +145,15 @@ export class ZoteroChatView extends ItemView {
     containerEl.empty();
     containerEl.addClass("zrr-chat-view");
 
-    const header = containerEl.createEl("div", { cls: "zrr-chat-header" });
-    header.createEl("div", { cls: "zrr-chat-title", text: "Zotero research assistant chat" });
-    const controls = header.createEl("div", { cls: "zrr-chat-controls" });
-    const selectRow = controls.createEl("div", { cls: "zrr-chat-controls-row" });
+    const header = containerEl.createDiv({ cls: "zrr-chat-header" });
+    header.createDiv({ cls: "zrr-chat-title", text: "Zotero research assistant chat" });
+    const controls = header.createDiv({ cls: "zrr-chat-controls" });
+    const selectRow = controls.createDiv({ cls: "zrr-chat-controls-row" });
     this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" });
     this.sessionSelect.addEventListener("change", () => {
       void this.switchSession(this.sessionSelect.value);
     });
-    const buttonRow = controls.createEl("div", { cls: "zrr-chat-controls-row zrr-chat-controls-actions" });
+    const buttonRow = controls.createDiv({ cls: "zrr-chat-controls-row zrr-chat-controls-actions" });
     this.renameButton = buttonRow.createEl("button", {
       cls: "zrr-chat-rename",
       text: "Rename",
@@ -187,9 +187,9 @@ export class ZoteroChatView extends ItemView {
       void this.startNewChat();
     });
 
-    this.messagesEl = containerEl.createEl("div", { cls: "zrr-chat-messages" });
+    this.messagesEl = containerEl.createDiv({ cls: "zrr-chat-messages" });
 
-    this.inputWrapEl = containerEl.createEl("div", { cls: "zrr-chat-input" });
+    this.inputWrapEl = containerEl.createDiv({ cls: "zrr-chat-input" });
     this.inputEl = this.inputWrapEl.createEl("textarea", {
       cls: "zrr-chat-textarea",
       attr: { placeholder: "Ask your Zotero library..." },
@@ -223,7 +223,7 @@ export class ZoteroChatView extends ItemView {
     this.inputEl.addEventListener("keyup", () => {
       this.scheduleZoteroMentionPicker();
     });
-    this.registerDomEvent(document, "mousedown", (event) => {
+    this.registerDomEvent(activeDocument, "mousedown", (event) => {
       if (!this.inputWrapEl) {
         return;
       }
@@ -390,13 +390,13 @@ export class ZoteroChatView extends ItemView {
   }
 
   private async renderMessage(message: ChatMessage): Promise<void> {
-    const wrapper = this.messagesEl.createEl("div", {
+    const wrapper = this.messagesEl.createDiv({
       cls: `zrr-chat-message zrr-chat-${message.role}`,
     });
-    const metaRow = wrapper.createEl("div", { cls: "zrr-chat-meta-row" });
-    const meta = metaRow.createEl("div", { cls: "zrr-chat-meta" });
+    const metaRow = wrapper.createDiv({ cls: "zrr-chat-meta-row" });
+    const meta = metaRow.createDiv({ cls: "zrr-chat-meta" });
     meta.setText(message.role === "user" ? "You" : "Zotero Assistant");
-    const actions = metaRow.createEl("div", { cls: "zrr-chat-message-actions" });
+    const actions = metaRow.createDiv({ cls: "zrr-chat-message-actions" });
     const copyButton = actions.createEl("button", {
       cls: "zrr-chat-message-copy zrr-chat-icon-button",
       attr: { title: "Copy this message", "aria-label": "Copy this message" },
@@ -417,8 +417,8 @@ export class ZoteroChatView extends ItemView {
       event.stopPropagation();
       void this.deleteMessage(message.id);
     });
-    const contentEl = wrapper.createEl("div", { cls: "zrr-chat-content" });
-    const citationsEl = wrapper.createEl("div", { cls: "zrr-chat-citations" });
+    const contentEl = wrapper.createDiv({ cls: "zrr-chat-content" });
+    const citationsEl = wrapper.createDiv({ cls: "zrr-chat-citations" });
     this.messageEls.set(message.id, { wrapper, content: contentEl, citations: citationsEl });
     await this.renderMessageContent(message);
   }
@@ -464,7 +464,7 @@ export class ZoteroChatView extends ItemView {
     this.messageEls.delete(messageId);
     const pending = this.pendingRender.get(messageId);
     if (pending !== undefined) {
-      window.clearTimeout(pending);
+      activeWindow.clearTimeout(pending);
       this.pendingRender.delete(messageId);
     }
     this.pendingThinking.delete(messageId);
@@ -481,7 +481,7 @@ export class ZoteroChatView extends ItemView {
     if (this.pendingRender.has(message.id)) {
       return;
     }
-    const handle = window.setTimeout(() => {
+    const handle = activeWindow.setTimeout(() => {
       this.pendingRender.delete(message.id);
       void this.renderMessageContent(message).then(() => {
         this.scrollToBottom();
@@ -527,15 +527,15 @@ export class ZoteroChatView extends ItemView {
   }
 
   private renderThinkingIndicator(container: HTMLElement): void {
-    const indicator = container.createEl("div", { cls: "zrr-chat-thinking" });
+    const indicator = container.createDiv({ cls: "zrr-chat-thinking" });
     indicator.setAttr("role", "status");
     indicator.setAttr("aria-live", "polite");
-    indicator.createEl("span", { cls: "zrr-chat-thinking-spinner" });
-    indicator.createEl("span", { cls: "zrr-chat-thinking-text", text: "Thinking" });
-    const dots = indicator.createEl("span", { cls: "zrr-chat-thinking-dots" });
-    dots.createEl("span");
-    dots.createEl("span");
-    dots.createEl("span");
+    indicator.createSpan({ cls: "zrr-chat-thinking-spinner" });
+    indicator.createSpan({ cls: "zrr-chat-thinking-text", text: "Thinking" });
+    const dots = indicator.createSpan({ cls: "zrr-chat-thinking-dots" });
+    dots.createSpan();
+    dots.createSpan();
+    dots.createSpan();
   }
 
   private hookInternalLinks(container: HTMLElement): void {
@@ -578,7 +578,7 @@ export class ZoteroChatView extends ItemView {
         void this.plugin.openCitationTarget(citation, display);
       });
       if (citation.annotation_key) {
-        item.createEl("span", { text: "Annotation", cls: "zrr-chat-citation-badge" });
+        item.createSpan({ text: "Annotation", cls: "zrr-chat-citation-badge" });
       }
     }
   }
@@ -766,7 +766,7 @@ export class ZoteroChatView extends ItemView {
       return;
     }
     this.clearMentionPickerDebounce();
-    this.mentionDebounceHandle = window.setTimeout(() => {
+    this.mentionDebounceHandle = activeWindow.setTimeout(() => {
       this.mentionDebounceHandle = null;
       void this.updateMentionSuggestions();
     }, 180);
@@ -774,7 +774,7 @@ export class ZoteroChatView extends ItemView {
 
   private clearMentionPickerDebounce(): void {
     if (this.mentionDebounceHandle !== null) {
-      window.clearTimeout(this.mentionDebounceHandle);
+      activeWindow.clearTimeout(this.mentionDebounceHandle);
       this.mentionDebounceHandle = null;
     }
   }
@@ -983,7 +983,7 @@ class RenameChatModal extends Modal {
         });
       });
 
-    const buttons = contentEl.createEl("div");
+    const buttons = contentEl.createDiv();
     buttons.addClass("zrr-u-display-flex");
     buttons.addClass("zrr-u-gap-0-5rem");
     buttons.addClass("zrr-u-margin-top-1rem");
@@ -1019,7 +1019,7 @@ class ConfirmDeleteChatModal extends Modal {
     contentEl.createEl("h3", { text: "Delete chat" });
     contentEl.createEl("p", { text: `Delete "${this.chatName}"? This cannot be undone.` });
 
-    const buttons = contentEl.createEl("div");
+    const buttons = contentEl.createDiv();
     buttons.addClass("zrr-u-display-flex");
     buttons.addClass("zrr-u-gap-0-5rem");
     buttons.addClass("zrr-u-margin-top-1rem");
@@ -1049,7 +1049,7 @@ class ConfirmDeleteMessageModal extends Modal {
     contentEl.createEl("h3", { text: "Delete message" });
     contentEl.createEl("p", { text: "Delete this message? This cannot be undone." });
 
-    const buttons = contentEl.createEl("div");
+    const buttons = contentEl.createDiv();
     buttons.addClass("zrr-u-display-flex");
     buttons.addClass("zrr-u-gap-0-5rem");
     buttons.addClass("zrr-u-margin-top-1rem");

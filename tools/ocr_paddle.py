@@ -1488,8 +1488,8 @@ def ocr_pages_with_paddle_structure(
     global LOGGER
     LOGGER = helpers.get("logger", LOGGER)
     structure_api_disabled = bool(getattr(config, "paddle_structure_api_disable", False))
-    structure_api_url = getattr(config, "paddle_structure_api_url", None) or os.getenv("PADDLE_STRUCTURE_API_URL")
-    structure_api_token = getattr(config, "paddle_structure_api_token", None) or os.getenv("PADDLE_STRUCTURE_API_TOKEN")
+    structure_api_url = getattr(config, "paddle_structure_api_url", None)
+    structure_api_token = getattr(config, "paddle_structure_api_token", None)
     structure_api_timeout = getattr(config, "paddle_structure_api_timeout_sec", 120)
     if structure_api_url and structure_api_token and not structure_api_disabled:
         orig_url = getattr(config, "paddle_vl_api_url", None)
@@ -1555,8 +1555,8 @@ def ocr_pages_with_paddle_vl(
     LOGGER = helpers.get("logger", LOGGER)
     ocr_pages_text_chars = helpers["ocr_pages_text_chars"]
 
-    api_url = getattr(config, "paddle_vl_api_url", None) or os.getenv("PADDLE_VL_API_URL")
-    api_token = getattr(config, "paddle_vl_api_token", None) or os.getenv("PADDLE_VL_API_TOKEN")
+    api_url = getattr(config, "paddle_vl_api_url", None)
+    api_token = getattr(config, "paddle_vl_api_token", None)
     api_timeout = getattr(config, "paddle_vl_api_timeout_sec", 120)
     source_path = helpers.get("ocr_source_path")
 
@@ -1566,13 +1566,6 @@ def ocr_pages_with_paddle_vl(
         if api_max_pages <= 0:
             api_max_pages = 100
         api_max_chunk_bytes = int(getattr(config, "paddle_vl_api_max_chunk_bytes", 0) or 0)
-        if api_max_chunk_bytes <= 0:
-            try:
-                env_value = os.getenv("PADDLE_VL_API_MAX_CHUNK_BYTES", "")
-                if env_value:
-                    api_max_chunk_bytes = int(env_value)
-            except Exception:
-                api_max_chunk_bytes = 0
         api_images = list(images) if images else []
         source_page_count = None
         source_reader = None

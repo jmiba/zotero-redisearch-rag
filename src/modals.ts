@@ -252,7 +252,7 @@ export class ReleaseNotesModal extends Modal {
       this.markdownComponent
     );
 
-    const actions = contentEl.createEl("div", { cls: "zrr-release-notes-actions" });
+    const actions = contentEl.createDiv({ cls: "zrr-release-notes-actions" });
     const closeButton = actions.createEl("button", { text: "Close" });
     closeButton.addEventListener("click", () => this.close());
   }
@@ -297,7 +297,7 @@ export class ChunkTagModal extends Modal {
     input.value = this.initialTags.join(", ");
     input.focus();
 
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-gap-0-5rem");
     actions.addClass("zrr-u-margin-top-0-75rem");
@@ -364,7 +364,7 @@ export class ChunkTextPreviewModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h3", { text: this.titleText });
     if (this.noteText) {
-      const note = contentEl.createEl("div", { text: this.noteText });
+      const note = contentEl.createDiv({ text: this.noteText });
       note.className = "zrr-indexed-note";
     }
     const area = contentEl.createEl("textarea", {
@@ -670,7 +670,7 @@ export class ConfirmOverwriteModal extends Modal {
     contentEl.createEl("p", {
       text: `This will overwrite: ${this.filePath}`,
     });
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-gap-0-5rem");
     actions.addClass("zrr-u-margin-top-0-75rem");
@@ -718,7 +718,7 @@ export class ConfirmDeleteNoteModal extends Modal {
     contentEl.createEl("p", {
       text: `Note: ${this.notePath}`,
     });
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-gap-0-5rem");
     actions.addClass("zrr-u-margin-top-0-75rem");
@@ -762,7 +762,7 @@ export class ConfirmRebuildIndexModal extends Modal {
     contentEl.createEl("p", {
       text: "This will drop the redissearch index (and embeddings) and rebuild it from cached chunks.",
     });
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-gap-0-5rem");
     actions.addClass("zrr-u-margin-top-0-75rem");
@@ -806,7 +806,7 @@ export class ConfirmPurgeRedisOrphansModal extends Modal {
     contentEl.createEl("p", {
       text: "Cache files are not deleted. Use this to clean up stale redis data.",
     });
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-gap-0-5rem");
     actions.addClass("zrr-u-margin-top-0-75rem");
@@ -864,19 +864,19 @@ export class MetadataConflictBatchModal extends Modal {
       text: "Choose which values to keep for each field.",
     });
 
-    const table = contentEl.createEl("div");
+    const table = contentEl.createDiv();
     table.addClass("zrr-u-display-grid");
     table.addClass("zrr-u-gap-0-75rem");
     for (const conflict of this.conflicts) {
-      const row = table.createEl("div");
+      const row = table.createDiv();
       row.addClass("zrr-u-display-grid");
       row.addClass("zrr-u-gap-0-4rem");
       row.addClass("zrr-u-border-1px-solid-var-background-modifier-border");
       row.addClass("zrr-u-border-radius-6px");
       row.addClass("zrr-u-padding-0-6rem");
-      row.createEl("div", { text: conflict.fieldLabel, cls: "zrr-font-semibold" });
+      row.createDiv({ text: conflict.fieldLabel, cls: "zrr-font-semibold" });
 
-      const values = row.createEl("div");
+      const values = row.createDiv();
       values.addClass("zrr-u-display-grid");
       values.addClass("zrr-u-grid-template-columns-1fr-1fr");
       values.addClass("zrr-u-gap-0-5rem");
@@ -888,11 +888,11 @@ export class MetadataConflictBatchModal extends Modal {
       zoteroBox.addClass("zrr-u-width-100");
       zoteroBox.value = conflict.zoteroValue || "(empty)";
 
-      const selectWrap = row.createEl("div");
+      const selectWrap = row.createDiv();
       selectWrap.addClass("zrr-u-display-flex");
       selectWrap.addClass("zrr-u-gap-0-5rem");
       selectWrap.addClass("zrr-u-align-items-center");
-      selectWrap.createEl("span", { text: "Decision:" });
+      selectWrap.createSpan({ text: "Decision:" });
       const select = selectWrap.createEl("select");
       select.add(new Option(conflict.noteLabel, "note"));
       select.add(new Option(conflict.zoteroLabel, "zotero"));
@@ -901,7 +901,7 @@ export class MetadataConflictBatchModal extends Modal {
       this.selects.set(conflict.field, select);
     }
 
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-flex-wrap-wrap");
     actions.addClass("zrr-u-gap-0-5rem");
@@ -972,19 +972,19 @@ export class AnnotationConflictBatchModal extends Modal {
     contentEl.createEl("h3", { text: "Resolve annotation conflicts" });
     contentEl.createEl("p", { text: "Choose which version to keep for each annotation." });
 
-    const table = contentEl.createEl("div");
+    const table = contentEl.createDiv();
     table.addClass("zrr-u-display-grid");
     table.addClass("zrr-u-gap-0-75rem");
     for (const conflict of this.conflicts) {
-      const row = table.createEl("div");
+      const row = table.createDiv();
       row.addClass("zrr-u-display-grid");
       row.addClass("zrr-u-gap-0-4rem");
       row.addClass("zrr-u-border-1px-solid-var-background-modifier-border");
       row.addClass("zrr-u-border-radius-6px");
       row.addClass("zrr-u-padding-0-6rem");
-      row.createEl("div", { text: conflict.title, cls: "zrr-font-semibold" });
+      row.createDiv({ text: conflict.title, cls: "zrr-font-semibold" });
 
-      const values = row.createEl("div");
+      const values = row.createDiv();
       values.addClass("zrr-u-display-grid");
       values.addClass("zrr-u-grid-template-columns-1fr-1fr");
       values.addClass("zrr-u-gap-0-5rem");
@@ -996,11 +996,11 @@ export class AnnotationConflictBatchModal extends Modal {
       zoteroBox.addClass("zrr-u-width-100");
       zoteroBox.value = conflict.zoteroValue || "(empty)";
 
-      const selectWrap = row.createEl("div");
+      const selectWrap = row.createDiv();
       selectWrap.addClass("zrr-u-display-flex");
       selectWrap.addClass("zrr-u-gap-0-5rem");
       selectWrap.addClass("zrr-u-align-items-center");
-      selectWrap.createEl("span", { text: "Decision:" });
+      selectWrap.createSpan({ text: "Decision:" });
       const select = selectWrap.createEl("select");
       select.add(new Option("Use note", "note"));
       select.add(new Option("Use Zotero", "zotero"));
@@ -1009,7 +1009,7 @@ export class AnnotationConflictBatchModal extends Modal {
       this.selects.set(conflict.key, select);
     }
 
-    const actions = contentEl.createEl("div");
+    const actions = contentEl.createDiv();
     actions.addClass("zrr-u-display-flex");
     actions.addClass("zrr-u-flex-wrap-wrap");
     actions.addClass("zrr-u-gap-0-5rem");
@@ -1175,7 +1175,7 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     const sequence = ++this.querySequence;
     try {
       await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, this.queryDebounceMs);
+        activeWindow.setTimeout(resolve, this.queryDebounceMs);
       });
       if (sequence !== this.querySequence) {
         return [];
@@ -1233,7 +1233,7 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     const iconName = ZOTERO_ITEM_TYPE_ICON_MAP[itemType] ?? "file-text";
     setIcon(iconEl, iconName);
     const textWrap = row.createDiv({ cls: "zrr-zotero-suggest-text" });
-    textWrap.createEl("div", { text: title, cls: "zrr-zotero-suggest-title" });
+    textWrap.createDiv({ text: title, cls: "zrr-zotero-suggest-title" });
     const metaEl = textWrap.createEl("small", { cls: "zrr-zotero-suggest-meta" });
     let hasMeta = false;
     const addSeparator = (): void => {

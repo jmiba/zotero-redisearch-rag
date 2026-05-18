@@ -2,6 +2,7 @@ import {
   App,
   ButtonComponent,
   DropdownComponent,
+  FileSystemAdapter,
   Notice,
   type Plugin,
   PluginSettingTab,
@@ -471,7 +472,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Docker/podman path")
         .setDesc(
           "CLI path for Docker or Podman (used to start Redis Stack and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
-            "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~, $HOME, and %USERPROFILE%. " +
+            "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~. " +
             "Relative paths with separators resolve from your home dir."
         )
         .addText((text) =>
@@ -529,7 +530,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setDesc(
           "Local mode only: optional path to the Python interpreter used to create or run the plugin env. " +
             "Leave blank to auto-detect (python3.13/3.12/3.11/3.10/python3/python, or py on Windows). " +
-            "Supports ~, $HOME, and %USERPROFILE%. Relative paths with separators resolve from your home dir."
+            "Supports ~. Relative paths with separators resolve from your home dir."
         )
         .addText((text) => {
           pythonPathText = text;
@@ -622,7 +623,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         .setName("Redis data directory override")
         .setDesc(
           "Optional path to store Redis persistence when auto-assign is off. " +
-            "Env var ZRR_DATA_DIR overrides this setting. Supports ~, $HOME, and %USERPROFILE%. " +
+            "Supports ~. " +
             "Relative paths with separators resolve from your home dir; use ./ to keep it vault-relative."
         )
         .addText((text) => {
@@ -640,8 +641,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       redisProjectSetting = new Setting(tabEl)
         .setName("Redis project name override")
         .setDesc(
-          "Optional Docker/Podman Compose project name when auto-assign is off. " +
-            "Env var ZRR_PROJECT_NAME overrides this setting."
+          "Optional docker/podman compose project name when auto-assign is off."
         )
         .addText((text) => {
           redisProjectText = text;
@@ -1085,10 +1085,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
         if (entries.length) {
           const header = mapContainer.createDiv({ cls: "zrr-annotation-map-row-header" });
-          header.createEl("span", { text: "Color" });
-          header.createEl("span", { text: "Heading" });
-          header.createEl("span", { text: "Callout" });
-          header.createEl("span");
+          header.createSpan({ text: "Color" });
+          header.createSpan({ text: "Heading" });
+          header.createSpan({ text: "Callout" });
+          header.createSpan();
         }
 
         for (const [colorKey, value] of entries) {
@@ -1267,7 +1267,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       const paddleApiKeySetting = new Setting(tabEl)
         .setName("Paddle ocr API key")
         .setDesc("API token for paddleocr-vl / pp-structurev3 endpoints. Get a free API key at ");
-      const paddleApiLink = document.createElement("a");
+      const paddleApiLink = createEl("a");
       paddleApiLink.href = "https://aistudio.baidu.com/paddleocr";
       paddleApiLink.textContent = "HTTPS://aistudio.baidu.com/paddleocr";
       paddleApiLink.target = "_blank";
@@ -2356,17 +2356,16 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Download companion add-on")
-        .setDesc("Downloads the companion xpi to your system downloads folder.")
+        .setDesc("Downloads the companion xpi to this plugin folder.")
         .addButton((button) =>
           button
             .setButtonText("Download xpi")
             .onClick(async () => {
-              const downloadDir = this.getDefaultDownloadDir();
-              if (!downloadDir) {
-                new Notice("Unable to resolve the system downloads folder.");
+              const xpiPath = this.getCompanionXpiPath();
+              if (!xpiPath) {
+                new Notice("Unable to resolve this plugin folder.");
                 return;
               }
-              const xpiPath = path.join(downloadDir, "zrr-companion.xpi");
               if (await this.companionXpiExists(xpiPath)) {
                 new Notice(`Companion XPI already exists: ${xpiPath}`);
                 return;
@@ -2512,12 +2511,13 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     setActiveTab(initialTab);
   }
 
-  private getDefaultDownloadDir(): string | null {
-    const homeDir = process.env.HOME || process.env.USERPROFILE;
-    if (!homeDir) {
+  private getCompanionXpiPath(): string | null {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) {
       return null;
     }
-    return path.join(homeDir, "Downloads");
+    const pluginDir = this.plugin.manifest.dir || "zotero-redisearch-rag";
+    return path.join(adapter.getBasePath(), pluginDir, "zrr-companion.xpi");
   }
 
   private async companionXpiExists(xpiPath: string): Promise<boolean> {

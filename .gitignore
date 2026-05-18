@@ -23,6 +23,7 @@ Temporary Items
 # Test data
 tests/_ocr_crops/
 tests/imgs/
+dist/community-release/
 
 # Node
 node_modules/

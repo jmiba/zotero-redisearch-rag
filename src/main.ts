@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return -- src/main.ts handles untyped Zotero, Redis, and Python worker payloads through runtime guards. */
 import {
   FileSystemAdapter,
   Editor,
@@ -1189,7 +1190,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     this.showStatusProgress("Done", 100);
-    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
     new Notice(`Indexed Zotero item ${docId}.`);
   }
 
@@ -2378,7 +2379,7 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   public async createChatNoteFromSession(
-    sessionId: string,
+    _sessionId: string,
     sessionName: string,
     messages: ChatMessage[]
   ): Promise<void> {
@@ -2718,7 +2719,7 @@ export default class ZoteroRagPlugin extends Plugin {
     await this.saveDocIndex(index);
     const pruneResult = await this.pruneDocIndexOrphans();
     this.showStatusProgress("Done", 100);
-    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
     if (pruneResult.removed > 0) {
       new Notice(
         `Rebuilt doc index for ${docIds.length} items; pruned ${pruneResult.removed} stale entries.`
@@ -2797,11 +2798,11 @@ export default class ZoteroRagPlugin extends Plugin {
 
       if (this.recreateMissingNotesAbort) {
         this.showStatusProgress("Canceled", 100);
-        window.setTimeout(() => this.clearStatusProgress(), 1200);
+        activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
         new Notice(`Canceled after ${rebuilt}/${missing.length} notes.`);
       } else {
         this.showStatusProgress("Done", 100);
-        window.setTimeout(() => this.clearStatusProgress(), 1200);
+        activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
         new Notice(`Recreated ${rebuilt}/${missing.length} missing notes.`);
       }
     } finally {
@@ -2823,7 +2824,7 @@ export default class ZoteroRagPlugin extends Plugin {
       } catch (error) {
         console.warn("Failed to terminate recreate process", error);
       }
-      window.setTimeout(() => {
+      activeWindow.setTimeout(() => {
         if (child && !child.killed) {
           try {
             child.kill("SIGKILL");
@@ -4149,7 +4150,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
     if (abortReason) {
       this.showStatusProgress("Aborted", 100);
-      window.setTimeout(() => this.clearStatusProgress(), 1200);
+      activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
       this.reindexCacheActive = false;
       if (abortReason.kind === "embed_dim_mismatch") {
         const confirmed = await this.confirmRebuildIndex(
@@ -4184,7 +4185,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     this.showStatusProgress("Done", 100);
-    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
     if (failures === 0) {
       new Notice(`Reindexed ${chunkDocIds.length} cached items.`);
     } else {
@@ -4332,13 +4333,13 @@ export default class ZoteroRagPlugin extends Plugin {
         new Notice(`Failed to reindex ${docId}. See console for details.`);
       }
       this.showStatusProgress("Failed", 100);
-      window.setTimeout(() => this.clearStatusProgress(), 1200);
+      activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
       this.reindexCacheActive = false;
       return false;
     }
 
     this.showStatusProgress("Done", 100);
-    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
     this.reindexCacheActive = false;
     return true;
   }
@@ -4566,7 +4567,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       console.warn("Failed to normalize Zotero frontmatter keys", error);
     } finally {
-      window.setTimeout(() => {
+      activeWindow.setTimeout(() => {
         this.noteSyncSuppressed.delete(notePath);
         this.noteMetadataSyncSuppressed.delete(notePath);
       }, 1500);
@@ -4759,11 +4760,11 @@ export default class ZoteroRagPlugin extends Plugin {
     statusBar.addClass("zrr-status-progress");
     statusBar.addClass("status-bar-item-segment");
     statusBar.hide();
-    const label = statusBar.createEl("span", { text: "Idle" });
+    const label = statusBar.createSpan({ text: "Idle" });
     label.addClass("zrr-status-label");
 
-    const bar = statusBar.createEl("div", { cls: "zrr-status-bar" });
-    const inner = bar.createEl("div", { cls: "zrr-status-bar-inner" });
+    const bar = statusBar.createDiv({ cls: "zrr-status-bar" });
+    const inner = bar.createDiv({ cls: "zrr-status-bar-inner" });
 
     this.statusBarEl = statusBar;
     this.statusLabelEl = label;
@@ -5879,7 +5880,7 @@ export default class ZoteroRagPlugin extends Plugin {
       { line: chunk.endLine, ch: 0 }
     );
     this.showStatusProgress("Chunk cleaned.", 100);
-    window.setTimeout(() => this.clearStatusProgress(), 1200);
+    activeWindow.setTimeout(() => this.clearStatusProgress(), 1200);
     new Notice("Chunk cleaned.");
   }
 
@@ -6025,7 +6026,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return "";
     }
     const normalizedMarkdown = this.replaceImageMarkersForIndexPreview(markdown);
-    const container = document.createElement("div");
+    const container = createDiv();
     const component = new Component();
     component.load();
     try {
@@ -6076,9 +6077,9 @@ export default class ZoteroRagPlugin extends Plugin {
   private scheduleNoteSync(file: TFile, delayMs = 1200): void {
     const existing = this.noteSyncTimers.get(file.path);
     if (existing !== undefined) {
-      window.clearTimeout(existing);
+      activeWindow.clearTimeout(existing);
     }
-    const handle = window.setTimeout(() => {
+    const handle = activeWindow.setTimeout(() => {
       this.noteSyncTimers.delete(file.path);
       void this.syncNoteToRedis(file);
     }, delayMs);
@@ -6092,9 +6093,9 @@ export default class ZoteroRagPlugin extends Plugin {
   ): void {
     const existing = this.noteMetadataSyncTimers.get(file.path);
     if (existing !== undefined) {
-      window.clearTimeout(existing);
+      activeWindow.clearTimeout(existing);
     }
-    const handle = window.setTimeout(() => {
+    const handle = activeWindow.setTimeout(() => {
       this.noteMetadataSyncTimers.delete(file.path);
       void this.syncNoteMetadataWithZotero(file, reason);
     }, delayMs);
@@ -6108,9 +6109,9 @@ export default class ZoteroRagPlugin extends Plugin {
   ): void {
     const existing = this.noteAnnotationSyncTimers.get(file.path);
     if (existing !== undefined) {
-      window.clearTimeout(existing);
+      activeWindow.clearTimeout(existing);
     }
-    const handle = window.setTimeout(() => {
+    const handle = activeWindow.setTimeout(() => {
       this.noteAnnotationSyncTimers.delete(file.path);
       void this.syncNoteAnnotationsWithZotero(file, reason);
     }, delayMs);
@@ -6784,7 +6785,7 @@ export default class ZoteroRagPlugin extends Plugin {
           try {
             await this.app.vault.adapter.write(file.path, nextContent);
           } finally {
-            window.setTimeout(() => {
+            activeWindow.setTimeout(() => {
               this.noteSyncSuppressed.delete(file.path);
               this.noteAnnotationSyncSuppressed.delete(file.path);
               this.noteMetadataSyncSuppressed.delete(file.path);
@@ -8022,7 +8023,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       console.warn("Failed to remove legacy metadata snapshot", error);
     } finally {
-      window.setTimeout(() => {
+      activeWindow.setTimeout(() => {
         this.noteSyncSuppressed.delete(notePath);
         this.noteMetadataSyncSuppressed.delete(notePath);
       }, 1500);
@@ -8364,7 +8365,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       console.warn("Failed to update note frontmatter from Zotero", error);
     } finally {
-      window.setTimeout(() => {
+      activeWindow.setTimeout(() => {
         this.noteSyncSuppressed.delete(notePath);
         this.noteMetadataSyncSuppressed.delete(notePath);
       }, 1500);
@@ -9071,7 +9072,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       await this.app.vault.adapter.write(notePath, content);
     } finally {
-      window.setTimeout(() => {
+      activeWindow.setTimeout(() => {
         this.noteSyncSuppressed.delete(notePath);
       }, 1500);
     }
@@ -9880,7 +9881,7 @@ export default class ZoteroRagPlugin extends Plugin {
           response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
           response.on("end", () => {
             if (timeoutId) {
-              clearTimeout(timeoutId);
+              activeWindow.clearTimeout(timeoutId);
             }
             if (isZoteroLocalApiRequest) {
               this.lastZoteroApiNotice = null;
@@ -9896,14 +9897,14 @@ export default class ZoteroRagPlugin extends Plugin {
       );
 
       if (timeoutMs > 0) {
-        timeoutId = setTimeout(() => {
+        timeoutId = activeWindow.setTimeout(() => {
           request.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
         }, timeoutMs);
       }
       const requestEmitter = request as unknown as NodeJS.EventEmitter;
       requestEmitter.on("error", (error) => {
         if (timeoutId) {
-          clearTimeout(timeoutId);
+          activeWindow.clearTimeout(timeoutId);
         }
         if (isZoteroLocalApiRequest) {
           this.notifyZoteroLocalApiConnectionError();
@@ -12301,15 +12302,6 @@ export default class ZoteroRagPlugin extends Plugin {
     } else if (expanded.startsWith("~/") || expanded.startsWith("~\\")) {
       expanded = path.join(os.homedir(), expanded.slice(2));
     }
-    expanded = expanded.replace(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([^}]+)\}/g, (match, name1, name2) => {
-      const key = name1 || name2;
-      const value = key ? process.env[key] : undefined;
-      return value !== undefined ? value : match;
-    });
-    expanded = expanded.replace(/%([^%]+)%/g, (match, name) => {
-      const value = process.env[name];
-      return value !== undefined ? value : match;
-    });
     return expanded;
   }
 
@@ -12836,10 +12828,6 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private getRedisDataDir(): string {
-    const envOverride = this.resolveUserPath(process.env.ZRR_DATA_DIR || "");
-    if (envOverride) {
-      return envOverride;
-    }
     const override = this.resolveUserPath(this.settings.redisDataDirOverride || "", this.getVaultBasePath());
     if (!this.settings.autoAssignRedisPort && override) {
       return override;
@@ -12863,6 +12851,23 @@ export default class ZoteroRagPlugin extends Plugin {
       return;
     }
     env.PATH = existingPath ? `${dir}${path.delimiter}${existingPath}` : dir;
+  }
+
+  private getDefaultChildPath(): string {
+    if (process.platform === "win32") {
+      return [
+        "C:\\Windows\\System32",
+        "C:\\Windows",
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+      ].join(path.delimiter);
+    }
+    return ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(
+      path.delimiter
+    );
+  }
+
+  private buildChildEnv(): NodeJS.ProcessEnv {
+    return { PATH: this.getDefaultChildPath() };
   }
 
   private async resolveDockerPath(): Promise<string> {
@@ -12973,16 +12978,16 @@ export default class ZoteroRagPlugin extends Plugin {
         resolved = true;
         resolve(ok);
       };
-      const timeout = setTimeout(() => {
+      const timeout = activeWindow.setTimeout(() => {
         child.kill();
         finish(false);
       }, 2000);
       child.on("error", () => {
-        clearTimeout(timeout);
+        activeWindow.clearTimeout(timeout);
         finish(false);
       });
       child.on("close", (code) => {
-        clearTimeout(timeout);
+        activeWindow.clearTimeout(timeout);
         finish(code === 0);
       });
     });
@@ -13065,7 +13070,7 @@ export default class ZoteroRagPlugin extends Plugin {
     composeCommand: ComposeCommandSpec,
     options?: { dataDir?: string; redisPort?: number }
   ): Promise<NodeJS.ProcessEnv> {
-    const composeEnv: NodeJS.ProcessEnv = { ...process.env };
+    const composeEnv = this.buildChildEnv();
     this.prependBinaryDirToPath(composeEnv, dockerPath);
     this.prependBinaryDirToPath(composeEnv, composeCommand.command);
     if (path.basename(composeCommand.command) === "podman-compose") {
@@ -13158,7 +13163,7 @@ export default class ZoteroRagPlugin extends Plugin {
       this.settings.dockerPath = resolved;
       await this.saveSettings();
     }
-    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const delay = (ms: number) => new Promise((resolve) => activeWindow.setTimeout(resolve, ms));
     if (await this.isContainerDaemonRunning(resolved)) {
       return;
     }
@@ -13179,10 +13184,6 @@ export default class ZoteroRagPlugin extends Plugin {
         .replace(/^-+|-+$/g, "")
         .slice(0, 32);
     };
-    const envOverride = (process.env.ZRR_PROJECT_NAME || "").trim();
-    if (envOverride && !this.settings.autoAssignRedisPort) {
-      return sanitizeProjectName(envOverride) || "zrr";
-    }
     const override = (this.settings.redisProjectName || "").trim();
     if (override && !this.settings.autoAssignRedisPort) {
       return sanitizeProjectName(override) || "zrr";
@@ -13772,7 +13773,7 @@ export default class ZoteroRagPlugin extends Plugin {
     timeoutMs = 15 * 60 * 1000
   ): Promise<void> {
     const startedAt = Date.now();
-    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const delay = (ms: number) => new Promise((resolve) => activeWindow.setTimeout(resolve, ms));
     while (Date.now() - startedAt < timeoutMs) {
       if (await this.isPythonWorkerApiHealthy(context)) {
         return;
@@ -14086,12 +14087,9 @@ export default class ZoteroRagPlugin extends Plugin {
   private getSharedPythonEnvRoot(): string {
     const home = os.homedir();
     if (process.platform === "win32") {
-      const base =
-        process.env.LOCALAPPDATA || process.env.APPDATA || path.join(home, "AppData", "Local");
-      return path.join(base, "zotero-redisearch-rag");
+      return path.join(home, "AppData", "Local", "zotero-redisearch-rag");
     }
-    const base = process.env.XDG_CACHE_HOME || path.join(home, ".cache");
-    return path.join(base, "zotero-redisearch-rag");
+    return path.join(home, ".cache", "zotero-redisearch-rag");
   }
 
   private getPythonVenvDir(): string {
@@ -14209,18 +14207,9 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private buildPythonEnv(): NodeJS.ProcessEnv {
-    const env = { ...process.env };
-    const sep = path.delimiter;
-    const current = env.PATH || "";
-    const extras = process.platform === "win32" ? [] : ["/opt/homebrew/bin", "/usr/local/bin"];
-    const merged = [...extras, current].filter(Boolean).join(sep);
-    env.PATH = merged;
-    if (!env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK) {
-      env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True";
-    }
-    if (!env.DISABLE_MODEL_SOURCE_CHECK) {
-      env.DISABLE_MODEL_SOURCE_CHECK = "True";
-    }
+    const env = this.buildChildEnv();
+    env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True";
+    env.DISABLE_MODEL_SOURCE_CHECK = "True";
     return env;
   }
 

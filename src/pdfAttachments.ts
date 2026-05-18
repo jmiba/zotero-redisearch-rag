@@ -30,6 +30,8 @@ const asRecord = (value: unknown): Record<string, unknown> | null => {
   return value as Record<string, unknown>;
 };
 
+const isUnknownArray = (value: unknown): value is unknown[] => Array.isArray(value);
+
 export const resolvePdfAttachment = async (
   values: ZoteroItemValues,
   itemKey: string,
@@ -79,7 +81,7 @@ export const collectAttachmentCandidates = (values: ZoteroItemValues): unknown[]
     if (!bucket) {
       continue;
     }
-    if (Array.isArray(bucket)) {
+    if (isUnknownArray(bucket)) {
       collected.push(...bucket);
     } else if (typeof bucket === "object") {
       collected.push(bucket);
@@ -130,7 +132,7 @@ const followFileRedirect = async (
     return null;
   }
   const location = response.headers.location;
-  const href = Array.isArray(location) ? location[0] : location;
+  const href = isUnknownArray(location) ? location[0] : location;
   if (!href || typeof href !== "string") {
     return null;
   }

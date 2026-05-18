@@ -50,9 +50,6 @@ def get_hunspell_bundle_dir() -> str:
 
 
 def get_hunspell_cache_dir() -> str:
-    override = os.environ.get("ZRR_HUNSPELL_CACHE_DIR", "").strip()
-    if override:
-        return override
     return os.path.join(tempfile.gettempdir(), "zrr-hunspell")
 
 
@@ -3403,9 +3400,6 @@ def build_converter(config: DoclingProcessingConfig, decision: OcrRouteDecision)
 
 
 def find_poppler_path() -> Optional[str]:
-    env_path = os.environ.get("POPPLER_PATH")
-    if env_path and os.path.isfile(os.path.join(env_path, "pdftoppm")):
-        return env_path
     pdftoppm = shutil.which("pdftoppm")
     if pdftoppm:
         return os.path.dirname(pdftoppm)
@@ -3960,8 +3954,8 @@ def run_external_ocr_pages(
     def _paddle_vl_api_enabled() -> bool:
         if bool(getattr(config, "paddle_vl_api_disable", False)):
             return False
-        api_url = getattr(config, "paddle_vl_api_url", None) or os.getenv("PADDLE_VL_API_URL")
-        api_token = getattr(config, "paddle_vl_api_token", None) or os.getenv("PADDLE_VL_API_TOKEN")
+        api_url = getattr(config, "paddle_vl_api_url", None)
+        api_token = getattr(config, "paddle_vl_api_token", None)
         return bool(api_url and api_token)
     if engine == "paddle" and config.paddle_use_vl:
         if _paddle_vl_api_enabled():
@@ -5425,7 +5419,7 @@ def main() -> int:
         config.paddle_layout_device = args.paddle_layout_device
     if args.paddle_layout_keep_labels:
         config.paddle_layout_keep_labels = args.paddle_layout_keep_labels
-    paddle_layout_md_out = args.paddle_layout_md_out or os.environ.get("ZRR_PADDLE_LAYOUT_MD_OUT")
+    paddle_layout_md_out = args.paddle_layout_md_out
     if paddle_layout_md_out:
         config.paddle_layout_markdown_out = paddle_layout_md_out
     if args.paddle_layout_recognize_boxes is not None:
@@ -5434,11 +5428,10 @@ def main() -> int:
         config.paddle_layout_nms = args.paddle_layout_nms
     if args.paddle_layout_fail_on_zero:
         config.paddle_layout_fail_on_zero = True
-    paddle_save_crops = args.paddle_layout_save_crops or os.environ.get("ZRR_PADDLE_SAVE_CROPS")
+    paddle_save_crops = args.paddle_layout_save_crops
     if paddle_save_crops:
         config.paddle_layout_save_crops = paddle_save_crops
-    env_paddle_dump = os.environ.get("ZRR_PADDLE_DUMP")
-    if args.paddle_dump or (env_paddle_dump and env_paddle_dump.strip().lower() not in {"", "0", "false", "no"}):
+    if args.paddle_dump:
         config.paddle_dump = True
     if args.max_chunk_chars is not None:
         config.max_chunk_chars = args.max_chunk_chars

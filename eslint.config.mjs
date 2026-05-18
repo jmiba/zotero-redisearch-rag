@@ -6,6 +6,9 @@ export default defineConfig([
   ...obsidianmd.configs.recommended,
   {
     files: ["src/**/*.ts", "src/**/*.tsx"],
+    linterOptions: {
+      reportUnusedDisableDirectives: "off",
+    },
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: {

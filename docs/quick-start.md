@@ -19,11 +19,11 @@ No API key is needed for the local API.
 ## 2) Install the plugin
 Recommended:
 
-1. Download the latest release zip.
-2. Unzip into your vault at:
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
+2. Place them in your vault at:
 
    - `<vault>/.obsidian/plugins/zotero-redisearch-rag/`
-3. Ensure the folder contains `main.js`, `manifest.json`, `versions.json`, and `tools/`.
+3. Enable the plugin. Bundled helper files are written into `tools/` on first load.
 
 Alternatives:
 

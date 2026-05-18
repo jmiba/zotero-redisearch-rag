@@ -12,9 +12,6 @@ TESSERACT_LOGGED_ONCE = False
 
 
 def find_tesseract_path() -> Optional[str]:
-    env_cmd = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
-    if env_cmd and os.path.isfile(env_cmd):
-        return env_cmd
     tesseract_cmd = shutil.which("tesseract")
     if tesseract_cmd:
         return tesseract_cmd
@@ -53,7 +50,7 @@ def ocr_pages_with_tesseract(
             TESSERACT_LOGGED_ONCE = True
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
     else:
-        raise RuntimeError("Tesseract not found on PATH; set TESSERACT_CMD or install tesseract.")
+        raise RuntimeError("Tesseract not found on PATH or common install locations.")
 
     def _safe_float(values: Any, idx: int) -> float:
         if isinstance(values, list) and idx < len(values):

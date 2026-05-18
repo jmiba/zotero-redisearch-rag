@@ -31,7 +31,7 @@ export type ChunkLinkNavigationActions = {
 };
 
 const createZrrBadgeElement = (info: ZrrBadgeInfo, totalPages: number): HTMLElement | null => {
-  const badge = document.createElement("div");
+  const badge = createDiv();
   badge.classList.add("zrr-sync-badge");
   if (info.type === "sync-start" || info.type === "sync-end") {
     badge.classList.add("zrr-sync-badge--sync");
@@ -130,7 +130,7 @@ class ChunkToolsWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const wrap = document.createElement("span");
+    const wrap = createSpan();
     wrap.className = "zrr-chunk-toolbar";
     wrap.setAttribute("data-chunk-id", this.chunkId);
 
@@ -141,17 +141,17 @@ class ChunkToolsWidget extends WidgetType {
     };
 
     const applyButtonIcon = (button: HTMLButtonElement, iconName: string, label: string): void => {
-      const iconEl = document.createElement("span");
+      const iconEl = createSpan();
       iconEl.className = "zrr-chunk-button-icon";
       setIcon(iconEl, iconName);
-      const textEl = document.createElement("span");
+      const textEl = createSpan();
       textEl.className = "zrr-chunk-button-label";
       textEl.textContent = label;
       button.appendChild(iconEl);
       button.appendChild(textEl);
     };
 
-    const clean = document.createElement("button");
+    const clean = createEl("button");
     clean.type = "button";
     clean.className = "zrr-chunk-button";
     applyButtonIcon(clean, "sparkles", "Clean");
@@ -163,7 +163,7 @@ class ChunkToolsWidget extends WidgetType {
     });
     wrap.appendChild(clean);
 
-    const tags = document.createElement("button");
+    const tags = createEl("button");
     tags.type = "button";
     tags.className = "zrr-chunk-button";
     applyButtonIcon(tags, "tag", "Tags");
@@ -175,7 +175,7 @@ class ChunkToolsWidget extends WidgetType {
     });
     wrap.appendChild(tags);
 
-    const preview = document.createElement("button");
+    const preview = createEl("button");
     preview.type = "button";
     preview.className = "zrr-chunk-button";
     applyButtonIcon(preview, "search", "Indexed");
@@ -187,7 +187,7 @@ class ChunkToolsWidget extends WidgetType {
     });
     wrap.appendChild(preview);
 
-    const zotero = document.createElement("button");
+    const zotero = createEl("button");
     zotero.type = "button";
     zotero.className = "zrr-chunk-button";
     applyButtonIcon(zotero, "external-link", "Zotero");
@@ -199,7 +199,7 @@ class ChunkToolsWidget extends WidgetType {
     });
     wrap.appendChild(zotero);
 
-    const toggle = document.createElement("button");
+    const toggle = createEl("button");
     toggle.type = "button";
     toggle.className = "zrr-chunk-button";
     const toggleLabel = this.excluded ? "Include" : "Exclude";
@@ -274,7 +274,7 @@ class ZrrBadgeWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    return createZrrBadgeElement(this.info, this.totalPages) ?? document.createElement("span");
+    return createZrrBadgeElement(this.info, this.totalPages) ?? createSpan();
   }
 }
 

@@ -4,7 +4,6 @@ import contextlib
 import importlib
 import io
 import json
-import os
 import subprocess
 import sys
 import threading
@@ -15,8 +14,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 TOOLS_ROOT = Path("/workspace/plugin/tools").resolve()
-MAX_BODY_BYTES = int(os.environ.get("ZRR_WORKER_MAX_BODY_BYTES", "1048576"))
-DEFAULT_TIMEOUT_SEC = int(os.environ.get("ZRR_WORKER_RUN_TIMEOUT_SEC", "3600"))
+MAX_BODY_BYTES = 1048576
+DEFAULT_TIMEOUT_SEC = 3600
+TOOL_ENV = {
+    "PYTHONUNBUFFERED": "1",
+    "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+    "DISABLE_MODEL_SOURCE_CHECK": "True",
+}
 RAG_TOOL_NAME = "rag_query_redisearch.py"
 RAG_MODULE_NAME = "rag_query_redisearch"
 RAG_MODULE: Optional[Any] = None
@@ -307,7 +311,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 text=True,
                 cwd=str(TOOLS_ROOT),
                 timeout=timeout,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env=TOOL_ENV,
             )
             json_response(
                 self,
@@ -405,7 +409,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             text=True,
             bufsize=1,
             cwd=str(TOOLS_ROOT),
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=TOOL_ENV,
         )
 
         stderr_parts: List[str] = []
@@ -853,8 +857,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    host = os.environ.get("ZRR_WORKER_API_HOST", "0.0.0.0")
-    port = int(os.environ.get("ZRR_WORKER_API_PORT", "7379"))
+    host = "0.0.0.0"
+    port = 7379
     server = ThreadingHTTPServer((host, port), WorkerHandler)
     try:
         server.serve_forever()

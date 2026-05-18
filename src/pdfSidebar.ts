@@ -530,10 +530,6 @@ export class PdfSidebarController {
       seen.add(iconEl);
       iconEl.replaceChildren();
       setIcon(iconEl, "zrr-pdf");
-      if (!iconEl.querySelector("svg") && this.deps.iconSvg) {
-        const parsed = document.createRange().createContextualFragment(this.deps.iconSvg);
-        iconEl.replaceChildren(parsed);
-      }
       if (iconEl.dataset) {
         iconEl.dataset.zrrIcon = "zrr-pdf";
       }
@@ -633,7 +629,7 @@ export class PdfSidebarController {
   }
 
   private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => activeWindow.setTimeout(resolve, ms));
   }
 
   private getPluginsRegistry(): Record<string, unknown> | undefined {

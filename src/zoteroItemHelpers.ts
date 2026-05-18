@@ -9,6 +9,8 @@ const asRecord = (value: unknown): Record<string, unknown> | null => {
   return value as Record<string, unknown>;
 };
 
+const isUnknownArray = (value: unknown): value is unknown[] => Array.isArray(value);
+
 export const coerceString = (value: unknown): string => {
   if (typeof value === "string") {
     return value.trim();
@@ -218,7 +220,7 @@ export const collectItemAttachments = (data: Record<string, unknown> | undefined
     if (!bucket) {
       continue;
     }
-    if (Array.isArray(bucket)) {
+    if (isUnknownArray(bucket)) {
       collected.push(...bucket);
     } else if (typeof bucket === "object") {
       collected.push(bucket);
