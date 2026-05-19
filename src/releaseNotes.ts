@@ -7,6 +7,18 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "0.10.4",
+    markdown: `- Harden the import pipeline with better failure reporting:
+  - route command-palette imports through a dedicated wrapper that catches unexpected failures,
+  - write detailed import errors to the plugin log when file logging is enabled,
+  - add more specific failure context for bundled-tool sync, Zotero lookup, PDF resolution, Docling extraction, chunk indexing, Redis rebuilds, and final note assembly.
+- Improve worker-mode Docling startup and artifact caching:
+  - pin \`docling\` to \`2.89.0\`,
+  - preconfigure shared cache directories for Docling and Hugging Face artifacts in Docker/worker mode,
+  - prefetch Docling models on worker startup and persist them behind a version stamp to avoid repeated live downloads.
+- Pass \`DOCLING_ARTIFACTS_PATH\` through to Docling pipeline options when supported so imports can reuse the prefetched model cache.`,
+  },
+  {
     version: "0.10.3",
     markdown: `- Add explicit privacy/security documentation for filesystem access, process execution, and write-only clipboard actions.
 - Normalize Zotero companion preferences colors to 6-digit hex values for CSS lint compatibility.`,
