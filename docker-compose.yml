@@ -21,6 +21,11 @@ services:
       - PYTHONUNBUFFERED=1
       - ZRR_WORKER_REQUIREMENTS=${ZRR_WORKER_REQUIREMENTS:-/workspace/plugin/tools/requirements.txt}
       - ZRR_WORKER_VENV_DIR=/workspace/cache/venv
+      - DOCLING_ARTIFACTS_PATH=/workspace/cache/docling/models
+      - HF_HOME=/workspace/cache/huggingface
+      - HF_HUB_CACHE=/workspace/cache/huggingface/hub
+      - XDG_CACHE_HOME=/workspace/cache/xdg
+      - ZRR_DOCLING_PREFETCH=${ZRR_DOCLING_PREFETCH:-1}
       - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
       - DISABLE_MODEL_SOURCE_CHECK=True
     ports:

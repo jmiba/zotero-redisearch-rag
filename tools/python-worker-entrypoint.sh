@@ -3,8 +3,14 @@ set -eu
 
 VENV_DIR="${ZRR_WORKER_VENV_DIR:-/workspace/cache/venv}"
 STAMP_FILE="${VENV_DIR}/.requirements.sha256"
+DOCLING_ARTIFACTS_PATH="${DOCLING_ARTIFACTS_PATH:-/workspace/cache/docling/models}"
+HF_HOME="${HF_HOME:-/workspace/cache/huggingface}"
+HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/cache/xdg}"
+ZRR_DOCLING_PREFETCH="${ZRR_DOCLING_PREFETCH:-1}"
 
 mkdir -p "$(dirname "${VENV_DIR}")"
+mkdir -p "${DOCLING_ARTIFACTS_PATH}" "${HF_HOME}" "${HF_HUB_CACHE}" "${XDG_CACHE_HOME}"
 
 if [ ! -x "${VENV_DIR}/bin/python" ]; then
   python3 -m venv "${VENV_DIR}"
@@ -37,6 +43,41 @@ if [ "${CURRENT_HASH}" != "${INSTALLED_HASH}" ]; then
   "${VENV_DIR}/bin/pip" install --upgrade pip
   "${VENV_DIR}/bin/pip" install -r "${REQ_FILE}"
   printf "%s\n" "${CURRENT_HASH}" > "${STAMP_FILE}"
+fi
+
+if [ "${ZRR_DOCLING_PREFETCH}" = "1" ]; then
+  DOCLING_VERSION="$("${VENV_DIR}/bin/python" - <<'PY'
+import importlib.metadata as metadata
+try:
+    print(metadata.version("docling"))
+except Exception:
+    print("")
+PY
+)"
+  PREFETCH_STAMP="${DOCLING_ARTIFACTS_PATH}/.zrr-docling-version"
+  PREFETCH_NEEDED=0
+  if [ -n "${DOCLING_VERSION}" ]; then
+    if [ ! -f "${PREFETCH_STAMP}" ] || [ "$(cat "${PREFETCH_STAMP}" 2>/dev/null || true)" != "${DOCLING_VERSION}" ]; then
+      PREFETCH_NEEDED=1
+    fi
+  elif [ -z "$(find "${DOCLING_ARTIFACTS_PATH}" -mindepth 1 -print -quit 2>/dev/null || true)" ]; then
+    PREFETCH_NEEDED=1
+  fi
+
+  if [ "${PREFETCH_NEEDED}" = "1" ]; then
+    echo "Prefetching Docling models into ${DOCLING_ARTIFACTS_PATH}..." >&2
+    if "${VENV_DIR}/bin/python" - <<'PY'
+from docling.utils.model_downloader import download_models
+download_models()
+PY
+    then
+      if [ -n "${DOCLING_VERSION}" ]; then
+        printf "%s\n" "${DOCLING_VERSION}" > "${PREFETCH_STAMP}"
+      fi
+    else
+      echo "Warning: Docling model prefetch failed; worker will continue and Docling may still try live downloads during import." >&2
+    fi
+  fi
 fi
 
 exec "$@"

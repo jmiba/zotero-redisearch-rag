@@ -3371,6 +3371,9 @@ def build_converter(config: DoclingProcessingConfig, decision: OcrRouteDecision)
         return DocumentConverter()
 
     pipeline_options = PdfPipelineOptions()
+    artifacts_path = os.environ.get("DOCLING_ARTIFACTS_PATH")
+    if artifacts_path and hasattr(pipeline_options, "artifacts_path"):
+        pipeline_options.artifacts_path = artifacts_path
     if not decision.ocr_used:
         if hasattr(pipeline_options, "do_ocr"):
             pipeline_options.do_ocr = False

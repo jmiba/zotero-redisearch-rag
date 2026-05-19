@@ -30,6 +30,11 @@ WORKDIR /workspace
 
 ENV ZRR_WORKER_REQUIREMENTS=/workspace/plugin/tools/requirements.txt
 ENV ZRR_WORKER_VENV_DIR=/workspace/cache/venv
+ENV DOCLING_ARTIFACTS_PATH=/workspace/cache/docling/models
+ENV HF_HOME=/workspace/cache/huggingface
+ENV HF_HUB_CACHE=/workspace/cache/huggingface/hub
+ENV XDG_CACHE_HOME=/workspace/cache/xdg
+ENV ZRR_DOCLING_PREFETCH=1
 ENV PATH=/workspace/cache/venv/bin:$PATH
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1

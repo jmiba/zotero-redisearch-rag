@@ -360,7 +360,9 @@ export default class ZoteroRagPlugin extends Plugin {
     this.addCommand({
       id: "import-zotero-item-index",
       name: "Import Zotero item and index (docling -> redissearch)",
-      callback: () => this.importZoteroItem(),
+      callback: () => {
+        void this.importZoteroItemWithFailureReporting();
+      },
     });
 
     this.addCommand({
@@ -745,12 +747,49 @@ export default class ZoteroRagPlugin extends Plugin {
       .join("\n\n");
   }
 
+  private async importZoteroItemWithFailureReporting(): Promise<void> {
+    try {
+      await this.importZoteroItem();
+    } catch (error) {
+      await this.reportPdfImportFailure("Unhandled PDF import failure", error);
+      this.clearStatusProgress();
+      new Notice("PDF import failed. See console or import log for details.");
+    }
+  }
+
+  private formatErrorForImportLog(error: unknown): string {
+    if (error instanceof Error) {
+      return error.stack || error.message || String(error);
+    }
+    if (typeof error === "string") {
+      return error;
+    }
+    try {
+      return JSON.stringify(error, null, 2);
+    } catch {
+      return String(error);
+    }
+  }
+
+  private async reportPdfImportFailure(context: string, error: unknown): Promise<void> {
+    console.error(context, error);
+    if (!this.settings.enableFileLogging) {
+      return;
+    }
+    await this.appendToLogFile(
+      this.getLogFileAbsolutePath(),
+      `${context}\n${this.formatErrorForImportLog(error)}`,
+      "pdf_import",
+      "ERROR"
+    );
+  }
+
   private async importZoteroItem(): Promise<void> {
     try {
       await this.ensureBundledTools();
     } catch (error) {
       new Notice("Failed to sync bundled tools. See console for details.");
-      console.error(error);
+      await this.reportPdfImportFailure("PDF import failed while syncing bundled tools", error);
       return;
     }
 
@@ -764,7 +803,7 @@ export default class ZoteroRagPlugin extends Plugin {
       item = await this.promptZoteroItem();
     } catch (error) {
       new Notice("Zotero search failed. See console for details.");
-      console.error(error);
+      await this.reportPdfImportFailure("PDF import failed during Zotero item search", error);
       return;
     }
 
@@ -884,7 +923,7 @@ export default class ZoteroRagPlugin extends Plugin {
       }
     } catch (error) {
       new Notice("Failed to create output folders.");
-      console.error(error);
+      await this.reportPdfImportFailure(`PDF import failed while preparing output folders for ${docId}`, error);
       this.clearStatusProgress();
       return;
     }
@@ -934,7 +973,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       await cleanupStagedFiles();
       new Notice("Failed to download PDF attachment.");
-      console.error(error);
+      await this.reportPdfImportFailure(`PDF import failed while resolving PDF attachment for ${docId}`, error);
       this.clearStatusProgress();
       return;
     }
@@ -944,7 +983,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       await cleanupStagedFiles();
       new Notice("Failed to write Zotero item JSON.");
-      console.error(error);
+      await this.reportPdfImportFailure(`PDF import failed while writing item cache for ${docId}`, error);
       this.clearStatusProgress();
       return;
     }
@@ -999,7 +1038,7 @@ export default class ZoteroRagPlugin extends Plugin {
       } else {
         new Notice("Docling extraction failed. Incomplete import files were cleaned up.");
       }
-      console.error(error);
+      await this.reportPdfImportFailure(`PDF import failed during Docling extraction for ${docId}`, error);
       this.clearStatusProgress();
       return;
     }
@@ -1059,7 +1098,7 @@ export default class ZoteroRagPlugin extends Plugin {
     } catch (error) {
       const message = this.getPythonErrorMessage(error);
       const classification = this.classifyIndexingError(message);
-      console.error(error);
+      await this.reportPdfImportFailure(`PDF import failed during chunk indexing for ${docId}`, error);
       if (classification === "embed_dim_mismatch") {
         const confirmed = await this.confirmRebuildIndex(
           "Embedding model output dimension does not match the Redis index schema. " +
@@ -1088,7 +1127,10 @@ export default class ZoteroRagPlugin extends Plugin {
           } catch (dropError) {
             this.clearStatusProgress();
             new Notice("Failed to drop/rebuild the redis index. See console for details.");
-            console.error(dropError);
+            await this.reportPdfImportFailure(
+              `PDF import failed while rebuilding Redis index for ${docId}`,
+              dropError
+            );
             return;
           }
         } else {
@@ -1164,7 +1206,7 @@ export default class ZoteroRagPlugin extends Plugin {
       await cleanupStagedFiles();
       await cleanupIncompleteFinalFiles();
       new Notice("Failed to finalize note Markdown. Incomplete import files were cleaned up.");
-      console.error(error);
+      await this.reportPdfImportFailure(`PDF import failed while finalizing note for ${docId}`, error);
       this.clearStatusProgress();
       return;
     }
@@ -9863,7 +9905,7 @@ export default class ZoteroRagPlugin extends Plugin {
       };
       const body = options.body;
       const timeoutMs = Number.isFinite(options.timeoutMs ?? NaN) ? Number(options.timeoutMs) : 0;
-      let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      let timeoutId: number | null = null;
       if (body !== undefined && headers["Content-Length"] === undefined) {
         const length = Buffer.isBuffer(body) ? body.length : Buffer.byteLength(body);
         headers["Content-Length"] = String(length);
