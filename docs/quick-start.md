@@ -4,7 +4,7 @@ This page walks you through a minimal, working setup so you can import a Zotero 
 
 ## Prerequisites
 - Obsidian (desktop)
-- Zotero 7 or 8 (desktop)
+- Zotero 7, 8, or 9 (desktop)
 - Docker Desktop or Podman (for Redis Stack)
 - A local or cloud OpenAI-compatible model provider
 

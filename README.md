@@ -136,7 +136,7 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 ## Requirements
 
 - Obsidian (desktop)
-- Zotero 7 or 8 (desktop)
+- Zotero 7, 8, or 9 (desktop)
 - Docker Desktop or Podman (for Redis Stack + Python worker)
 - LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
 - Optional (advanced legacy local runtime only): Python 3.11–3.13
