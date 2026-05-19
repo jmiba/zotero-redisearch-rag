@@ -39,3 +39,11 @@ __pycache__/
 .venv/
 venv/
 .env/
+.codex
+
+# lat.md
+
+lat.md/.cache/
+*.sqlite
+*.sqlite3
+*.db
