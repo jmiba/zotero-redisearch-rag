@@ -8,7 +8,9 @@ It spans import, Docling/OCR, chunk construction, indexing, chat retrieval, rera
 
 Import is a staged transaction that avoids leaving partial final files when extraction or indexing fails.
 
-The plugin resolves the selected Zotero item and PDF, writes staged item JSON, runs `tools/docling_extract.py`, indexes staged chunk JSON with `tools/index_redisearch.py`, builds the final note, then atomically replaces final cache and note files. Failed runs clean up staged files and partial outputs.
+The plugin resolves the selected Zotero item and PDF, writes staged item JSON, computes a page-aware worker timeout budget with `tools/pdf_page_count.py`, runs `tools/docling_extract.py`, indexes staged chunk JSON with `tools/index_redisearch.py`, builds the final note, then atomically replaces final cache and note files. Failed runs clean up staged files, partial outputs, and any Redis chunks already written for the doc.
+
+Import failures are always surfaced through an Obsidian notice and a console error. When file logging is enabled, failures are also appended to the configured import log as `ERROR pdf_import` entries, including unexpected top-level command failures that escape a specific import stage.
 
 ## Docling And OCR
 
@@ -16,7 +18,7 @@ Docling extraction decides whether to trust a text layer, OCR, or postprocess te
 
 `tools/docling_extract.py` detects text layers, selects language hints, chooses OCR engines, detects low-quality OCR, handles per-page OCR, applies dictionary and cleanup corrections, extracts page ranges, and emits both Markdown and chunk JSON.
 
-The plugin can run this tool through the Python worker API or legacy local Python. Import timeout budgets scale with PDF page count.
+The plugin can run this tool through the Python worker API or legacy local Python. In worker mode, Docling and Hugging Face model artifacts are cached under the mounted worker cache and prefetched on worker startup so imports do not depend on first-use model downloads.
 
 ## Chunk Construction
 
@@ -49,4 +51,3 @@ Cache files are the recovery source when Redis or generated notes drift.
 The plugin can reindex all cached chunks, reindex the current note, rebuild the doc index, recreate missing notes from cache, drop and rebuild RedisSearch, and restore missing chunk JSON from note markers when a note still has a valid sync section.
 
 These rebuild paths depend on the marker grammar in [[chunk-sync#Recovery From Markers]].
-
