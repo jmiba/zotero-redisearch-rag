@@ -231,18 +231,24 @@ In Zotero:
 3) No API key is needed for the local API.
 
 ### 2) Install the plugin
-Option A (manual release assets):
+Option A (recommended, Community Plugins):
+1) In Obsidian, open **Settings -> Community plugins**.
+2) Turn off **Restricted mode** if needed.
+3) Click **Browse** and search for **Zotero Research Assistant**.
+4) Click **Install**, then **Enable**.
+
+Option B (manual release assets):
 1) Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
 2) Place them in `<vault>/.obsidian/plugins/zotero-redisearch-rag/`.
 3) Enable the plugin. Bundled helper files are written into `tools/` on first load.
 
-Option B (BRAT, beta testing):
+Option C (BRAT, beta testing):
 1) Install the BRAT plugin in Obsidian.
 2) BRAT -> Add Beta plugin.
 3) Enter the repo slug: `jmiba/zotero-redisearch-rag`
 4) Enable the plugin in Community plugins.
 
-Option C (build from source, power users):
+Option D (build from source, power users):
 ```bash
 npm install
 npm run build
