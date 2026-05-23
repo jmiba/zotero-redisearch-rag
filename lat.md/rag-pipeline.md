@@ -42,6 +42,10 @@ Chat queries stream answers from the worker while keeping citations tied to retr
 
 `src/chatView.ts` owns the chat UI and session state. `src/main.ts` invokes `tools/rag_query_redisearch.py` with embedding and chat provider settings, recent history, optional follow-up rewriting, optional query expansion, optional cross-encoder reranking, and optional agentic retrieval.
 
+Chat session listing uses an Obsidian-style sort menu beside the session selector. The persisted sort order defaults to newest updated sessions first, and no-op saves do not refresh `updatedAt`, so switching chats alone does not reorder the selector.
+
+The sort menu button uses Obsidian's `clickable-icon nav-action-button` structure, resolves the built-in sort icon through the runtime icon registry, then falls back to rendering the same `svg-icon lucide-sort-asc` SVG shape when the registry does not expose that icon to plugins.
+
 Returned citations are resolved through the doc index and can link to the Obsidian note chunk, source PDF, or Zotero deep link.
 
 ## Cache Rebuilds

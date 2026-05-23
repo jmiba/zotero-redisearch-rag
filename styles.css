@@ -40,8 +40,16 @@
 .zrr-chat-session {
   flex: 1 1 auto;
   width: 100%;
+  min-width: 0;
   max-width: none;
   font-size: var(--font-ui-small);
+}
+
+.zrr-chat-session-sort {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .zrr-chat-new,

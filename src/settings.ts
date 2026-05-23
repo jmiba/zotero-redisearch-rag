@@ -31,6 +31,13 @@ export type CleanupModeMemoryEntry = {
   lastPreferredProbeAt: number;
   updatedAt: number;
 };
+export type ChatSessionSortOrder =
+  | "alphabetical"
+  | "alphabeticalReverse"
+  | "byModifiedTime"
+  | "byModifiedTimeReverse"
+  | "byCreatedTime"
+  | "byCreatedTimeReverse";
 
 export type OcrEngineAvailability = {
   tesseract: boolean;
@@ -117,6 +124,7 @@ export interface ZoteroRagSettings {
   chatModel: string;
   chatTemperature: number;
   chatHistoryMessages: number;
+  chatSessionSortOrder: ChatSessionSortOrder;
   lastSeenReleaseNotesVersion: string;
   enableAgenticRag: boolean;
   agenticMaxIters: number;
@@ -318,6 +326,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
+  chatSessionSortOrder: "byModifiedTime",
   lastSeenReleaseNotesVersion: "",
   chatPaneLocation: "right",
   enableAgenticRag: false,

@@ -41,6 +41,7 @@ import {
   OcrEngineAvailability,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
+  type ChatSessionSortOrder,
 } from "./settings";
 import { PdfSidebarController } from "./pdfSidebar";
 import { ICON_ASSETS } from "./iconAssets";
@@ -135,6 +136,7 @@ const IMPORT_WORKER_TIMEOUT_PER_PAGE_SEC = 12;
 const IMPORT_WORKER_TIMEOUT_MAX_SEC = 10800;
 const PDF_PAGE_COUNT_TIMEOUT_SEC = 30;
 const MAX_CITATION_TITLE_LENGTH = 80;
+const DEFAULT_CHAT_SESSION_SORT_ORDER: ChatSessionSortOrder = "byModifiedTime";
 const ANNOTATION_SYNC_GRACE_MS = 120000;
 const CLEANUP_MODE_REPROBE_MS = 30 * 24 * 60 * 60 * 1000;
 const ZRR_ANNOTATIONS_START_RE = /<!--\s*zrr:annotations-start\b[^>]*-->/i;
@@ -256,6 +258,13 @@ type ComposeProjectContext = {
   composeCommand: ComposeCommandSpec;
   composeEnv: NodeJS.ProcessEnv;
   project: string;
+};
+
+type ChatSession = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export default class ZoteroRagPlugin extends Plugin {
@@ -1338,7 +1347,83 @@ export default class ZoteroRagPlugin extends Plugin {
     return normalizePath(`${this.getChatSessionsDir()}/${sessionId}.json`);
   }
 
-  public async listChatSessions(): Promise<{ id: string; name: string; createdAt: string; updatedAt: string }[]> {
+  private orderChatSessions(
+    sessions: ChatSession[],
+    order: ChatSessionSortOrder = DEFAULT_CHAT_SESSION_SORT_ORDER
+  ): ChatSession[] {
+    return [...sessions].sort((a, b) => this.compareChatSessions(a, b, order));
+  }
+
+  private getChatSessionSortOrder(): ChatSessionSortOrder {
+    return this.settings.chatSessionSortOrder || DEFAULT_CHAT_SESSION_SORT_ORDER;
+  }
+
+  private compareChatSessions(a: ChatSession, b: ChatSession, order: ChatSessionSortOrder): number {
+    switch (order) {
+      case "alphabetical":
+        return this.compareChatSessionNames(a, b) || this.compareChatSessionIds(a, b);
+      case "alphabeticalReverse":
+        return this.compareChatSessionNames(b, a) || this.compareChatSessionIds(a, b);
+      case "byCreatedTime":
+        return (
+          this.compareChatSessionTimes(a.createdAt, b.createdAt, "desc")
+          || this.compareChatSessionTimes(a.updatedAt, b.updatedAt, "desc")
+          || this.compareChatSessionNames(a, b)
+          || this.compareChatSessionIds(a, b)
+        );
+      case "byCreatedTimeReverse":
+        return (
+          this.compareChatSessionTimes(a.createdAt, b.createdAt, "asc")
+          || this.compareChatSessionTimes(a.updatedAt, b.updatedAt, "asc")
+          || this.compareChatSessionNames(a, b)
+          || this.compareChatSessionIds(a, b)
+        );
+      case "byModifiedTimeReverse":
+        return (
+          this.compareChatSessionTimes(a.updatedAt, b.updatedAt, "asc")
+          || this.compareChatSessionTimes(a.createdAt, b.createdAt, "asc")
+          || this.compareChatSessionNames(a, b)
+          || this.compareChatSessionIds(a, b)
+        );
+      case "byModifiedTime":
+      default:
+        return (
+          this.compareChatSessionTimes(a.updatedAt, b.updatedAt, "desc")
+          || this.compareChatSessionTimes(a.createdAt, b.createdAt, "desc")
+          || this.compareChatSessionNames(a, b)
+          || this.compareChatSessionIds(a, b)
+        );
+    }
+  }
+
+  private compareChatSessionNames(a: ChatSession, b: ChatSession): number {
+    const left = (a.name || a.id).trim();
+    const right = (b.name || b.id).trim();
+    return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  private compareChatSessionIds(a: ChatSession, b: ChatSession): number {
+    return a.id.localeCompare(b.id, undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  private compareChatSessionTimes(a: string, b: string, direction: "asc" | "desc"): number {
+    const left = Date.parse(a);
+    const right = Date.parse(b);
+    const leftValid = Number.isFinite(left);
+    const rightValid = Number.isFinite(right);
+    if (leftValid && rightValid) {
+      if (left === right) {
+        return 0;
+      }
+      return direction === "asc" ? left - right : right - left;
+    }
+    if (leftValid !== rightValid) {
+      return leftValid ? -1 : 1;
+    }
+    return 0;
+  }
+
+  public async listChatSessions(): Promise<ChatSession[]> {
     await this.migrateLegacyChatHistory();
     const adapter = this.app.vault.adapter;
     const indexPath = this.getChatSessionsIndexPath();
@@ -1346,13 +1431,13 @@ export default class ZoteroRagPlugin extends Plugin {
       const now = new Date().toISOString();
       const sessions = [{ id: "default", name: "New chat", createdAt: now, updatedAt: now }];
       await this.writeChatSessionsIndex({ version: 1, active: "default", sessions });
-      return sessions;
+      return this.orderChatSessions(sessions, this.getChatSessionSortOrder());
     }
     try {
       const raw = await adapter.read(indexPath);
       const payload = this.asRecord(JSON.parse(raw));
       const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
-      return sessions
+      const normalized = sessions
         .filter((s): s is Record<string, unknown> => {
           return Boolean(this.asRecord(s) && typeof (s as Record<string, unknown>).id === "string");
         })
@@ -1361,10 +1446,11 @@ export default class ZoteroRagPlugin extends Plugin {
           return {
             id,
             name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : id,
-          createdAt: typeof s.createdAt === "string" ? s.createdAt : new Date().toISOString(),
-          updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : new Date().toISOString(),
+            createdAt: typeof s.createdAt === "string" ? s.createdAt : new Date().toISOString(),
+            updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : new Date().toISOString(),
           };
         });
+      return this.orderChatSessions(normalized, this.getChatSessionSortOrder());
     } catch (error) {
       console.warn("Failed to read chat sessions index", error);
       return [];
@@ -1438,7 +1524,9 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!remaining.length) {
       return;
     }
-    const nextActive = index.active === sessionId ? remaining[0].id : index.active;
+    const nextActive = index.active === sessionId
+      ? this.orderChatSessions(remaining, this.getChatSessionSortOrder())[0].id
+      : index.active;
     try {
       await adapter.remove(this.getChatSessionPath(sessionId));
     } catch (error) {
@@ -1491,11 +1579,24 @@ export default class ZoteroRagPlugin extends Plugin {
       version: 1,
       messages,
     };
-    await adapter.write(historyPath, JSON.stringify(payload, null, 2));
+    const serialized = JSON.stringify(payload, null, 2);
+    let historyChanged = true;
+    if (await adapter.exists(historyPath)) {
+      try {
+        historyChanged = (await adapter.read(historyPath)) !== serialized;
+      } catch {
+        historyChanged = true;
+      }
+    }
+    if (historyChanged) {
+      await adapter.write(historyPath, serialized);
+    }
 
     const index = await this.readChatSessionsIndex();
     const now = new Date().toISOString();
-    const sessions = (index.sessions ?? []).map((s) => (s.id === sessionId ? { ...s, updatedAt: now } : s));
+    const sessions = (index.sessions ?? []).map((s) => (
+      s.id === sessionId ? { ...s, updatedAt: historyChanged ? now : s.updatedAt } : s
+    ));
     await this.writeChatSessionsIndex({ version: 1, active: index.active ?? sessionId, sessions });
   }
 
@@ -1511,7 +1612,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private async readChatSessionsIndex(): Promise<{
     version: number;
     active: string;
-    sessions: { id: string; name: string; createdAt: string; updatedAt: string }[];
+    sessions: ChatSession[];
   }> {
     const adapter = this.app.vault.adapter;
     const indexPath = this.getChatSessionsIndexPath();
@@ -1534,8 +1635,8 @@ export default class ZoteroRagPlugin extends Plugin {
             return {
               id,
               name: typeof s.name === "string" && s.name.trim() ? s.name.trim() : id,
-            createdAt: typeof s.createdAt === "string" ? s.createdAt : now,
-            updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : now,
+              createdAt: typeof s.createdAt === "string" ? s.createdAt : now,
+              updatedAt: typeof s.updatedAt === "string" ? s.updatedAt : now,
             };
           }),
       };
@@ -1548,7 +1649,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private async writeChatSessionsIndex(payload: {
     version: number;
     active: string;
-    sessions: { id: string; name: string; createdAt: string; updatedAt: string }[];
+    sessions: ChatSession[];
   }): Promise<void> {
     await this.ensureFolder(this.getChatSessionsDir());
     await this.app.vault.adapter.write(this.getChatSessionsIndexPath(), JSON.stringify(payload, null, 2));

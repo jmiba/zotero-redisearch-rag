@@ -15,6 +15,8 @@ Chats are saved as sessions so you can pick up where you left off.
 - **Rename**: Give the current session a better title.
 - **Delete**: Remove the current session (you must keep at least one).
 
+Use the sort button next to the session selector to choose name, last-modified, or created-time ordering. The selected sort order is saved and the default is most recently updated first.
+
 While a response is still streaming, session switching and session-management actions are disabled. Finish or cancel the current response first so chat history from one session cannot affect another in-flight request.
 
 ## Copy a chat to a note

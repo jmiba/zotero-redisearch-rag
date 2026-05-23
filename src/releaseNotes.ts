@@ -7,6 +7,16 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "1.0.0",
+    markdown: `- Add chat session sorting controls:
+  - new persisted sort menu next to the session selector supports name, last-modified, and created-time ordering,
+  - default ordering is newest modified first,
+  - no-op session saves no longer refresh \`updatedAt\`, so merely switching chats does not reshuffle the list.
+- Improve chat-session sort UI/docs:
+  - add an Obsidian-style sort button with runtime icon fallback styling,
+  - document chat sorting behavior in the chat-panel and RAG pipeline docs.`,
+  },
+  {
     version: "0.10.4",
     markdown: `- Harden the import pipeline with better failure reporting:
   - route command-palette imports through a dedicated wrapper that catches unexpected failures,

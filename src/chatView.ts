@@ -1,5 +1,6 @@
-import { App, ItemView, MarkdownRenderer, Modal, Notice, Setting, WorkspaceLeaf, setIcon } from "obsidian";
+import { App, ItemView, MarkdownRenderer, Menu, Modal, Notice, Setting, WorkspaceLeaf, getIconIds, setIcon } from "obsidian";
 import type ZoteroRagPlugin from "./main";
+import type { ChatSessionSortOrder } from "./settings";
 import type { ZoteroLocalItem } from "./types";
 import { getDocIdFromItem } from "./zoteroItemHelpers";
 
@@ -90,6 +91,19 @@ const ZOTERO_ITEM_TYPE_ICON_MAP: Record<string, string> = {
   webpage: "globe",
 };
 
+const CHAT_SESSION_SORT_LABELS: Record<ChatSessionSortOrder, string> = {
+  alphabetical: "Name (A - Z)",
+  alphabeticalReverse: "Name (Z - A)",
+  byModifiedTime: "Last modified (new to old)",
+  byModifiedTimeReverse: "Last modified (old to new)",
+  byCreatedTime: "Created (new to old)",
+  byCreatedTimeReverse: "Created (old to new)",
+};
+
+const DEFAULT_CHAT_SESSION_SORT_ORDER: ChatSessionSortOrder = "byModifiedTime";
+const CHAT_SESSION_SORT_ICON_IDS = ["sort-asc", "lucide-sort-asc"] as const;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 type MessageEls = {
   wrapper: HTMLElement;
   content: HTMLElement;
@@ -107,6 +121,7 @@ export class ZoteroChatView extends ItemView {
   private renameButton!: HTMLButtonElement;
   private copyButton!: HTMLButtonElement;
   private sessionSelect!: HTMLSelectElement;
+  private sessionSortButton!: HTMLElement;
   private deleteButton!: HTMLButtonElement;
   private activeSessionId = "default";
   private messageEls = new Map<string, MessageEls>();
@@ -152,6 +167,20 @@ export class ZoteroChatView extends ItemView {
     this.sessionSelect = selectRow.createEl("select", { cls: "zrr-chat-session" });
     this.sessionSelect.addEventListener("change", () => {
       void this.switchSession(this.sessionSelect.value);
+    });
+    this.sessionSortButton = selectRow.createDiv({
+      cls: "zrr-chat-session-sort clickable-icon nav-action-button",
+      attr: { "aria-label": "Sort chats", title: "Sort chats", role: "button", tabindex: "0" },
+    });
+    this.setSessionSortButtonIcon();
+    this.sessionSortButton.addEventListener("click", (event) => {
+      this.openSessionSortMenu(event);
+    });
+    this.sessionSortButton.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      this.openSessionSortMenu(event);
     });
     const buttonRow = controls.createDiv({ cls: "zrr-chat-controls-row zrr-chat-controls-actions" });
     this.renameButton = buttonRow.createEl("button", {
@@ -281,9 +310,115 @@ export class ZoteroChatView extends ItemView {
     };
 
     setBusyState(this.sessionSelect, "Switch chat session");
+    this.updateSessionSortButtonState(busyTitle);
     setBusyState(this.renameButton, "Rename the current chat");
     setBusyState(this.deleteButton, "Delete this chat");
     setBusyState(this.newButton, "Start a new chat session");
+  }
+
+  private updateSessionSortButtonState(busyTitle: string): void {
+    if (!this.sessionSortButton) {
+      return;
+    }
+    this.sessionSortButton.toggleClass("is-disabled", this.busy);
+    this.sessionSortButton.setAttr("aria-disabled", this.busy ? "true" : "false");
+    this.sessionSortButton.setAttr("tabindex", this.busy ? "-1" : "0");
+    this.sessionSortButton.setAttr("title", this.busy ? busyTitle : `Sort chats: ${this.getSessionSortOrderLabel()}`);
+  }
+
+  private getSessionSortOrder(): ChatSessionSortOrder {
+    return this.plugin.settings.chatSessionSortOrder || DEFAULT_CHAT_SESSION_SORT_ORDER;
+  }
+
+  private getSessionSortOrderLabel(): string {
+    return CHAT_SESSION_SORT_LABELS[this.getSessionSortOrder()] ?? CHAT_SESSION_SORT_LABELS[DEFAULT_CHAT_SESSION_SORT_ORDER];
+  }
+
+  private setSessionSortButtonIcon(): void {
+    const availableIconIds = new Set(getIconIds());
+    const preferred = CHAT_SESSION_SORT_ICON_IDS.find((iconId) => availableIconIds.has(iconId))
+      ?? CHAT_SESSION_SORT_ICON_IDS[0];
+    for (const iconId of [preferred, ...CHAT_SESSION_SORT_ICON_IDS]) {
+      setIcon(this.sessionSortButton, iconId);
+      if (this.sessionSortButton.querySelector("svg")) {
+        return;
+      }
+    }
+    this.renderSessionSortIconFallback();
+  }
+
+  private renderSessionSortIconFallback(): void {
+    this.sessionSortButton.empty();
+    const doc = this.sessionSortButton.ownerDocument;
+    const svg = doc.createElementNS(SVG_NS, "svg");
+    svg.setAttr("xmlns", SVG_NS);
+    svg.setAttr("width", "24");
+    svg.setAttr("height", "24");
+    svg.setAttr("viewBox", "0 0 24 24");
+    svg.setAttr("fill", "none");
+    svg.setAttr("stroke", "currentColor");
+    svg.setAttr("stroke-width", "2");
+    svg.setAttr("stroke-linecap", "round");
+    svg.setAttr("stroke-linejoin", "round");
+    svg.addClass("svg-icon");
+    svg.addClass("lucide-sort-asc");
+
+    for (const d of ["m3 8 4-4 4 4", "M7 4v16", "M11 12h4", "M11 16h7", "M11 20h10"]) {
+      const path = doc.createElementNS(SVG_NS, "path");
+      path.setAttr("d", d);
+      svg.appendChild(path);
+    }
+
+    this.sessionSortButton.appendChild(svg);
+  }
+
+  private openSessionSortMenu(event: MouseEvent | KeyboardEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (this.busy) {
+      new Notice("Finish or cancel the current response before sorting chats.");
+      return;
+    }
+    const current = this.getSessionSortOrder();
+    const menu = new Menu();
+    menu.setUseNativeMenu(false);
+    const addSortItem = (order: ChatSessionSortOrder): void => {
+      menu.addItem((item) => {
+        item
+          .setTitle(CHAT_SESSION_SORT_LABELS[order])
+          .setChecked(current === order)
+          .onClick(() => {
+            void this.setSessionSortOrder(order);
+          });
+      });
+    };
+    addSortItem("alphabetical");
+    addSortItem("alphabeticalReverse");
+    menu.addSeparator();
+    addSortItem("byModifiedTime");
+    addSortItem("byModifiedTimeReverse");
+    menu.addSeparator();
+    addSortItem("byCreatedTime");
+    addSortItem("byCreatedTimeReverse");
+    if (event instanceof MouseEvent) {
+      menu.showAtMouseEvent(event);
+      return;
+    }
+    const rect = this.sessionSortButton.getBoundingClientRect();
+    menu.showAtPosition({
+      x: rect.left,
+      y: rect.bottom,
+      width: rect.width,
+    }, this.sessionSortButton.ownerDocument);
+  }
+
+  private async setSessionSortOrder(order: ChatSessionSortOrder): Promise<void> {
+    if (this.getSessionSortOrder() === order) {
+      return;
+    }
+    this.plugin.settings.chatSessionSortOrder = order;
+    await this.plugin.saveSettings();
+    await this.loadSessions();
   }
 
   private async loadSessions(): Promise<void> {
