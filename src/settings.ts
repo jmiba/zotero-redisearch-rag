@@ -124,6 +124,7 @@ export interface ZoteroRagSettings {
   chatModel: string;
   chatTemperature: number;
   chatHistoryMessages: number;
+  chatTopK: number;
   chatSessionSortOrder: ChatSessionSortOrder;
   lastSeenReleaseNotesVersion: string;
   enableAgenticRag: boolean;
@@ -326,6 +327,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   chatModel: "openai/gpt-oss-20b",
   chatTemperature: 0.2,
   chatHistoryMessages: 6,
+  chatTopK: 5,
   chatSessionSortOrder: "byModifiedTime",
   lastSeenReleaseNotesVersion: "",
   chatPaneLocation: "right",
@@ -2108,6 +2110,22 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
 
       new Setting(tabEl).setName("Retrieval").setHeading();
+
+      new Setting(tabEl)
+        .setName("Chat context chunks")
+        .setDesc("Final number of retrieved chunks to keep before annotations and answer generation.")
+        .addText((text) =>
+          text
+            .setPlaceholder("5")
+            .setValue(String(this.plugin.settings.chatTopK))
+            .onChange(async (value) => {
+              const parsed = Number.parseInt(value, 10);
+              this.plugin.settings.chatTopK = Number.isFinite(parsed)
+                ? Math.max(1, parsed)
+                : 5;
+              await this.plugin.saveSettings();
+            })
+        );
 
       new Setting(tabEl)
         .setName("Enable agentic retrieval")

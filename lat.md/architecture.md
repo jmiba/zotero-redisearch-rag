@@ -48,6 +48,8 @@ LLM providers are OpenAI-compatible endpoints selected separately for embeddings
 
 Provider profiles reduce repeated base URL and API key setup. Embedding settings affect Redis schema compatibility, chat settings drive answer generation, and cleanup/tagging settings are optional preprocessing aids for noisy OCR text and chunk tags.
 
+Model-list authentication failures are surfaced as Obsidian notices so invalid provider keys are visible without opening the developer console.
+
 ## User-Facing Surfaces
 
 Users interact through commands, settings, generated notes, chunk controls, the PDF sidebar, and the chat panel.
@@ -55,4 +57,3 @@ Users interact through commands, settings, generated notes, chunk controls, the 
 Generated notes contain YAML frontmatter, optional PDF links, optional annotation callouts, and a synchronized Docling body. Live Preview exposes chunk badges and tools so users can inspect, clean, tag, exclude, open, or reindex chunk content without leaving the note.
 
 Chunk marker behavior is documented in [[chunk-sync#Chunk Sync]].
-

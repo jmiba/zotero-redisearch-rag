@@ -279,6 +279,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private lastContainerNotice: string | null = null;
   private lastZoteroApiNotice: string | null = null;
   private lastRedisNotice: string | null = null;
+  private lastModelLookupNotice: { message: string; at: number } | null = null;
   private pythonWorkerRequestSeq = 0;
   private noteSyncTimers = new Map<string, number>();
   private noteSyncInFlight = new Set<string>();
@@ -1974,7 +1975,7 @@ export default class ZoteroRagPlugin extends Plugin {
       "--query",
       query,
       "--k",
-      "5",
+      String(Math.max(1, Math.trunc(this.settings.chatTopK || 5))),
       "--redis-url",
       this.settings.redisUrl,
       "--index",
@@ -11465,6 +11466,64 @@ export default class ZoteroRagPlugin extends Plugin {
     return "generic";
   }
 
+  private extractHttpStatusFromError(error: unknown): number | null {
+    const message = error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+    const match = message.match(/\((\d{3})\)/);
+    if (!match) {
+      return null;
+    }
+    const status = Number.parseInt(match[1], 10);
+    return Number.isFinite(status) ? status : null;
+  }
+
+  private getModelProviderNoticeLabel(
+    baseUrl: string,
+    provider: "openai" | "openrouter" | "ollama" | "anthropic" | "generic"
+  ): string {
+    if (this.isLmStudioProvider(baseUrl)) {
+      return "LM Studio";
+    }
+    if (provider === "openai") {
+      return "OpenAI";
+    }
+    if (provider === "openrouter") {
+      return "OpenRouter";
+    }
+    if (provider === "anthropic") {
+      return "Anthropic";
+    }
+    if (provider === "ollama") {
+      return "Ollama";
+    }
+    return "Model provider";
+  }
+
+  private notifyModelLookupAuthFailure(
+    baseUrl: string,
+    provider: "openai" | "openrouter" | "ollama" | "anthropic" | "generic",
+    error: unknown
+  ): void {
+    const status = this.extractHttpStatusFromError(error);
+    if (status !== 401 && status !== 403) {
+      return;
+    }
+    const label = this.getModelProviderNoticeLabel(baseUrl, provider);
+    const message = `${label} rejected the model-list API key (${status}). Check the API key in LLM settings.`;
+    const now = Date.now();
+    if (
+      this.lastModelLookupNotice?.message === message &&
+      now - this.lastModelLookupNotice.at < 15000
+    ) {
+      return;
+    }
+    this.lastModelLookupNotice = { message, at: now };
+    new Notice(message, 9000);
+  }
+
   private async fetchModelIds(baseUrl: string, apiKey: string): Promise<string[]> {
     const provider = this.detectEmbeddingProvider(baseUrl);
     try {
@@ -11478,6 +11537,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return modelIds;
     } catch (error) {
       this.logOptionalLookupFailure("Failed to fetch models", error);
+      this.notifyModelLookupAuthFailure(baseUrl, provider, error);
       return [];
     }
   }

@@ -1,4 +1,13 @@
 # Changelog
+## 1.0.1
+- Add a configurable chat retrieval chunk limit:
+  - new `Chat context chunks` setting controls the final number of retrieved chunks kept before annotations and answer generation,
+  - chat queries now pass that configured limit into the RAG pipeline instead of using a fixed `5` chunks.
+- Surface model-list authentication failures in the UI:
+  - invalid provider API keys for model lookup now raise Obsidian notices instead of only logging to the console,
+  - notices are rate-limited and provider-labeled (for example LM Studio, OpenAI, OpenRouter, Anthropic, Ollama).
+- Update internal architecture and RAG pipeline docs for the new retrieval chunk setting and model-list auth-failure behavior.
+
 ## 1.0.0
 - Add chat session sorting controls:
   - new persisted sort menu next to the session selector supports name, last-modified, and created-time ordering,
