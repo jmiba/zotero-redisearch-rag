@@ -26,6 +26,8 @@ Imports stage all item JSON, chunk JSON, note Markdown, and optional copied PDFs
 
 The import path resolves a processable PDF attachment, runs Docling/OCR through the configured Python runtime, writes chunk JSON under `.zotero-redisearch-rag/chunks`, indexes chunks into RedisSearch, then finalizes the note with frontmatter and synchronized chunk markers.
 
+The import picker resolves child attachments when Zotero search metadata cannot prove PDF availability, so items with only snapshots or other non-PDF files are still flagged as missing a PDF.
+
 The extraction and indexing flow is documented in [[rag-pipeline#Import Pipeline]].
 
 ## Worker Runtime Boundary

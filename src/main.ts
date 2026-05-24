@@ -96,6 +96,7 @@ import {
   extractYear,
   formatCreatorName,
   getDocIdFromValues,
+  getPdfStatusFromItem,
   isPdfAttachment,
 } from "./zoteroItemHelpers";
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
@@ -5272,7 +5273,11 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!Array.isArray(parsed)) {
           return [];
         }
-        return this.normalizeZoteroSearchResults(parsed);
+        const normalized = this.normalizeZoteroSearchResults(parsed);
+        return this.hydrateZoteroSearchResultAttachmentStatuses(
+          normalized,
+          this.fetchZoteroChildrenWeb.bind(this)
+        );
       } catch (error) {
         console.warn("Failed to search Zotero via web API", error);
       }
@@ -5294,6 +5299,33 @@ export default class ZoteroRagPlugin extends Plugin {
         };
       })
       .filter((item) => this.isImportableZoteroResult(item));
+  }
+
+  private async hydrateZoteroSearchResultAttachmentStatuses(
+    items: ZoteroLocalItem[],
+    fetchChildren: (itemKey: string) => Promise<unknown[]>
+  ): Promise<ZoteroLocalItem[]> {
+    await Promise.all(items.map(async (item) => {
+      if (getPdfStatusFromItem(item) !== "unknown") {
+        return;
+      }
+      const numChildren = item.meta?.numChildren;
+      if (typeof numChildren === "number" && numChildren <= 0) {
+        return;
+      }
+      const itemKey = item.key.trim();
+      if (!itemKey) {
+        return;
+      }
+      try {
+        const children = await fetchChildren(itemKey);
+        item.data = { ...item.data, children };
+        item.meta = { ...item.meta, numChildren: children.length };
+      } catch (error) {
+        console.debug("Failed to hydrate Zotero children for PDF status", { itemKey, error });
+      }
+    }));
+    return items;
   }
 
   private isImportableZoteroResult(item: ZoteroLocalItem): boolean {
@@ -9557,7 +9589,11 @@ export default class ZoteroRagPlugin extends Plugin {
         if (!Array.isArray(items)) {
           return [];
         }
-        return this.normalizeZoteroSearchResults(items);
+        const normalized = this.normalizeZoteroSearchResults(items);
+        return this.hydrateZoteroSearchResultAttachmentStatuses(
+          normalized,
+          this.fetchZoteroChildrenLocal.bind(this)
+        );
       } catch (error) {
         console.warn("Failed to search Zotero via local API", error);
       }

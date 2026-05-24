@@ -1,4 +1,10 @@
 # Changelog
+## 1.0.2
+- Improve PDF availability detection in the import picker:
+  - when Zotero search metadata reports PDF status as unknown, the plugin now hydrates child attachments before deciding whether an item is importable,
+  - this avoids falsely treating items with only snapshots or other non-PDF children as having a usable PDF.
+- Document the clarified import-picker behavior in the internal architecture notes.
+
 ## 1.0.1
 - Add a configurable chat retrieval chunk limit:
   - new `Chat context chunks` setting controls the final number of retrieved chunks kept before annotations and answer generation,
