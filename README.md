@@ -167,7 +167,7 @@ The plugin uses Node.js filesystem APIs because several core workflows need file
 
 - reading Zotero PDF attachments from local Zotero file paths before optionally copying them into the vault,
 - writing bundled helper scripts into the plugin data folder on first load,
-- creating and maintaining Redis/Python worker cache folders under the vault/plugin data area,
+- creating and maintaining Redis data and Python worker cache folders under the configured local cache/data paths,
 - writing optional diagnostic logs when file logging is enabled,
 - downloading the optional Zotero companion add-on into the plugin data folder when requested.
 

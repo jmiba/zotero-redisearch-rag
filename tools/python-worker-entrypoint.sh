@@ -64,14 +64,36 @@ PY
     PREFETCH_NEEDED=1
   fi
 
+  REQUIRED_DOCLING_MODEL_FILES="
+RapidOcr/torch/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.pth
+"
+  for required_model in ${REQUIRED_DOCLING_MODEL_FILES}; do
+    if [ ! -f "${DOCLING_ARTIFACTS_PATH}/${required_model}" ]; then
+      echo "Docling model cache is missing ${required_model}; refreshing model prefetch." >&2
+      PREFETCH_NEEDED=1
+      break
+    fi
+  done
+
   if [ "${PREFETCH_NEEDED}" = "1" ]; then
     echo "Prefetching Docling models into ${DOCLING_ARTIFACTS_PATH}..." >&2
     if "${VENV_DIR}/bin/python" - <<'PY'
+import os
+from pathlib import Path
 from docling.utils.model_downloader import download_models
-download_models()
+
+download_models(output_dir=Path(os.environ["DOCLING_ARTIFACTS_PATH"]))
 PY
     then
-      if [ -n "${DOCLING_VERSION}" ]; then
+      PREFETCH_COMPLETE=1
+      for required_model in ${REQUIRED_DOCLING_MODEL_FILES}; do
+        if [ ! -f "${DOCLING_ARTIFACTS_PATH}/${required_model}" ]; then
+          echo "Warning: Docling model prefetch finished but ${required_model} is still missing." >&2
+          PREFETCH_COMPLETE=0
+          break
+        fi
+      done
+      if [ "${PREFETCH_COMPLETE}" = "1" ] && [ -n "${DOCLING_VERSION}" ]; then
         printf "%s\n" "${DOCLING_VERSION}" > "${PREFETCH_STAMP}"
       fi
     else

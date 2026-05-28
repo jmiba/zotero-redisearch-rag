@@ -20,13 +20,13 @@ The test suite covers text layer presence, born-digital classifiers, mixed class
 
 OCR routing must choose OCR only when the configured mode and quality signals justify it.
 
-Tests cover low-quality forced OCR, text-layer preservation, per-page OCR decisions, rasterization triggers, engine language selection, and zero-character OCR page detection.
+Tests cover low-quality forced OCR, text-layer preservation including low-quality text layers that are not explicitly re-OCRed, per-page OCR decisions, rasterization triggers, engine language selection, the default Paddle-first route, explicit Paddle routing, missing external OCR diagnostics, Docling converter ONNX OCR options and low-memory runtime limits for external routes, filtering unstable Paddle orientation overrides, and zero-character OCR page detection.
 
 ### Text Cleanup
 
 Text cleanup must repair common OCR artifacts without damaging valid Markdown or domain text.
 
-Covered behaviors include dehyphenation, dictionary correction, German umlaut correction, narrow escaping of gender stars, missing-space repair inputs, and page range overlap detection.
+Covered behaviors include dehyphenation, dictionary correction, German umlaut correction without optional word-frequency dependencies, Hunspell cache location, narrow escaping of gender stars, missing-space repair inputs, and page range overlap detection.
 
 ### Layout Signals
 
@@ -47,4 +47,3 @@ Important end-to-end flows are documented but not yet covered by automated tests
 The highest-value gaps are Zotero API metadata conflict handling, annotation block round trips, chunk marker edit reindexing, Redis dimension mismatch recovery, chat citation navigation, and companion image fetch authorization.
 
 These gaps correspond to [[zotero-sync#Metadata Sync]], [[zotero-sync#Annotation Sync]], [[chunk-sync#Editable Chunk Text]], [[rag-pipeline#Indexing And Retrieval]], [[rag-pipeline#Chat Query Flow]], and [[companion-addon#Token Authorization]].
-

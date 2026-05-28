@@ -4,6 +4,7 @@ import contextlib
 import importlib
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -17,6 +18,7 @@ TOOLS_ROOT = Path("/workspace/plugin/tools").resolve()
 MAX_BODY_BYTES = 1048576
 DEFAULT_TIMEOUT_SEC = 3600
 TOOL_ENV = {
+    **os.environ,
     "PYTHONUNBUFFERED": "1",
     "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
     "DISABLE_MODEL_SOURCE_CHECK": "True",
@@ -25,7 +27,7 @@ RAG_TOOL_NAME = "rag_query_redisearch.py"
 RAG_MODULE_NAME = "rag_query_redisearch"
 RAG_MODULE: Optional[Any] = None
 RAG_MODULE_LOCK = threading.Lock()
-RAG_EXEC_LOCK = threading.Lock()
+WORKER_EXEC_LOCK = threading.Lock()
 CANCEL_EVENTS: Dict[str, threading.Event] = {}
 CANCEL_EVENTS_LOCK = threading.Lock()
 
@@ -192,14 +194,15 @@ def unregister_cancel_event(request_id: str) -> None:
         CANCEL_EVENTS.pop(request_id, None)
 
 
-def acquire_rag_lock(cancel_event: threading.Event, deadline_ms: int) -> None:
+def acquire_worker_slot(cancel_event: threading.Event, deadline_ms: int) -> int:
+    wait_started_at = monotonic_ms()
     while True:
-        if RAG_EXEC_LOCK.acquire(timeout=0.25):
-            return
+        if WORKER_EXEC_LOCK.acquire(timeout=0.25):
+            return monotonic_ms() - wait_started_at
         if cancel_event.is_set():
-            raise TimeoutError("canceled_while_waiting_rag_slot")
+            raise TimeoutError("canceled_while_waiting_worker_slot")
         if monotonic_ms() >= deadline_ms:
-            raise TimeoutError("timeout_while_waiting_rag_slot")
+            raise TimeoutError("timeout_while_waiting_worker_slot")
 
 
 class WorkerHandler(BaseHTTPRequestHandler):
@@ -303,14 +306,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 )
             return
 
-        command = [sys.executable, str(script_path), *args]
+        deadline_ms = started_at + (max(1, timeout) * 1000)
+        lock_wait_ms = 0
+        lock_acquired = False
         try:
+            lock_wait_ms = acquire_worker_slot(cancel_event, deadline_ms)
+            lock_acquired = True
+            remaining_timeout = max(1, int((deadline_ms - monotonic_ms() + 999) / 1000))
+            command = [sys.executable, str(script_path), *args]
             completed = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 cwd=str(TOOLS_ROOT),
-                timeout=timeout,
+                timeout=remaining_timeout,
                 env=TOOL_ENV,
             )
             json_response(
@@ -333,6 +342,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 duration_ms=finished_at - started_at,
                 stdout_bytes=len(completed.stdout or ""),
                 stderr_bytes=len(completed.stderr or ""),
+                lock_wait_ms=lock_wait_ms,
             )
         except subprocess.TimeoutExpired as exc:
             finished_at = monotonic_ms()
@@ -355,6 +365,31 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tool=script_path.name,
                 exit_code=124,
                 duration_ms=finished_at - started_at,
+                lock_wait_ms=lock_wait_ms,
+            )
+        except TimeoutError as exc:
+            finished_at = monotonic_ms()
+            canceled = "canceled" in str(exc)
+            json_response(
+                self,
+                200,
+                {
+                    "ok": False,
+                    "exit_code": 130 if canceled else 124,
+                    "stdout": "",
+                    "stderr": str(exc),
+                    "error": "canceled" if canceled else "timeout",
+                    "timeout_sec": timeout if not canceled else None,
+                },
+            )
+            log_timing(
+                "run-timeout",
+                request_id=request_id,
+                path=self.path,
+                tool=script_path.name,
+                exit_code=130 if canceled else 124,
+                duration_ms=finished_at - started_at,
+                lock_wait_ms=lock_wait_ms,
             )
         except Exception as exc:
             finished_at = monotonic_ms()
@@ -376,7 +411,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tool=script_path.name,
                 duration_ms=finished_at - started_at,
                 error=str(exc),
+                lock_wait_ms=lock_wait_ms,
             )
+        finally:
+            if lock_acquired:
+                WORKER_EXEC_LOCK.release()
 
     def _run_stream(
         self,
@@ -401,16 +440,63 @@ class WorkerHandler(BaseHTTPRequestHandler):
             )
             return
 
-        command = [sys.executable, str(script_path), *args]
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            cwd=str(TOOLS_ROOT),
-            env=TOOL_ENV,
-        )
+        deadline_ms = started_at + (max(1, timeout) * 1000)
+        lock_wait_ms = 0
+        lock_acquired = False
+        try:
+            lock_wait_ms = acquire_worker_slot(cancel_event, deadline_ms)
+            lock_acquired = True
+        except TimeoutError as exc:
+            canceled = "canceled" in str(exc)
+            exit_code = 130 if canceled else 124
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            self.wfile.write(
+                (
+                    json.dumps(
+                        {
+                            "type": "done",
+                            "ok": False,
+                            "exit_code": exit_code,
+                            "stderr": str(exc),
+                            "error": "canceled" if canceled else "timeout",
+                            "timeout_sec": timeout if not canceled else None,
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            self.wfile.flush()
+            finished_at = monotonic_ms()
+            log_timing(
+                "stream-timeout",
+                request_id=request_id,
+                path=self.path,
+                tool=script_path.name,
+                exit_code=exit_code,
+                duration_ms=finished_at - started_at,
+                lock_wait_ms=lock_wait_ms,
+                canceled=canceled,
+            )
+            return
+
+        remaining_timeout = max(1, int((deadline_ms - monotonic_ms() + 999) / 1000))
+        try:
+            command = [sys.executable, str(script_path), *args]
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                cwd=str(TOOLS_ROOT),
+                env=TOOL_ENV,
+            )
+        except Exception:
+            if lock_acquired:
+                WORKER_EXEC_LOCK.release()
+            raise
 
         stderr_parts: List[str] = []
         stderr_done = threading.Event()
@@ -442,7 +528,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception:
                 return
 
-        timer = threading.Timer(timeout, enforce_timeout)
+        timer = threading.Timer(remaining_timeout, enforce_timeout)
         timer.daemon = True
         timer.start()
 
@@ -513,7 +599,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     "exit_code": exit_code,
                     "stderr": stderr_text,
                     "error": ("timeout" if timed_out else ("canceled" if canceled else "")),
-                    "timeout_sec": timeout if timed_out else None,
+                    "timeout_sec": remaining_timeout if timed_out else None,
                 }
             )
         finished_at = monotonic_ms()
@@ -530,7 +616,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             stderr_bytes=len(stderr_text),
             client_open=client_open,
             canceled=canceled,
+            lock_wait_ms=lock_wait_ms,
         )
+        if lock_acquired:
+            WORKER_EXEC_LOCK.release()
 
     def _run_rag_non_stream(
         self,
@@ -564,9 +653,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         lock_wait_ms = 0
         lock_acquired = False
         try:
-            wait_started_at = monotonic_ms()
-            acquire_rag_lock(cancel_event, deadline_ms)
-            lock_wait_ms = monotonic_ms() - wait_started_at
+            lock_wait_ms = acquire_worker_slot(cancel_event, deadline_ms)
             lock_acquired = True
             try:
                 with contextlib.redirect_stderr(stderr_buffer), contextlib.redirect_stdout(stdout_buffer):
@@ -596,7 +683,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             stderr_buffer.write(f"{exc}\n")
         finally:
             if lock_acquired:
-                RAG_EXEC_LOCK.release()
+                WORKER_EXEC_LOCK.release()
 
         stdout_parts: List[str] = []
         stdout_text = stdout_buffer.getvalue()
@@ -688,10 +775,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         exit_code = 0
         error_text = ""
         lock_wait_ms = 0
+        lock_acquired = False
         try:
-            wait_started_at = monotonic_ms()
-            acquire_rag_lock(cancel_event, deadline_ms)
-            lock_wait_ms = monotonic_ms() - wait_started_at
+            lock_wait_ms = acquire_worker_slot(cancel_event, deadline_ms)
+            lock_acquired = True
             try:
                 # In-process streaming keeps reranker loaded in memory.
                 with contextlib.redirect_stderr(stderr_buffer), contextlib.redirect_stdout(stdout_buffer):
@@ -703,7 +790,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         )
                     )
             finally:
-                RAG_EXEC_LOCK.release()
+                if lock_acquired:
+                    WORKER_EXEC_LOCK.release()
+                    lock_acquired = False
         except ClientDisconnectedError:
             client_open = False
             error_text = "client_disconnected"

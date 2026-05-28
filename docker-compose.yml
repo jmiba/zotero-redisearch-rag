@@ -33,4 +33,4 @@ services:
     volumes:
       - "${ZRR_PLUGIN_DIR:-.}:/workspace/plugin:ro"
       - "${ZRR_VAULT_DIR:-.}:/workspace/vault"
-      - "${ZRR_WORKER_CACHE_DIR:-./.zotero-redisearch-rag/python-worker-cache}:/workspace/cache"
+      - "${ZRR_WORKER_CACHE_DIR:-~/.cache/zotero-redisearch-rag}:/workspace/cache"

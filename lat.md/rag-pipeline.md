@@ -10,7 +10,11 @@ Import is a staged transaction that avoids leaving partial final files when extr
 
 The plugin resolves the selected Zotero item and PDF, writes staged item JSON, computes a page-aware worker timeout budget with `tools/pdf_page_count.py`, runs `tools/docling_extract.py`, indexes staged chunk JSON with `tools/index_redisearch.py`, builds the final note, then atomically replaces final cache and note files. Failed runs clean up staged files, partial outputs, and any Redis chunks already written for the doc.
 
-Import failures are always surfaced through an Obsidian notice and a console error. When file logging is enabled, failures are also appended to the configured import log as `ERROR pdf_import` entries, including unexpected top-level command failures that escape a specific import stage.
+Before indexing, staged chunk metadata is rewritten from temporary vault PDF paths to the final PDF path so Redis, chunk cache, and `doc_index` do not retain `.zrr-pdf-*` paths after the transaction commits.
+
+Import failures are always surfaced through an Obsidian notice and a console error. Diagnostics prioritize explicit worker timeout/cancel/error records and stdout errors over ordinary INFO/DEBUG stderr, including ANSI-colored OCR and Paddle connectivity logs.
+
+When file logging is enabled, failures are also appended to the configured import log as `ERROR pdf_import` entries, including unexpected top-level command failures that escape a specific import stage.
 
 ## Docling And OCR
 
@@ -18,7 +22,23 @@ Docling extraction decides whether to trust a text layer, OCR, or postprocess te
 
 `tools/docling_extract.py` detects text layers, selects language hints, chooses OCR engines, detects low-quality OCR, handles per-page OCR, applies dictionary and cleanup corrections, extracts page ranges, and emits both Markdown and chunk JSON.
 
-The plugin can run this tool through the Python worker API or legacy local Python. In worker mode, Docling and Hugging Face model artifacts are cached under the mounted worker cache and prefetched on worker startup so imports do not depend on first-use model downloads.
+The plugin can run this tool through the Python worker API or legacy local Python. In worker mode, child tools inherit the worker cache environment, so Docling, Hugging Face, and Hunspell artifacts resolve under the mounted worker cache where possible.
+
+The worker dependency baseline pins Docling `2.89.0` while keeping `onnxruntime` explicit, so RapidOCR ONNX routing remains available without relying on optional extras resolution. The worker stays on a Docling release that still provides the `docling.document_converter` API used by `tools/docling_extract.py` on Linux Python 3.12.
+
+The default Auto OCR engine follows the stable release behavior: basic local Paddle is preferred when available, with Tesseract as fallback. Paddle VL and structure APIs remain opt-in.
+
+When an external OCR route is selected, Docling conversion is configured with explicit OCR options so layout conversion does not fall back to an unintended RapidOCR backend. Paddle routes use RapidOCR's packaged ONNX models through `onnxruntime` during Docling conversion, and the external OCR pass can still replace page text after conversion.
+
+Text-layer PDFs are not forced through external Paddle layout OCR unless OCR is forced or low-quality text re-OCR is explicitly enabled. This keeps usable embedded text from hitting native Paddle paths unnecessarily.
+
+Local Paddle OCR keeps document-orientation and text-line orientation classification disabled by default because the native Paddle classifiers can crash the worker on some PDFs and platforms.
+
+If a configured external OCR engine is unavailable, extraction fails with an explicit worker/OCR diagnostic instead of falling back to Docling RapidOCR. This keeps missing Tesseract or Paddle installs from surfacing as obscure RapidOCR model path errors.
+
+The worker API serializes Docling, indexing, and RAG executions through one resource slot. This avoids stacking memory-heavy imports, reranking, and indexing in the same worker container. Docling layout/OCR/table stages run with small batches to reduce worker memory spikes on large OCR-heavy PDFs. Worker startup refreshes Docling model prefetch when the persistent model cache is missing known RapidOCR artifacts, writes downloads to the mounted `DOCLING_ARTIFACTS_PATH`, and only stamps the cache after required artifacts exist.
+
+Hunspell dictionary downloads are logged instead of written to stdout, because stdout is reserved for worker JSON/progress records during streaming imports.
 
 ## Chunk Construction
 

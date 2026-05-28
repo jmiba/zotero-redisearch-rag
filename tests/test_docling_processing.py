@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -86,6 +87,133 @@ class DoclingProcessingTests(unittest.TestCase):
         )
         self.assertFalse(decision.ocr_used)
 
+    def test_default_ocr_route_prefers_paddle(self):
+        config = self.docling.DoclingProcessingConfig()
+        quality = self.docling.TextQuality(0, 0.0, 0.0, 0.0)
+        decision = self.docling.decide_ocr_route(
+            False,
+            quality,
+            ["paddle", "tesseract"],
+            config,
+            config.default_lang_english,
+        )
+        self.assertTrue(decision.ocr_used)
+        self.assertEqual(decision.ocr_engine, "paddle")
+
+    def test_low_quality_text_layer_does_not_force_paddle_layout_by_default(self):
+        config = self.docling.DoclingProcessingConfig()
+        config.quality_confidence_threshold = 0.5
+        quality = self.docling.TextQuality(200, 0.9, 0.01, 0.2)
+        decision = self.docling.decide_ocr_route(
+            True,
+            quality,
+            ["paddle", "tesseract"],
+            config,
+            config.default_lang_english,
+        )
+        self.assertFalse(decision.ocr_used)
+
+    def test_explicit_paddle_route_still_uses_paddle(self):
+        config = self.docling.DoclingProcessingConfig()
+        config.prefer_ocr_engine = "paddle"
+        config.fallback_ocr_engine = "paddle"
+        quality = self.docling.TextQuality(0, 0.0, 0.0, 0.0)
+        decision = self.docling.decide_ocr_route(
+            False,
+            quality,
+            ["paddle", "tesseract"],
+            config,
+            config.default_lang_english,
+        )
+        self.assertTrue(decision.ocr_used)
+        self.assertEqual(decision.ocr_engine, "paddle")
+
+    def test_requested_external_ocr_missing_raises_before_docling_ocr(self):
+        config = self.docling.DoclingProcessingConfig()
+        quality = self.docling.TextQuality(0, 0.0, 0.0, 0.0)
+        decision = self.docling.decide_ocr_route(
+            False,
+            quality,
+            [],
+            config,
+            config.default_lang_english,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "External OCR engine unavailable"):
+            self.docling.validate_ocr_route(decision, config, [])
+
+    def test_external_ocr_configures_docling_selected_engine(self):
+        class FakeInputFormat:
+            PDF = "pdf"
+
+        class FakePdfPipelineOptions:
+            def __init__(self):
+                self.accelerator_options = types.SimpleNamespace(num_threads=4)
+                self.do_ocr = True
+                self.ocr_mode = None
+                self.ocr_options = None
+                self.ocr_engine = ""
+                self.ocr_languages = ""
+                self.ocr_lang = ""
+                self.layout_batch_size = 4
+                self.ocr_batch_size = 4
+                self.queue_max_size = 100
+                self.table_batch_size = 4
+
+        class FakeRapidOcrOptions:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeTesseractCliOcrOptions:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakePdfFormatOption:
+            def __init__(self, pipeline_options):
+                self.pipeline_options = pipeline_options
+
+        class FakeDocumentConverter:
+            def __init__(self, format_options=None):
+                self.format_options = format_options
+
+        fake_modules = {
+            "docling": types.ModuleType("docling"),
+            "docling.datamodel": types.ModuleType("docling.datamodel"),
+            "docling.datamodel.base_models": types.ModuleType("docling.datamodel.base_models"),
+            "docling.datamodel.pipeline_options": types.ModuleType("docling.datamodel.pipeline_options"),
+            "docling.document_converter": types.ModuleType("docling.document_converter"),
+        }
+        fake_modules["docling.datamodel.base_models"].InputFormat = FakeInputFormat
+        fake_modules["docling.datamodel.pipeline_options"].PdfPipelineOptions = FakePdfPipelineOptions
+        fake_modules["docling.datamodel.pipeline_options"].RapidOcrOptions = FakeRapidOcrOptions
+        fake_modules["docling.datamodel.pipeline_options"].TesseractCliOcrOptions = FakeTesseractCliOcrOptions
+        fake_modules["docling.document_converter"].DocumentConverter = FakeDocumentConverter
+        fake_modules["docling.document_converter"].PdfFormatOption = FakePdfFormatOption
+
+        decision = self.docling.OcrRouteDecision(
+            True,
+            "paddle",
+            "eng",
+            "No usable text layer detected",
+            True,
+            False,
+            "Quality metrics acceptable",
+        )
+        with patch.dict(sys.modules, fake_modules):
+            converter = self.docling.build_converter(self.docling.DoclingProcessingConfig(), decision)
+
+        options = converter.format_options[FakeInputFormat.PDF].pipeline_options
+        self.assertTrue(options.do_ocr)
+        self.assertIsNone(options.ocr_mode)
+        self.assertEqual(options.ocr_engine, "paddle")
+        self.assertIsInstance(options.ocr_options, FakeRapidOcrOptions)
+        self.assertEqual(options.ocr_options.kwargs["backend"], "onnxruntime")
+        self.assertEqual(options.accelerator_options.num_threads, 1)
+        self.assertEqual(options.layout_batch_size, 1)
+        self.assertEqual(options.ocr_batch_size, 1)
+        self.assertEqual(options.queue_max_size, 8)
+        self.assertEqual(options.table_batch_size, 1)
+
     def test_force_ocr_on_low_quality_text(self):
         config = self.docling.DoclingProcessingConfig()
         config.force_ocr_on_low_quality_text = True
@@ -151,6 +279,17 @@ class DoclingProcessingTests(unittest.TestCase):
         corrected = self.docling.apply_dictionary_correction("m0dern", ["modern"])
         self.assertEqual(corrected, "modern")
 
+    def test_hunspell_cache_prefers_worker_cache_env(self):
+        with patch.dict(
+            self.docling.os.environ,
+            {"ZRR_HUNSPELL_CACHE_DIR": "", "XDG_CACHE_HOME": "/tmp/zrr-xdg-cache"},
+            clear=False,
+        ):
+            self.assertEqual(
+                self.docling.get_hunspell_cache_dir(),
+                "/tmp/zrr-xdg-cache/zrr-hunspell",
+            )
+
     def test_filter_docling_config_overrides_removes_gui_keys(self):
         filtered = self.docling.filter_docling_config_overrides(
             {
@@ -158,6 +297,8 @@ class DoclingProcessingTests(unittest.TestCase):
                 "llm_cleanup_model": "test-model",
                 "quality_confidence_threshold": 0.2,
                 "analysis_max_pages": 7,
+                "paddle_use_doc_orientation_classify": True,
+                "paddle_use_textline_orientation": True,
             }
         )
         self.assertEqual(filtered, {"analysis_max_pages": 7})
@@ -226,7 +367,7 @@ class DoclingProcessingTests(unittest.TestCase):
 
     def test_umlaut_correction(self):
         text = "ueber"
-        output = self.docling.apply_umlaut_corrections(text, "deu+eng", [])
+        output = self.docling.apply_umlaut_corrections(text, "deu+eng", ["\u00fcber"])
         self.assertEqual(output, "\u00fcber")
 
     def test_escape_gender_stars_is_narrow(self):

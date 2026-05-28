@@ -27,6 +27,7 @@ export type NoteMetadataFields = {
   volume: string;
   pages: string;
   item_type: string;
+  language: string;
   tags: string[];
   authors: string[];
   editors: string[];

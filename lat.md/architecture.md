@@ -36,6 +36,16 @@ The recommended Python runtime is the worker container, with local Python kept a
 
 Worker mode runs Redis Stack and a `python-worker` service through Docker or Podman compose. The plugin maps vault and plugin paths into container paths, rewrites local Redis URLs for the compose network, and restricts worker calls to bundled tools in the plugin `tools` directory.
 
+The worker service runs heavyweight Python tools through a single execution slot, so Docling extraction, chunk indexing, and RAG/reranking do not compete for container memory. Child tool processes inherit the worker cache environment.
+
+The bundled worker requirements pin the Paddle OCR stack to known-good versions so local installs and cached worker rebuilds do not silently drift to newer `paddleocr` or `paddlex` releases. Those pins also need to stay compatible with the Linux Python version used by the worker image, not just a developer's local environment.
+
+The HTTP stack keeps major-version bounds while allowing `requests` patch and minor updates under `<3`, avoiding unnecessary freezes on stable client APIs.
+
+The persistent worker cache keeps the virtual environment and model artifacts separately; startup can refresh missing model artifacts without deleting the cached virtual environment. By default the cache lives under the user's home cache path in a vault-specific subdirectory and can be overridden in settings, including with a vault-relative `./` path when desired. Docling model prefetch targets the mounted cache path explicitly so version stamps do not mask an empty artifact directory.
+
+Worker readiness accepts a healthy worker API even when compose service inspection misses the running service, avoiding false "worker not running" failures for an already reachable worker.
+
 ## Redis Boundary
 
 RedisSearch is the local vector index, while Obsidian files remain the durable user-visible record.

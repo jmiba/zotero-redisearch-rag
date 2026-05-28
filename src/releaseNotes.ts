@@ -7,6 +7,26 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "1.0.3",
+    markdown: `- Stabilize the Python worker runtime after recent dependency and cache-path changes:
+  - pin \`docling\` back to \`2.89.0\` and keep \`paddlepaddle\` at \`3.2.2\` so the Linux Python 3.12 worker image uses a dependency set that installs cleanly and still exposes the \`docling.document_converter\` API expected by the importer,
+  - keep the Paddle OCR stack pinned to known-good worker-compatible versions.
+- Move the default Python worker cache out of synced vault data:
+  - add a configurable **Python worker cache path** setting,
+  - default the worker cache to a per-vault subdirectory under \`~/.cache/zotero-redisearch-rag/\` instead of storing heavy worker downloads inside the vault,
+  - keep explicit override support, including \`./\` for vault-relative paths when desired.
+- Relax the \`requests\` pin while keeping the HTTP stack bounded:
+  - switch from \`requests==2.32.3\` to \`requests<3\`,
+  - keep \`urllib3\`, \`charset-normalizer\`, and \`chardet\` constrained to compatible major versions.
+- Improve metadata and import-path consistency:
+  - include \`language\` in bidirectional note/Zotero metadata sync and conflict handling,
+  - strip temporary import PDF suffixes before persisting \`source_pdf\` paths so imported chunks point back to the final vault PDF path.
+- Harden OCR routing and worker diagnostics:
+  - stop low-quality text layers from forcing external Paddle OCR unless that fallback is explicitly enabled,
+  - fail early with clearer diagnostics when a requested external OCR engine is unavailable,
+  - surface more actionable worker slot, cancellation, and process-exit diagnostics while filtering low-signal Python noise.`,
+  },
+  {
     version: "1.0.2",
     markdown: `- Improve PDF availability detection in the import picker:
   - when Zotero search metadata reports PDF status as unknown, the plugin now hydrates child attachments before deciding whether an item is importable,

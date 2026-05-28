@@ -250,10 +250,10 @@ def _paddlex_layout_ocr_pages(
     if max_side_px > 0:
         ocr_kwargs["text_det_limit_side_len"] = max_side_px
         ocr_kwargs["text_det_limit_type"] = "max"
-    if getattr(config, "paddle_use_doc_orientation_classify", False):
-        ocr_kwargs["use_doc_orientation_classify"] = True
-    if getattr(config, "paddle_use_doc_unwarping", False):
-        ocr_kwargs["use_doc_unwarping"] = True
+    ocr_kwargs["use_doc_orientation_classify"] = bool(
+        getattr(config, "paddle_use_doc_orientation_classify", False)
+    )
+    ocr_kwargs["use_doc_unwarping"] = bool(getattr(config, "paddle_use_doc_unwarping", False))
     if getattr(config, "paddle_use_textline_orientation", None) is not None:
         ocr_kwargs["use_textline_orientation"] = bool(config.paddle_use_textline_orientation)
 
@@ -273,7 +273,7 @@ def _paddlex_layout_ocr_pages(
     reduced_kwargs.pop("use_doc_unwarping", None)
 
     ctor_candidates: List[Dict[str, Any]] = []
-    use_tlo = bool(getattr(config, "paddle_use_textline_orientation", True))
+    use_tlo = bool(getattr(config, "paddle_use_textline_orientation", False))
     ctor_candidates.append({**ocr_kwargs, "use_textline_orientation": use_tlo})
     ctor_candidates.append({**reduced_kwargs, "use_textline_orientation": use_tlo})
     ctor_candidates.append({**ocr_kwargs})
@@ -1113,7 +1113,7 @@ def _paddlex_layout_ocr_pages(
                     crop_arr,
                     det=False,
                     rec=True,
-                    cls=bool(getattr(config, "paddle_use_textline_orientation", True)),
+                    cls=bool(getattr(config, "paddle_use_textline_orientation", False)),
                 )
                 result = _keep_if_text(result)
                 if not result:
@@ -1128,7 +1128,7 @@ def _paddlex_layout_ocr_pages(
                 if not result:
                     result = _ocr_legacy(
                         crop_arr,
-                        cls=bool(getattr(config, "paddle_use_textline_orientation", True)),
+                        cls=bool(getattr(config, "paddle_use_textline_orientation", False)),
                     )
                     result = _keep_if_text(result)
                 if result:
@@ -1443,7 +1443,7 @@ def _paddlex_layout_ocr_pages(
                     if result is None:
                         result = _ocr_legacy(
                             img_np,
-                            cls=bool(getattr(config, "paddle_use_textline_orientation", True)),
+                            cls=bool(getattr(config, "paddle_use_textline_orientation", False)),
                         )
                 except Exception as exc:
                     raise RuntimeError(f"PaddleOCR failed: {exc}") from exc
@@ -2876,10 +2876,8 @@ def ocr_pages_with_paddle(
     if config.paddle_target_max_side_px > 0:
         ocr_kwargs["text_det_limit_side_len"] = config.paddle_target_max_side_px
         ocr_kwargs["text_det_limit_type"] = "max"
-    if config.paddle_use_doc_orientation_classify:
-        ocr_kwargs["use_doc_orientation_classify"] = True
-    if config.paddle_use_doc_unwarping:
-        ocr_kwargs["use_doc_unwarping"] = True
+    ocr_kwargs["use_doc_orientation_classify"] = bool(config.paddle_use_doc_orientation_classify)
+    ocr_kwargs["use_doc_unwarping"] = bool(config.paddle_use_doc_unwarping)
 
     # Robust PaddleOCR construction to handle API differences across versions
     def _create_ocr_direct(kwargs: Dict[str, Any]) -> PaddleOCR:

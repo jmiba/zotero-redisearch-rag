@@ -50,6 +50,12 @@ def get_hunspell_bundle_dir() -> str:
 
 
 def get_hunspell_cache_dir() -> str:
+    configured = os.environ.get("ZRR_HUNSPELL_CACHE_DIR", "").strip()
+    if configured:
+        return configured
+    xdg_cache_home = os.environ.get("XDG_CACHE_HOME", "").strip()
+    if xdg_cache_home:
+        return os.path.join(xdg_cache_home, "zrr-hunspell")
     return os.path.join(tempfile.gettempdir(), "zrr-hunspell")
 
 
@@ -182,9 +188,9 @@ class DoclingProcessingConfig:
     ocr_overlay_dpi: int = 300
     paddle_max_dpi: int = 300
     paddle_target_max_side_px: int = 6000
-    paddle_use_doc_orientation_classify: bool = True
+    paddle_use_doc_orientation_classify: bool = False
     paddle_use_doc_unwarping: bool = False
-    paddle_use_textline_orientation: bool = True
+    paddle_use_textline_orientation: bool = False
     paddle_use_structure_v3: bool = False
     paddle_structure_version: str = "PP-StructureV3"
     paddle_structure_header_ratio: float = 0.05
@@ -268,6 +274,8 @@ DOCLING_CONFIG_FILE_EXCLUDED_FIELDS: Set[str] = {
     "llm_correction_max_chars",
     "llm_correction_min_quality",
     "ocr_mode",
+    "paddle_use_doc_orientation_classify",
+    "paddle_use_textline_orientation",
     "paddle_structure_api_disable",
     "paddle_structure_api_token",
     "paddle_structure_api_url",
@@ -1796,7 +1804,11 @@ def decide_ocr_route(
             or getattr(config, "paddle_use_vl", False)
         )
         and config.ocr_mode != "off"
-        and (config.ocr_mode == "force" or not has_text_layer or low_quality)
+        and (
+            config.ocr_mode == "force"
+            or not has_text_layer
+            or (config.force_ocr_on_low_quality_text and low_quality)
+        )
     )
     if config.ocr_mode == "off":
         return OcrRouteDecision(
@@ -1852,22 +1864,68 @@ def decide_ocr_route(
     return OcrRouteDecision(ocr_used, engine, languages, route_reason, use_external, per_page, per_page_reason)
 
 
-def detect_available_ocr_engines() -> List[str]:
+def requested_external_ocr_engines(config: DoclingProcessingConfig) -> List[str]:
+    engines: List[str] = []
+    for engine in (config.prefer_ocr_engine, config.fallback_ocr_engine):
+        if engine in {"paddle", "tesseract"} and engine not in engines:
+            engines.append(engine)
+    return engines
+
+
+def validate_ocr_route(
+    decision: OcrRouteDecision,
+    config: DoclingProcessingConfig,
+    available_engines: Sequence[str],
+) -> None:
+    requested = requested_external_ocr_engines(config)
+    if not decision.ocr_used or decision.use_external_ocr or not requested:
+        return
+    available_label = ", ".join(available_engines) if available_engines else "none"
+    requested_label = ", ".join(requested)
+    raise RuntimeError(
+        "External OCR engine unavailable "
+        f"(requested: {requested_label}; available: {available_label}). "
+        "Refusing to fall back to Docling RapidOCR because it requires bundled RapidOCR models. "
+        "Restart or recreate the Python worker so the requested OCR engine is installed, "
+        "or choose an installed OCR engine in plugin settings."
+    )
+
+
+def should_probe_paddle_engine(config: Optional[DoclingProcessingConfig]) -> bool:
+    if config is None:
+        return True
+    return bool(
+        config.prefer_ocr_engine == "paddle"
+        or config.fallback_ocr_engine == "paddle"
+        or getattr(config, "paddle_use_structure_v3", False)
+        or getattr(config, "paddle_use_vl", False)
+    )
+
+
+def should_probe_tesseract_engine(config: Optional[DoclingProcessingConfig]) -> bool:
+    if config is None:
+        return True
+    return bool(config.prefer_ocr_engine == "tesseract" or config.fallback_ocr_engine == "tesseract")
+
+
+def detect_available_ocr_engines(config: Optional[DoclingProcessingConfig] = None) -> List[str]:
     available: List[str] = []
-    try:
-        import paddleocr  # noqa: F401
-        import paddle  # noqa: F401
-        from pdf2image import convert_from_path  # noqa: F401
-        available.append("paddle")
-    except Exception:
-        pass
-    try:
-        import pytesseract  # noqa: F401
-        from pdf2image import convert_from_path  # noqa: F401
-        if find_tesseract_path():
-            available.append("tesseract")
-    except Exception:
-        pass
+    if should_probe_paddle_engine(config):
+        try:
+            import paddleocr  # noqa: F401
+            import paddle  # noqa: F401
+            from pdf2image import convert_from_path  # noqa: F401
+            available.append("paddle")
+        except Exception:
+            pass
+    if should_probe_tesseract_engine(config):
+        try:
+            import pytesseract  # noqa: F401
+            from pdf2image import convert_from_path  # noqa: F401
+            if find_tesseract_path():
+                available.append("tesseract")
+        except Exception:
+            pass
     return available
 
 
@@ -2050,16 +2108,16 @@ def build_spellchecker_for_languages(config: DoclingProcessingConfig, languages:
         def download(url, out_path):
             try:
                 import urllib.request
-                print(f"Downloading {url} -> {out_path}")
+                LOGGER.info("Downloading Hunspell dictionary asset %s -> %s", url, out_path)
                 urllib.request.urlretrieve(url, out_path)
                 return True
             except Exception as exc:
-                print(f"Failed to download {url}: {exc}")
+                LOGGER.warning("Failed to download Hunspell dictionary asset %s: %s", url, exc)
                 return False
         ok_aff = download(aff_url, aff_path) if aff_path else False
         ok_dic = download(dic_url, dic_path) if dic_path else False
         if ok_aff and ok_dic and out_dir:
-            print(f"Successfully downloaded Hunspell dictionary for {lang_code} to {out_dir}")
+            LOGGER.info("Successfully downloaded Hunspell dictionary for %s to %s", lang_code, out_dir)
         # Try to resolve again
         pairs = resolve_paths()
 
@@ -3360,35 +3418,128 @@ def configure_layout_options(pipeline_options: Any) -> None:
                 setattr(layout_options, name, value)
 
 
+def configure_docling_runtime_limits(pipeline_options: Any) -> None:
+    accelerator_options = getattr(pipeline_options, "accelerator_options", None)
+    if accelerator_options is not None and hasattr(accelerator_options, "num_threads"):
+        try:
+            current_threads = int(getattr(accelerator_options, "num_threads") or 1)
+        except Exception:
+            current_threads = 1
+        setattr(accelerator_options, "num_threads", max(1, min(current_threads, 1)))
+
+    for name in ("ocr_batch_size", "layout_batch_size", "table_batch_size"):
+        if hasattr(pipeline_options, name):
+            setattr(pipeline_options, name, 1)
+    if hasattr(pipeline_options, "queue_max_size"):
+        setattr(pipeline_options, "queue_max_size", 8)
+
+
+def get_packaged_rapidocr_model_paths() -> Dict[str, str]:
+    try:
+        import rapidocr  # type: ignore
+    except Exception:
+        return {}
+    package_dir = os.path.dirname(getattr(rapidocr, "__file__", "") or "")
+    if not package_dir:
+        return {}
+    models_dir = os.path.join(package_dir, "models")
+    paths = {
+        "det_model_path": os.path.join(models_dir, "ch_PP-OCRv4_det_infer.onnx"),
+        "cls_model_path": os.path.join(models_dir, "ch_ppocr_mobile_v2.0_cls_infer.onnx"),
+        "rec_model_path": os.path.join(models_dir, "ch_PP-OCRv4_rec_infer.onnx"),
+        "rec_keys_path": os.path.join(models_dir, "ppocr_keys_v1.txt"),
+    }
+    return {key: value for key, value in paths.items() if os.path.isfile(value)}
+
+
+def normalize_docling_rapidocr_languages(languages: str) -> List[str]:
+    normalized = (languages or "").lower()
+    if any(token in normalized for token in ("eng", "en", "english", "deu", "ger", "fra", "fre", "spa", "ita")):
+        return ["english"]
+    return ["chinese"]
+
+
+def build_docling_ocr_options(
+    decision: OcrRouteDecision,
+    languages: str,
+    rapidocr_options_cls: Any,
+    tesseract_cli_options_cls: Any,
+) -> Optional[Any]:
+    if not decision.ocr_used:
+        return None
+    if decision.ocr_engine == "tesseract":
+        lang = normalize_languages_for_engine(languages, "tesseract").split("+")
+        kwargs: Dict[str, Any] = {"lang": [value for value in lang if value]}
+        tesseract_cmd = find_tesseract_path()
+        if tesseract_cmd:
+            kwargs["tesseract_cmd"] = tesseract_cmd
+        try:
+            return tesseract_cli_options_cls(**kwargs)
+        except Exception as exc:
+            LOGGER.warning("Failed to build Docling Tesseract OCR options: %s", exc)
+            return None
+
+    kwargs = {
+        "backend": "onnxruntime",
+        "lang": normalize_docling_rapidocr_languages(languages),
+        **get_packaged_rapidocr_model_paths(),
+    }
+    try:
+        return rapidocr_options_cls(**kwargs)
+    except Exception as exc:
+        LOGGER.warning("Failed to build Docling RapidOCR ONNX options: %s", exc)
+        return None
+
+
 def build_converter(config: DoclingProcessingConfig, decision: OcrRouteDecision):
     from docling.document_converter import DocumentConverter
 
     try:
         from docling.datamodel.base_models import InputFormat
-        from docling.datamodel.pipeline_options import PdfPipelineOptions, OCRMode
+        from docling.datamodel.pipeline_options import (
+            PdfPipelineOptions,
+            RapidOcrOptions,
+            TesseractCliOcrOptions,
+        )
         from docling.document_converter import PdfFormatOption
     except Exception:
         return DocumentConverter()
+    try:
+        from docling.datamodel.pipeline_options import OCRMode
+    except Exception:
+        OCRMode = None
 
     pipeline_options = PdfPipelineOptions()
+    configure_docling_runtime_limits(pipeline_options)
     artifacts_path = os.environ.get("DOCLING_ARTIFACTS_PATH")
     if artifacts_path and hasattr(pipeline_options, "artifacts_path"):
         pipeline_options.artifacts_path = artifacts_path
     if not decision.ocr_used:
         if hasattr(pipeline_options, "do_ocr"):
             pipeline_options.do_ocr = False
-        if hasattr(pipeline_options, "ocr_mode"):
+        if OCRMode is not None and hasattr(pipeline_options, "ocr_mode"):
             pipeline_options.ocr_mode = OCRMode.DISABLED
     elif config.ocr_mode == "force":
         if hasattr(pipeline_options, "do_ocr"):
             pipeline_options.do_ocr = True
-        if hasattr(pipeline_options, "ocr_mode"):
+        if OCRMode is not None and hasattr(pipeline_options, "ocr_mode"):
             pipeline_options.ocr_mode = OCRMode.FORCE
     else:
-        if hasattr(pipeline_options, "ocr_mode"):
+        if hasattr(pipeline_options, "do_ocr"):
+            pipeline_options.do_ocr = True
+        if OCRMode is not None and hasattr(pipeline_options, "ocr_mode"):
             pipeline_options.ocr_mode = OCRMode.AUTO
 
     if decision.ocr_used:
+        if hasattr(pipeline_options, "ocr_options"):
+            ocr_options = build_docling_ocr_options(
+                decision,
+                decision.languages,
+                RapidOcrOptions,
+                TesseractCliOcrOptions,
+            )
+            if ocr_options is not None:
+                pipeline_options.ocr_options = ocr_options
         if hasattr(pipeline_options, "ocr_engine"):
             pipeline_options.ocr_engine = decision.ocr_engine
         if hasattr(pipeline_options, "ocr_languages"):
@@ -4195,8 +4346,9 @@ def convert_pdf_with_docling(
             )
         )
     )
-    available_engines = detect_available_ocr_engines()
+    available_engines = detect_available_ocr_engines(config)
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)
+    validate_ocr_route(decision, config, available_engines)
     born_digital_text_layer = is_born_digital_text_layer(has_text_layer, quality, decision.ocr_used, config)
     emit(15, "route", "Selecting OCR route")
     rasterized_source = False

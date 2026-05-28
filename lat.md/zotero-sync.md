@@ -14,9 +14,13 @@ The sync layer supports local and Web API reads, selective writes back to Zotero
 
 Metadata sync compares note frontmatter, Zotero fields, and the last stored snapshot before choosing an update direction.
 
-Tracked fields include titles, citekey, date, abstract, DOI, publication data, pages, item type, tags, authors, and editors. If a field is missing in the note and present in Zotero, the note is filled. If a writable core field is new in the note and empty in Zotero, it can be pushed back.
+Tracked fields include titles, citekey, date, abstract, DOI, publication data, pages, item type, language, tags, authors, and editors. If a field is missing in the note and present in Zotero, the note is filled. If a writable core field is new in the note and empty in Zotero, it can be pushed back.
+
+Tag sync is intentionally conservative. Note metadata sync reads only frontmatter `tags`, sanitizes both note and Zotero tag lists into Obsidian-safe forms before comparison, and does not auto-merge two changed tag sets. If both sides changed after the snapshot, the user must choose which side wins.
 
 When both sides changed since the snapshot, the plugin prompts for a field-level decision instead of silently choosing a winner.
+
+Generated and recreated notes schedule metadata sync after the note write, so snapshots include generated frontmatter values such as language before later one-sided edits are compared.
 
 ## Frontmatter Template
 
@@ -38,6 +42,8 @@ Annotation sync keeps Zotero annotation state and the note annotation block alig
 
 The note block is delimited by `zrr:annotations-start` and `zrr:annotations-end`. The plugin fetches annotation items for the resolved attachment, groups them by configured color headings, renders callouts, compares against snapshots, and writes note edits back to Zotero when the note changed alone.
 
+Annotation tag sync is separate from metadata tag sync. Annotation blocks parse explicit `Tags:` lines inside the annotation block rather than arbitrary inline hashtags elsewhere in the note body.
+
 Conflicts between note and Zotero annotation edits are surfaced in a batch decision modal.
 
 ## Annotation Images
@@ -51,4 +57,3 @@ The plugin first uses image payloads returned by Zotero APIs. If Zotero does not
 Snapshots make sync directional and suppression avoids loops after programmatic note writes.
 
 Metadata snapshots live under `.zotero-redisearch-rag/metadata_snapshots.json` and annotation snapshots under `.zotero-redisearch-rag/annotation_snapshots.json`. In-flight and suppressed file sets prevent repeated sync while the plugin is applying its own note changes.
-

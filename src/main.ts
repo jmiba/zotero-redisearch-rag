@@ -38,6 +38,7 @@ import {
   CleanupLearnedMode,
   CleanupModeMemoryEntry,
   CleanupReasoningMode,
+  OcrEngine,
   OcrEngineAvailability,
   ZoteroRagSettingTab,
   ZoteroRagSettings,
@@ -1041,6 +1042,10 @@ export default class ZoteroRagPlugin extends Plugin {
         pdfLink = this.buildPdfLinkFromSourcePath(layeredPath);
         await this.updateChunkJsonSourcePdf(stagedChunkPath, layeredPath);
       }
+
+      if (stagedPdfPath) {
+        await this.updateChunkJsonSourcePdf(stagedChunkPath, this.getAbsoluteVaultPath(pdfPath));
+      }
     } catch (error) {
       const message = this.getPythonErrorMessage(error);
       await cleanupStagedFiles();
@@ -1210,6 +1215,7 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.replaceVaultFile(stagedNotePath, notePath);
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
       if (noteFile instanceof TFile) {
+        this.scheduleNoteMetadataSync(noteFile, 2000, "save");
         this.scheduleNoteAnnotationSync(noteFile, 2000, "save");
       }
     } catch (error) {
@@ -1927,6 +1933,8 @@ export default class ZoteroRagPlugin extends Plugin {
       text.includes("request cancelled") ||
       text.includes("canceled_while_waiting_rag_slot") ||
       text.includes("cancelled_while_waiting_rag_slot") ||
+      text.includes("canceled_while_waiting_worker_slot") ||
+      text.includes("cancelled_while_waiting_worker_slot") ||
       text.includes("client_disconnected") ||
       text.includes("error: canceled") ||
       text.includes("error: cancelled")
@@ -3907,6 +3915,46 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
+  private stripAnsiCodes(value: string): string {
+    const escapeChar = String.fromCharCode(27);
+    return value.replace(new RegExp(`${escapeChar}\\[[0-?]*[ -/]*[@-~]`, "g"), "");
+  }
+
+  private isLowSignalPythonDiagnosticLine(line: string): boolean {
+    const trimmed = this.stripAnsiCodes(line).trim();
+    return (
+      /^\d{4}-\d{2}-\d{2}[T\s][^ ]+\s+(DEBUG|INFO)\b/.test(trimmed)
+      || /^\[(DEBUG|INFO)\]\s+\d{4}-\d{2}-\d{2}\b/.test(trimmed)
+      || (
+        trimmed.includes("Connectivity check to the model hoster has been skipped")
+        && trimmed.includes("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK")
+      )
+      || /^Downloading https:\/\/raw\.githubusercontent\.com\/LibreOffice\/dictionaries\/.* -> /.test(trimmed)
+      || /^Successfully downloaded Hunspell dictionary\b/.test(trimmed)
+      || /^Failed to download https:\/\/raw\.githubusercontent\.com\/LibreOffice\/dictionaries\//.test(trimmed)
+      || /^Loading weights:\s+/.test(trimmed)
+    );
+  }
+
+  private formatProcessExitDiagnostic(exitCode: number): string {
+    if (!Number.isFinite(exitCode)) {
+      return "Process exited with code 1";
+    }
+    if (exitCode >= 0) {
+      return `Process exited with code ${exitCode}`;
+    }
+    const signalNumber = Math.abs(Math.trunc(exitCode));
+    const signalNames: Record<number, string> = {
+      9: "SIGKILL",
+      15: "SIGTERM",
+    };
+    const signal = signalNames[signalNumber] ?? `signal ${signalNumber}`;
+    const hint = signalNumber === 9
+      ? " (possible worker memory limit or container kill)"
+      : "";
+    return `Process was terminated by ${signal}${hint}`;
+  }
+
   private summarizePythonDiagnostic(raw: string, fallback: string): string {
     const lines = raw
       .split(/\r?\n/)
@@ -3915,18 +3963,32 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!lines.length) {
       return fallback;
     }
-    const tracebackIndex = lines.findIndex((line) => line.startsWith("Traceback"));
-    if (tracebackIndex >= 0) {
-      return lines.slice(tracebackIndex).slice(-12).join("\n");
+
+    const explicit = [...lines].reverse().find((line) =>
+      /^(timeout|timed out|canceled|cancelled|client_disconnected|process exited with code|process was terminated by)\b/i
+        .test(this.stripAnsiCodes(line).trim())
+    );
+    if (explicit) {
+      return explicit;
     }
-    const preferred = [...lines].reverse().find((line) => (
-      /(^error[:\s]|exception|traceback|failed|timed out|timeout|no module named|not found|enoent|econnrefused|enotfound|valueerror|typeerror|runtimeerror|importerror)/i
-        .test(line)
+
+    const actionableLines = lines.filter((line) => !this.isLowSignalPythonDiagnosticLine(line));
+    if (!actionableLines.length) {
+      return fallback;
+    }
+
+    const tracebackIndex = actionableLines.findIndex((line) => line.startsWith("Traceback"));
+    if (tracebackIndex >= 0) {
+      return actionableLines.slice(tracebackIndex).slice(-12).join("\n");
+    }
+    const preferred = [...actionableLines].reverse().find((line) => (
+      /(^error[:\s]|exception|traceback|failed|\btimed out\b|\btimeout(?:\b|_while_waiting)|no module named|not found|enoent|econnrefused|enotfound|valueerror|typeerror|runtimeerror|importerror)/i
+        .test(this.stripAnsiCodes(line))
     ));
     if (preferred) {
       return preferred;
     }
-    return lines.slice(-8).join("\n");
+    return actionableLines.slice(-8).join("\n");
   }
 
   private buildImportTempPath(finalPath: string, label: string): string {
@@ -3935,6 +3997,22 @@ export default class ZoteroRagPlugin extends Plugin {
     const base = path.basename(finalPath, ext);
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     return normalizePath(path.join(dir, `${base}.zrr-${label}-${stamp}${ext}`));
+  }
+
+  private stripImportTempPdfSuffix(pdfPath: string): string {
+    const normalized = normalizePath(pdfPath);
+    if (!normalized) {
+      return normalized;
+    }
+    const ext = path.extname(normalized);
+    const base = path.basename(normalized, ext);
+    const match = base.match(/^(.*)\.zrr-pdf-\d+-[a-z0-9]+$/i);
+    if (!match) {
+      return normalized;
+    }
+    const dir = normalizePath(path.dirname(normalized));
+    const finalName = `${match[1]}${ext}`;
+    return normalizePath(dir && dir !== "." ? path.join(dir, finalName) : finalName);
   }
 
   private async removeVaultFilesIfExist(paths: Array<string | null | undefined>): Promise<void> {
@@ -6585,6 +6663,7 @@ export default class ZoteroRagPlugin extends Plugin {
         "volume",
         "pages",
         "item_type",
+        "language",
         "tags",
         "authors",
         "editors",
@@ -6605,6 +6684,7 @@ export default class ZoteroRagPlugin extends Plugin {
         volume: "volume",
         pages: "pages",
         item_type: "item_type",
+        language: "language",
         tags: "tags",
         authors: "authors",
         editors: "editors",
@@ -6628,6 +6708,7 @@ export default class ZoteroRagPlugin extends Plugin {
         "volume",
         "pages",
         "item_type",
+        "language",
         "authors",
         "editors",
       ]);
@@ -6656,6 +6737,7 @@ export default class ZoteroRagPlugin extends Plugin {
         volume: "Volume",
         pages: "Pages",
         item_type: "Item type",
+        language: "Language",
         tags: "Tags",
         authors: "Authors",
         editors: "Editors",
@@ -7101,6 +7183,7 @@ export default class ZoteroRagPlugin extends Plugin {
         ?? frontmatter?.itemType
         ?? frontmatter?.["item-type"]
     );
+    const language = this.normalizeMetadataString(frontmatter?.language);
     const tagsRaw = this.normalizeMetadataList(frontmatter?.tags);
     const authors = this.normalizeMetadataList(frontmatter?.authors);
     const editors = this.normalizeMetadataList(frontmatter?.editors);
@@ -7121,6 +7204,7 @@ export default class ZoteroRagPlugin extends Plugin {
       volume,
       pages,
       item_type: itemType,
+      language,
       tags: this.sanitizeObsidianTags(tagsRaw),
       authors,
       editors,
@@ -7145,6 +7229,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const itemType = this.normalizeMetadataString(
       values?.itemType ?? values?.item_type ?? values?.["item-type"]
     );
+    const language = this.normalizeMetadataString(values?.language);
     const creators = Array.isArray(values?.creators) ? values.creators : [];
     const authors = creators
       .filter((creator) => creator?.creatorType === "author")
@@ -7179,6 +7264,7 @@ export default class ZoteroRagPlugin extends Plugin {
       volume,
       pages,
       item_type: itemType,
+      language,
       tags: this.sanitizeObsidianTags(tagsRaw),
       authors: this.normalizeMetadataList(authors),
       editors: this.normalizeMetadataList(editors),
@@ -8101,6 +8187,7 @@ export default class ZoteroRagPlugin extends Plugin {
       "volume",
       "pages",
       "item_type",
+      "language",
       "tags",
       "authors",
       "editors",
@@ -8528,6 +8615,9 @@ export default class ZoteroRagPlugin extends Plugin {
           delete (frontmatter as Record<string, unknown>).itemType;
           delete (frontmatter as Record<string, unknown>)["item-type"];
         }
+        if ("language" in updates) {
+          frontmatter.language = updates.language ?? "";
+        }
         if ("tags" in updates) {
           frontmatter.tags = Array.isArray(updates.tags) ? updates.tags : [];
         }
@@ -8613,6 +8703,9 @@ export default class ZoteroRagPlugin extends Plugin {
           console.warn("Skipping invalid item_type update", { itemKey, itemType: nextItemType });
         }
       }
+    }
+    if ("language" in updates) {
+      payload.language = updates.language ?? "";
     }
     if ("tags" in updates) {
       payload.tags = this.buildZoteroTags(noteFields.tags, values?.tags);
@@ -10266,7 +10359,7 @@ export default class ZoteroRagPlugin extends Plugin {
       return pdfPath;
     }
     const relative = this.toVaultRelativePath(pdfPath);
-    return relative || pdfPath;
+    return this.stripImportTempPdfSuffix(relative || pdfPath);
   }
 
   private async isFileAccessible(filePath: string): Promise<boolean> {
@@ -11375,6 +11468,7 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.writeNoteWithSyncSuppressed(notePath, noteContent);
       const noteFile = this.app.vault.getAbstractFileByPath(notePath);
       if (noteFile instanceof TFile) {
+        this.scheduleNoteMetadataSync(noteFile, 2000, "save");
         this.scheduleNoteAnnotationSync(noteFile, 2000, "save");
       }
     } catch (error) {
@@ -12556,8 +12650,20 @@ export default class ZoteroRagPlugin extends Plugin {
     return this.getPythonRuntimeMode() === "worker";
   }
 
+  private getDefaultPythonWorkerCacheRoot(): string {
+    return path.join(os.homedir(), ".cache", "zotero-redisearch-rag");
+  }
+
   private getPythonWorkerCacheDir(): string {
-    return path.join(this.getVaultBasePath(), CACHE_ROOT, "python-worker-cache");
+    const configured = this.resolveUserPath(
+      this.settings.pythonWorkerCacheDirOverride || "",
+      this.getVaultBasePath()
+    );
+    const defaultRoot = path.normalize(this.getDefaultPythonWorkerCacheRoot());
+    if (!configured || path.normalize(configured) === defaultRoot) {
+      return path.join(defaultRoot, this.getRedisNamespace());
+    }
+    return configured;
   }
 
   private getPythonWorkerApiPort(redisPort?: number): number {
@@ -12964,7 +13070,7 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private appendOcrEngineArgs(args: string[]): void {
-    const engine = this.settings.ocrEngine;
+    const engine: OcrEngine = this.settings.ocrEngine;
     const apiKey = (this.settings.paddleApiKey || "").trim();
     const vlApiUrl = (this.settings.paddleVlApiUrl || "").trim();
     const structureApiUrl = (this.settings.paddleStructureApiUrl || "").trim();
@@ -14114,6 +14220,9 @@ export default class ZoteroRagPlugin extends Plugin {
       context.composeEnv,
       services
     );
+    if (!running && await this.isPythonWorkerApiHealthy(context, 2500)) {
+      return context;
+    }
     if (!running && startIfStopped) {
       await this.startPythonWorkerService(context);
       context = await this.resolveComposeProjectContext({
@@ -14130,6 +14239,9 @@ export default class ZoteroRagPlugin extends Plugin {
       services
     );
     if (!confirmed) {
+      if (await this.isPythonWorkerApiHealthy(context, 2500)) {
+        return context;
+      }
       throw new Error(
         "Python worker is not running. Start Redis stack now or enable Auto-start Redis stack."
       );
@@ -14905,15 +15017,19 @@ export default class ZoteroRagPlugin extends Plugin {
               reject(new Error(`Python worker request canceled: ${doneError}`));
               return;
             }
-            const diagnosticText = /^(timeout|canceled|cancelled|client_disconnected)$/i.test(doneError)
-              ? `${doneError}\n${stderr || diagnostic}`.trim()
-              : (stderr.trim() ? stderr : doneError || diagnostic);
+            const diagnosticParts = [
+              /^(timeout|canceled|cancelled|client_disconnected)$/i.test(doneError) ? doneError : "",
+              stderr,
+              doneError && !/^(timeout|canceled|cancelled|client_disconnected)$/i.test(doneError) ? doneError : "",
+              diagnostic,
+            ].filter((part) => part && part.trim());
+            const diagnosticText = diagnosticParts.join("\n");
             this.handlePythonProcessError(diagnosticText);
             reject(
               new Error(
                 this.summarizePythonDiagnostic(
                   diagnosticText,
-                  `Process exited with code ${Number.isFinite(exitCode) ? exitCode : 1}`
+                  this.formatProcessExitDiagnostic(Number.isFinite(exitCode) ? exitCode : 1)
                 )
               )
             );
@@ -14993,21 +15109,28 @@ export default class ZoteroRagPlugin extends Plugin {
       const notice = this.usePythonWorker()
         ? `Python worker missing module '${missingModule[1]}'. Restart Redis stack to rebuild worker env.`
         : `Python env missing module '${missingModule[1]}'. Open Settings > Python environment > Create/Update.`;
-      this.notifyPythonEnvOnce(notice, true);
+      this.notifyPythonEnvOnce(notice, !this.usePythonWorker());
       return;
     }
     if (/No module named ['"]|ImportError: No module named/i.test(raw)) {
       const notice = this.usePythonWorker()
         ? "Python worker missing required modules. Restart Redis stack to rebuild worker env."
         : "Python env missing required modules. Open Settings > Python environment > Create/Update.";
-      this.notifyPythonEnvOnce(notice, true);
+      this.notifyPythonEnvOnce(notice, !this.usePythonWorker());
+      return;
+    }
+    if (/(RapidOcr|RapidOCR|PP-OCR)/i.test(raw) && /does not exists?|does not exist|No such file/i.test(raw)) {
+      this.notifyPythonEnvOnce(
+        "Docling RapidOCR model is missing. Restart or recreate the Python worker; Auto OCR should use Paddle first and avoid this RapidOCR path.",
+        false
+      );
       return;
     }
     if (/ENOENT|No such file or directory|not found|command not found|spawn .* ENOENT/i.test(raw)) {
       const notice = this.usePythonWorker()
         ? "Python worker command failed. Start Redis stack and check container logs."
         : "Python not found. Configure the Python path or use Settings > Python environment > Create/Update.";
-      this.notifyPythonEnvOnce(notice, true);
+      this.notifyPythonEnvOnce(notice, !this.usePythonWorker());
     }
   }
 
@@ -15277,7 +15400,12 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!Number.isFinite(exitCode) || exitCode !== 0) {
       const diagnostic = stderr.trim() ? stderr : stdout;
       this.handlePythonProcessError(diagnostic);
-      throw new Error(stderr || `Process exited with code ${Number.isFinite(exitCode) ? exitCode : 1}`);
+      throw new Error(
+        this.summarizePythonDiagnostic(
+          diagnostic,
+          this.formatProcessExitDiagnostic(Number.isFinite(exitCode) ? exitCode : 1)
+        )
+      );
     }
     return stdout.trim();
   }

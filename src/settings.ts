@@ -107,6 +107,7 @@ export interface ZoteroRagSettings {
   redisUrl: string;
   autoAssignRedisPort: boolean;
   redisDataDirOverride: string;
+  pythonWorkerCacheDirOverride: string;
   redisProjectName: string;
   redisIndex: string;
   redisPrefix: string;
@@ -181,6 +182,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   redisUrl: "redis://127.0.0.1:6379",
   autoAssignRedisPort: false,
   redisDataDirOverride: "",
+  pythonWorkerCacheDirOverride: "",
   redisProjectName: "",
   autoStartRedis: true,
   firstContainerStartupNoticeShown: false,
@@ -665,6 +667,23 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
       redisProjectSetting.settingEl.addClass("zrr-redis-override-setting");
+
+      new Setting(tabEl)
+        .setName("Python worker cache path")
+        .setDesc(
+          "Leave blank to use a per-vault cache under ~/.cache/zotero-redisearch-rag/. " +
+            "Set a path here to override it. " +
+            "Supports ~. " +
+            "Relative paths with separators resolve from your home dir; use ./ to keep it vault-relative."
+        )
+        .addText((text) =>
+          text
+            .setValue(this.plugin.settings.pythonWorkerCacheDirOverride)
+            .onChange(async (value) => {
+              this.plugin.settings.pythonWorkerCacheDirOverride = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
 
       refreshRedisOverrideState();
 

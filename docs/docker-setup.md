@@ -93,4 +93,5 @@ Redis Insight:
 - Keep **Auto-assign Redis port** enabled for multi-vault use, or set unique overrides per vault:
   - unique **Redis project name override**
   - unique **Redis data directory override**
+- Leave **Python worker cache path** blank unless you intentionally want a custom location; the default uses a separate home-cache subdirectory per vault.
 - Only reuse identical overrides across vaults if you intentionally want one shared stack and accept single-active-vault import/reindex behavior.
