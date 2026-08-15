@@ -135,3 +135,5 @@ Documentation improvements are welcome and do not need to wait for a code change
 ## Release changes
 
 Version bumps, `CHANGELOG.md`, and `src/releaseNotes.ts` updates are usually maintainer tasks. Do not bundle release prep into a normal contribution unless the work was explicitly requested.
+
+Release assets must be reproducible from the tagged commit. Prepare and commit `src/releaseNotes.ts` before creating the version tag; the release workflow intentionally does not rewrite source from the GitHub release body. Run `npm run package-release` before tagging and confirm that the generated `main.js`, `manifest.json`, `styles.css`, and `src/toolAssets.ts` are committed. Release tags use the bare version number, for example `1.0.8`, without a leading `v`.

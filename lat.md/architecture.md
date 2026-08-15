@@ -72,6 +72,12 @@ JSON parsing is centralized in `src/safeJson.ts`. Saved settings accept known ke
 
 The five TypeScript ESLint unsafe-value rules are release-blocking errors. Declarative settings search remains a separate compatibility advisory and is not part of this boundary contract.
 
+## Release Artifact Boundary
+
+Community release assets must be reproducible from the exact tagged commit so external verification rebuilds the same plugin bundle.
+
+Bundled release notes and generated tool assets are committed before tagging. The release workflow checks out the release tag, builds without rewriting release-note source, and fails if the build changes `main.js`, `manifest.json`, `styles.css`, `src/toolAssets.ts`, or `src/releaseNotes.ts`.
+
 ## User-Facing Surfaces
 
 Users interact through commands, settings, generated notes, chunk controls, the PDF sidebar, and the chat panel.

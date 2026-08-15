@@ -14,21 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: "npm"
       - run: npm ci
-      - name: Generate bundled release notes from GitHub release body
-        if: ${{ hashFiles('scripts/generate-release-notes.mjs') != '' && hashFiles('src/releaseNotes.ts') != '' }}
-        continue-on-error: true
-        env:
-          GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
-          GITHUB_RELEASE_BODY: ${{ github.event.release.body }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/generate-release-notes.mjs
       - run: npm run build:release
+      - name: Verify release build matches tagged source and artifacts
+        run: git diff --exit-code -- main.js manifest.json styles.css src/toolAssets.ts src/releaseNotes.ts
       - name: Verify community release artifacts
         run: |
           ls -lah main.js manifest.json styles.css
