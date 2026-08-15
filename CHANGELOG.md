@@ -1,4 +1,10 @@
 # Changelog
+## 1.0.6
+- Keep parsed JSON, saved settings, cache records, API responses, and worker events behind explicit `unknown` boundaries until their runtime shape is checked.
+- Reject unknown or type-incompatible saved setting values while preserving compatible settings and legacy migrations.
+- Validate record arrays and process-stream chunks before using them in note sync, Zotero metadata, Redis diagnostics, and Python worker flows.
+- Enable all five `@typescript-eslint/no-unsafe-*` checks as release-blocking errors and add focused TypeScript boundary tests.
+
 ## 1.0.5
 - Restore Obsidian Community verification compatibility by removing an unmatched file-wide ESLint suppression and unnecessary type assertion.
 - Use `window` timer functions throughout plugin UI and worker orchestration code, as required by the current Obsidian developer guidelines.

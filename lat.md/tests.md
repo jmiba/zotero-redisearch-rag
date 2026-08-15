@@ -48,6 +48,12 @@ Redis client tests preserve retrieval behavior as Redis and redis-py response pr
 
 The RAG client uses RESP3 and normalizes map replies into records while retaining RESP2 positional-array parsing for backward compatibility.
 
+## TypeScript Boundary Safety
+
+Boundary tests verify that parsed JSON remains unknown and malformed saved settings or record-array elements cannot flow into typed plugin state.
+
+The TypeScript test suite covers primitive rejection, nested provider-profile validation, dynamic record validation, unknown setting removal, and preservation of compatible saved values.
+
 ## Integration Test Gaps
 
 Important end-to-end flows are documented but not yet covered by automated tests in this repo.

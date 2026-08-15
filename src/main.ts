@@ -102,6 +102,12 @@ import {
 import { VIEW_TYPE_ZOTERO_CHAT, ZoteroChatView } from "./chatView";
 import type { ChatCitation, ChatMessage, ChatRetrievedChunk, RagQueryFinalPayload } from "./chatView";
 import { RELEASE_NOTES_LOG, type ReleaseNotesEntry } from "./releaseNotes";
+import {
+  asUnknownRecord,
+  asUnknownRecordArray,
+  mergeCompatibleSettings,
+  parseJsonUnknown,
+} from "./safeJson";
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -514,9 +520,10 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const data = (await this.loadData()) ?? {};
+    const loadedData = (await this.loadData()) as unknown;
+    const data = asUnknownRecord(loadedData) ?? {};
     this.hadSavedSettingsData = Object.keys(data).length > 0;
-    const settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    const settings = mergeCompatibleSettings(DEFAULT_SETTINGS, data);
     const runtimeRaw = (data).pythonRuntime;
     const runtimeMissing = runtimeRaw === undefined || runtimeRaw === null || runtimeRaw === "";
     const runtimeInvalid = !runtimeMissing && runtimeRaw !== "worker" && runtimeRaw !== "local";
@@ -527,8 +534,8 @@ export default class ZoteroRagPlugin extends Plugin {
       settings.pythonRuntime = "worker";
       migratedToWorker = true;
     } else if (!runtimeMigrationDone && runtimeRaw === "local") {
-      const pythonPathRaw = String((data).pythonPath ?? "").trim();
-      const envLocationRaw = String((data).pythonEnvLocation ?? "").trim();
+      const pythonPathRaw = coerceString(data.pythonPath).trim();
+      const envLocationRaw = coerceString(data.pythonEnvLocation).trim();
       const likelyLegacyLocalDefault = !pythonPathRaw && (!envLocationRaw || envLocationRaw === "shared");
       if (likelyLegacyLocalDefault) {
         settings.pythonRuntime = "worker";
@@ -1443,7 +1450,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(indexPath);
-      const payload = this.asRecord(JSON.parse(raw));
+      const payload = this.asRecord(parseJsonUnknown(raw));
       const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
       const normalized = sessions
         .filter((s): s is Record<string, unknown> => {
@@ -1474,7 +1481,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(indexPath);
-      const payload = JSON.parse(raw);
+      const payload = this.asRecord(parseJsonUnknown(raw));
       const active = typeof payload?.active === "string" ? payload.active : "default";
       return active || "default";
     } catch {
@@ -1553,7 +1560,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const raw = await adapter.read(historyPath);
       let parsedPayload: unknown;
       try {
-        parsedPayload = JSON.parse(raw);
+        parsedPayload = parseJsonUnknown(raw);
       } catch {
         return [];
       }
@@ -1630,7 +1637,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(indexPath);
-      const payload = this.asRecord(JSON.parse(raw));
+      const payload = this.asRecord(parseJsonUnknown(raw));
       const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
       return {
         version: 1,
@@ -1703,7 +1710,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (indexExists) {
       try {
         const raw = await adapter.read(indexPath);
-        const payload = this.asRecord(JSON.parse(raw));
+        const payload = this.asRecord(parseJsonUnknown(raw));
         const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
         const hasDefault = sessions.some((entry) => {
           const session = this.asRecord(entry);
@@ -1855,7 +1862,7 @@ export default class ZoteroRagPlugin extends Plugin {
         "pdf_page_count",
         PDF_PAGE_COUNT_TIMEOUT_SEC
       );
-      const parsed = JSON.parse(output || "{}");
+      const parsed = parseJsonUnknown(output || "{}");
       const pages = Number((parsed as { pages?: unknown }).pages);
       if (Number.isFinite(pages) && pages > 0) {
         return Math.trunc(pages);
@@ -2810,8 +2817,8 @@ export default class ZoteroRagPlugin extends Plugin {
       if (await adapter.exists(itemPath)) {
         try {
           const raw = await adapter.read(itemPath);
-          const item = JSON.parse(raw);
-          const values: ZoteroItemValues = item?.data ?? item ?? {};
+          const item = this.asRecord(parseJsonUnknown(raw));
+          const values = (this.asRecord(item?.data) ?? item ?? {}) as ZoteroItemValues;
           const title = typeof values.title === "string" ? values.title : "";
           if (title) {
             updates.zotero_title = title;
@@ -2839,7 +2846,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (await adapter.exists(chunkPath)) {
         try {
           const raw = await adapter.read(chunkPath);
-          const payload = JSON.parse(raw);
+          const payload = this.asRecord(parseJsonUnknown(raw));
           if (typeof payload?.source_pdf === "string") {
             updates.pdf_path = payload.source_pdf;
           }
@@ -3083,7 +3090,7 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       });
 
-      socket.on("data", (data) => {
+      socket.on("data", (data: Buffer) => {
         buffer += data.toString();
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() ?? "";
@@ -3096,7 +3103,7 @@ export default class ZoteroRagPlugin extends Plugin {
         finish(false, "Timed out connecting to Redis.");
       });
 
-      socket.on("error", (err) => {
+      socket.on("error", (err: Error) => {
         finish(false, `Redis connection failed: ${err.message}`);
       });
 
@@ -3310,7 +3317,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (response.statusCode >= 400) {
         return null;
       }
-      const parsed = JSON.parse(response.body.toString("utf8"));
+      const parsed = parseJsonUnknown(response.body.toString("utf8"));
       const root = this.asRecord(parsed);
       const models = Array.isArray(root?.models) ? root.models : [];
       for (const candidate of models) {
@@ -3592,7 +3599,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const details = response.body.toString("utf8");
       throw new Error(`LM Studio native chat request failed (${response.statusCode}): ${details || "no response body"}`);
     }
-    const parsed = JSON.parse(response.body.toString("utf8"));
+    const parsed = parseJsonUnknown(response.body.toString("utf8"));
     const text = this.extractTextFromLmStudioNativeChatPayload(parsed);
     if (!text) {
       throw new Error("LM Studio native chat response missing content");
@@ -3852,7 +3859,7 @@ export default class ZoteroRagPlugin extends Plugin {
           `${endpointMode === "responses" ? "Responses" : "Chat"} request failed (${response.statusCode}): ${details || "no response body"}`
         );
       }
-      const parsed = JSON.parse(response.body.toString("utf8"));
+      const parsed = parseJsonUnknown(response.body.toString("utf8"));
       const text = endpointMode === "responses"
         ? this.extractTextFromResponsesPayload(parsed)
         : this.extractTextFromChatCompletionsPayload(parsed);
@@ -4184,7 +4191,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const output = await this.runPythonWithOutput(script, args);
       let payload: unknown = null;
       try {
-        payload = output ? JSON.parse(output) : null;
+        payload = output ? parseJsonUnknown(output) : null;
       } catch (error) {
         console.warn("Failed to parse purge output", error);
       }
@@ -4785,7 +4792,10 @@ export default class ZoteroRagPlugin extends Plugin {
     this.noteMetadataSyncSuppressed.add(notePath);
     try {
       await this.app.fileManager.processFrontMatter(file, (fm) => {
-        this.normalizeZoteroFrontmatterKeys(fm);
+        const record = this.asRecord(fm);
+        if (record) {
+          this.normalizeZoteroFrontmatterKeys(record);
+        }
       });
     } catch (error) {
       console.warn("Failed to normalize Zotero frontmatter keys", error);
@@ -5033,9 +5043,10 @@ export default class ZoteroRagPlugin extends Plugin {
   private async readDoclingQualityLabel(chunkPath: string): Promise<string | null> {
     try {
       const content = await this.app.vault.adapter.read(chunkPath);
-      const payload = JSON.parse(content);
+      const payload = this.asRecord(parseJsonUnknown(content));
+      const metadata = this.asRecord(payload?.metadata);
       const quality =
-        payload?.metadata?.effective_confidence_proxy ?? payload?.metadata?.confidence_proxy;
+        metadata?.effective_confidence_proxy ?? metadata?.confidence_proxy;
       if (typeof quality === "number") {
         return quality.toFixed(2);
       }
@@ -5048,11 +5059,8 @@ export default class ZoteroRagPlugin extends Plugin {
   private async readDoclingMetadata(chunkPath: string): Promise<Record<string, unknown> | null> {
     try {
       const content = await this.app.vault.adapter.read(chunkPath);
-      const payload = JSON.parse(content);
-      const metadata = payload?.metadata;
-      if (metadata && typeof metadata === "object") {
-        return metadata;
-      }
+      const payload = this.asRecord(parseJsonUnknown(content));
+      return this.asRecord(payload?.metadata);
     } catch (error) {
       console.warn("Failed to read Docling metadata", error);
     }
@@ -5081,7 +5089,7 @@ export default class ZoteroRagPlugin extends Plugin {
         args.push("--language-hint", languageHint);
       }
       const output = await this.runPythonWithOutput(doclingScript, args, logPath);
-      const payload = JSON.parse(output);
+      const payload = this.asRecord(parseJsonUnknown(output));
       const quality = payload?.effective_confidence_proxy ?? payload?.confidence_proxy;
       if (typeof quality === "number") {
         return quality.toFixed(2);
@@ -5211,7 +5219,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}`);
       const payload = await this.requestLocalApi(url, `Zotero item fetch failed for ${url}`);
-      return JSON.parse(payload.toString("utf8"));
+      return parseJsonUnknown(payload.toString("utf8"));
     } catch (error) {
       console.warn("Failed to fetch Zotero item from local API", error);
       if (this.canUseWebApi()) {
@@ -5249,8 +5257,9 @@ export default class ZoteroRagPlugin extends Plugin {
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/collections/${key}`);
     try {
       const payload = await this.requestLocalApi(url, `Zotero collection fetch failed for ${url}`);
-      const parsed = JSON.parse(payload.toString("utf8"));
-      const title = String(parsed?.data?.name ?? parsed?.name ?? "").trim();
+      const parsed = this.asRecord(parseJsonUnknown(payload.toString("utf8")));
+      const data = this.asRecord(parsed?.data);
+      const title = coerceString(data?.name ?? parsed?.name);
       this.collectionTitleCache.set(key, title);
       return title;
     } catch {
@@ -5261,8 +5270,9 @@ export default class ZoteroRagPlugin extends Plugin {
       try {
         const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/collections/${key}`);
         const payload = await this.requestWebApi(webUrl, `Zotero Web API collection fetch failed for ${webUrl}`);
-        const parsed = JSON.parse(payload.toString("utf8"));
-        const title = String(parsed?.data?.name ?? parsed?.name ?? "").trim();
+        const parsed = this.asRecord(parseJsonUnknown(payload.toString("utf8")));
+        const data = this.asRecord(parsed?.data);
+        const title = coerceString(data?.name ?? parsed?.name);
         this.collectionTitleCache.set(key, title);
         return title;
       } catch (webError) {
@@ -5293,7 +5303,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}`);
       const payload = await this.requestWebApi(url, `Zotero Web API fetch failed for ${url}`);
-      return JSON.parse(payload.toString("utf8"));
+      return parseJsonUnknown(payload.toString("utf8"));
     } catch (error) {
       console.warn("Failed to fetch Zotero item from Web API", error);
       return null;
@@ -5315,14 +5325,11 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private parseCslPayload(payload: Buffer): Record<string, unknown> | null {
     try {
-      const parsed = JSON.parse(payload.toString("utf8"));
+      const parsed = parseJsonUnknown(payload.toString("utf8"));
       if (Array.isArray(parsed)) {
-        return typeof parsed[0] === "object" && parsed[0] ? parsed[0] : null;
+        return this.asRecord((parsed as unknown[])[0]);
       }
-      if (typeof parsed === "object" && parsed) {
-        return parsed as Record<string, unknown>;
-      }
-      return null;
+      return this.asRecord(parsed);
     } catch (error) {
       console.warn("Failed to parse CSL payload", error);
       return null;
@@ -5347,7 +5354,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const url = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/top?${params.toString()}`);
       try {
         const payload = await this.requestWebApi(url, `Zotero Web API search failed for ${url}`);
-        const parsed = JSON.parse(payload.toString("utf8"));
+        const parsed = parseJsonUnknown(payload.toString("utf8"));
         if (!Array.isArray(parsed)) {
           return [];
         }
@@ -5992,7 +5999,7 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Failed to read chunk cache.");
       return;
     }
-    const chunks = Array.isArray(payload.chunks) ? payload.chunks : [];
+    const chunks = asUnknownRecordArray(payload.chunks);
     const target = this.resolveChunkFromPayload(chunks, chunkId, docId);
     if (!target) {
       new Notice(`Chunk ${chunkId} not found in cache.`);
@@ -6044,7 +6051,7 @@ export default class ZoteroRagPlugin extends Plugin {
       new Notice("Failed to read chunk cache.");
       return;
     }
-    const chunks = Array.isArray(payload.chunks) ? payload.chunks : [];
+    const chunks = asUnknownRecordArray(payload.chunks);
     const target = this.resolveChunkFromPayload(chunks, chunkId, docId);
     if (!target) {
       new Notice(`Chunk ${chunkId} not found in cache.`);
@@ -6070,7 +6077,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (await adapter.exists(chunkPath)) {
       payload = await this.readChunkPayload(chunkPath);
     }
-    const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
+    const chunks = asUnknownRecordArray(payload?.chunks);
     const target = this.resolveChunkFromPayload(chunks, chunkId, docId);
     const pageStart = target?.page_start ?? target?.pageStart;
     const metadata = this.asRecord(payload?.metadata);
@@ -6201,7 +6208,7 @@ export default class ZoteroRagPlugin extends Plugin {
     let parts: string[] = [];
     if (raw.startsWith("[") && raw.endsWith("]")) {
       try {
-        const parsed = JSON.parse(raw);
+        const parsed = parseJsonUnknown(raw);
         if (Array.isArray(parsed)) {
           parts = parsed.map((item) => String(item));
         }
@@ -6305,11 +6312,11 @@ export default class ZoteroRagPlugin extends Plugin {
     };
     let updated = markdown.replace(
       /!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
-      (_match, _target, label) => marker(label || "")
+      (_match: string, _target: string, label: string | undefined) => marker(label ?? "")
     );
     updated = updated.replace(
       /!\[([^\]]*)]\([^)]+\)/g,
-      (_match, label) => marker(label || "")
+      (_match: string, label: string) => marker(label)
     );
     updated = updated.replace(/<img[^>]*>/gi, (tag) => {
       const altMatch = tag.match(/\balt=(['"])([^'"]*)\1/i);
@@ -6467,7 +6474,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (!chunkPayload) {
         return;
       }
-      const chunks = Array.isArray(chunkPayload.chunks) ? chunkPayload.chunks : [];
+      const chunks = asUnknownRecordArray(chunkPayload.chunks);
       const chunkMap = new Map<string, Record<string, unknown>>();
       for (const chunk of chunks) {
         if (this.isAnnotationChunk(chunk)) {
@@ -7230,7 +7237,7 @@ export default class ZoteroRagPlugin extends Plugin {
       values?.itemType ?? values?.item_type ?? values?.["item-type"]
     );
     const language = this.normalizeMetadataString(values?.language);
-    const creators = Array.isArray(values?.creators) ? values.creators : [];
+    const creators = asUnknownRecordArray(values?.creators);
     const authors = creators
       .filter((creator) => creator?.creatorType === "author")
       .map((creator) => formatCreatorName(creator))
@@ -7302,7 +7309,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     if (pageIndex === null && typeof values.annotationPosition === "string") {
       try {
-        const parsed = JSON.parse(values.annotationPosition);
+        const parsed = this.asRecord(parseJsonUnknown(values.annotationPosition));
         const idx = parsed?.pageIndex;
         if (typeof idx === "number" && Number.isFinite(idx)) {
           pageIndex = idx + 1;
@@ -7630,8 +7637,9 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       const response = await this.requestLocalApiRaw(url, { headers, timeoutMs: 5000 });
       if (response.statusCode === 200) {
-        const contentType = response.headers["content-type"];
-        const mime = Array.isArray(contentType) ? contentType[0] : contentType ?? "";
+        const contentType: unknown = response.headers["content-type"];
+        const mimeValue = Array.isArray(contentType) ? (contentType as unknown[])[0] : contentType;
+        const mime = typeof mimeValue === "string" ? mimeValue : "";
         return this.buildAnnotationImagePayloadFromBuffer(response.body, mime);
       }
       if (response.statusCode === 204 || response.statusCode === 404) {
@@ -7663,7 +7671,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const response = await this.requestLocalApiRaw(url, { headers, timeoutMs: 3000 });
       if (response.statusCode === 200) {
         try {
-          const payload = JSON.parse(response.body.toString("utf8"));
+          const payload = this.asRecord(parseJsonUnknown(response.body.toString("utf8")));
           if (payload?.ok) {
             new Notice("Zotero companion: OK.");
             return;
@@ -8162,7 +8170,7 @@ export default class ZoteroRagPlugin extends Plugin {
     let parsed: unknown = raw;
     if (typeof raw === "string") {
       try {
-        parsed = JSON.parse(raw);
+        parsed = parseJsonUnknown(raw);
       } catch {
         return null;
       }
@@ -8225,7 +8233,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(cachePath);
-      const payload = JSON.parse(raw);
+      const payload = this.asRecord(parseJsonUnknown(raw));
       const entries = payload?.entries ?? payload;
       if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
         return {};
@@ -8417,7 +8425,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(cachePath);
-      const payload = JSON.parse(raw);
+      const payload = this.asRecord(parseJsonUnknown(raw));
       const entries = payload?.entries ?? payload;
       if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
         return {};
@@ -8551,81 +8559,85 @@ export default class ZoteroRagPlugin extends Plugin {
     this.noteMetadataSyncSuppressed.add(notePath);
     try {
       await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        const record = this.asRecord(frontmatter);
+        if (!record) {
+          return;
+        }
         if ("title" in updates) {
-          frontmatter.title = updates.title ?? "";
+          record.title = updates.title ?? "";
         }
         if ("short_title" in updates) {
-          frontmatter["short title"] = updates.short_title ?? "";
-          delete (frontmatter as Record<string, unknown>).short_title;
-          delete (frontmatter as Record<string, unknown>).shortTitle;
-          delete (frontmatter as Record<string, unknown>)["title-short"];
+          record["short title"] = updates.short_title ?? "";
+          delete record.short_title;
+          delete record.shortTitle;
+          delete record["title-short"];
         }
         if ("citekey" in updates) {
-          frontmatter.citekey = updates.citekey ?? "";
-          delete (frontmatter as Record<string, unknown>).citation_key;
-          delete (frontmatter as Record<string, unknown>).citationKey;
-          delete (frontmatter as Record<string, unknown>)["citation key"];
-          delete (frontmatter as Record<string, unknown>)["citation-key"];
+          record.citekey = updates.citekey ?? "";
+          delete record.citation_key;
+          delete record.citationKey;
+          delete record["citation key"];
+          delete record["citation-key"];
         }
         if ("date" in updates) {
-          frontmatter.date = updates.date ?? "";
+          record.date = updates.date ?? "";
         }
         if ("abstract" in updates) {
-          frontmatter.abstract = updates.abstract ?? "";
+          record.abstract = updates.abstract ?? "";
         }
         if ("doi" in updates) {
-          frontmatter.doi = updates.doi ?? "";
+          record.doi = updates.doi ?? "";
         }
         if ("publication_title" in updates) {
-          frontmatter["publication title"] = updates.publication_title ?? "";
-          delete (frontmatter as Record<string, unknown>).publication_title;
-          delete (frontmatter as Record<string, unknown>).publicationTitle;
-          delete (frontmatter as Record<string, unknown>)["publication-title"];
+          record["publication title"] = updates.publication_title ?? "";
+          delete record.publication_title;
+          delete record.publicationTitle;
+          delete record["publication-title"];
         }
         if ("book_title" in updates) {
-          frontmatter["book title"] = updates.book_title ?? "";
-          delete (frontmatter as Record<string, unknown>).book_title;
-          delete (frontmatter as Record<string, unknown>).bookTitle;
-          delete (frontmatter as Record<string, unknown>)["book-title"];
+          record["book title"] = updates.book_title ?? "";
+          delete record.book_title;
+          delete record.bookTitle;
+          delete record["book-title"];
         }
         if ("journal_abbrev" in updates) {
-          frontmatter["journal abbrev"] = updates.journal_abbrev ?? "";
-          delete (frontmatter as Record<string, unknown>).journal_abbrev;
-          delete (frontmatter as Record<string, unknown>).journalAbbrev;
-          delete (frontmatter as Record<string, unknown>)["journal-abbrev"];
+          record["journal abbrev"] = updates.journal_abbrev ?? "";
+          delete record.journal_abbrev;
+          delete record.journalAbbrev;
+          delete record["journal-abbrev"];
         }
         if ("publisher" in updates) {
-          frontmatter.publisher = updates.publisher ?? "";
+          record.publisher = updates.publisher ?? "";
         }
         if ("place" in updates) {
-          frontmatter.place = updates.place ?? "";
+          record.place = updates.place ?? "";
         }
         if ("issue" in updates) {
-          frontmatter.issue = updates.issue ?? "";
+          record.issue = updates.issue ?? "";
         }
         if ("volume" in updates) {
-          frontmatter.volume = updates.volume ?? "";
+          record.volume = updates.volume ?? "";
         }
         if ("pages" in updates) {
-          frontmatter.pages = updates.pages ?? "";
+          record.pages = updates.pages ?? "";
         }
         if ("item_type" in updates) {
-          frontmatter["item type"] = updates.item_type ?? "";
-          delete (frontmatter as Record<string, unknown>).item_type;
-          delete (frontmatter as Record<string, unknown>).itemType;
-          delete (frontmatter as Record<string, unknown>)["item-type"];
+          record["item type"] = updates.item_type ?? "";
+          delete record.item_type;
+          delete record.itemType;
+          delete record["item-type"];
         }
         if ("language" in updates) {
-          frontmatter.language = updates.language ?? "";
+          record.language = updates.language ?? "";
         }
         if ("tags" in updates) {
-          frontmatter.tags = Array.isArray(updates.tags) ? updates.tags : [];
+          record.tags = Array.isArray(updates.tags) ? updates.tags : [];
         }
         if ("authors" in updates) {
-          frontmatter.authors = Array.isArray(updates.authors) ? updates.authors : [];
+          record.authors = Array.isArray(updates.authors) ? updates.authors : [];
         }
         if ("editors" in updates) {
-          frontmatter.editors = Array.isArray(updates.editors) ? updates.editors : [];
+          record.editors = Array.isArray(updates.editors) ? updates.editors : [];
         }
       });
     } catch (error) {
@@ -9129,7 +9141,7 @@ export default class ZoteroRagPlugin extends Plugin {
     fallbackMarkdown: string
   ): string {
     const payloadChunks = chunkPayload?.chunks;
-    const chunks = (Array.isArray(payloadChunks) ? payloadChunks : [])
+    const chunks = asUnknownRecordArray(payloadChunks)
       .filter((chunk) => !this.isAnnotationChunk(chunk));
     if (!chunks.length) {
       return `<!-- zrr:sync-start doc_id=${docId} -->\n${fallbackMarkdown}\n<!-- zrr:sync-end -->`;
@@ -9183,7 +9195,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private async readChunkPayload(chunkPath: string): Promise<Record<string, unknown> | null> {
     try {
       const raw = await this.app.vault.adapter.read(chunkPath);
-      return JSON.parse(raw);
+      return this.asRecord(parseJsonUnknown(raw));
     } catch (error) {
       console.warn("Failed to read cached chunks JSON", error);
       return null;
@@ -9250,7 +9262,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!payload) {
       return;
     }
-    const existing = Array.isArray(payload.chunks) ? payload.chunks : [];
+    const existing = asUnknownRecordArray(payload.chunks);
     const baseChunks: Record<string, unknown>[] = [];
     const existingAnnotations = new Map<string, Record<string, unknown>>();
     for (const chunk of existing) {
@@ -9401,7 +9413,7 @@ export default class ZoteroRagPlugin extends Plugin {
     let deleteIds: string[] = [];
     if (await adapter.exists(chunkPath)) {
       const payload = await this.readChunkPayload(chunkPath);
-      const chunks = Array.isArray(payload?.chunks) ? payload?.chunks : [];
+      const chunks = asUnknownRecordArray(payload?.chunks);
       deleteIds = chunks
         .map((chunk) => (typeof chunk?.chunk_id === "string" ? chunk.chunk_id : ""))
         .map((chunkId) => (
@@ -9478,11 +9490,13 @@ export default class ZoteroRagPlugin extends Plugin {
       : null;
     const fallbackUsed = Boolean(data.fallback_used);
     const fallbackReason = typeof data.fallback_reason === "string" ? data.fallback_reason : "";
-    const fallbackQueries = Array.isArray(data.fallback_queries) ? data.fallback_queries : [];
-    const fallbackFailed = Array.isArray(data.fallback_failed_fields)
-      ? data.fallback_failed_fields
+    const fallbackQueries = Array.isArray(data.fallback_queries)
+      ? (data.fallback_queries as unknown[]).filter((value): value is string => typeof value === "string")
       : [];
-    const results = Array.isArray(data.results) ? data.results : [];
+    const fallbackFailed = Array.isArray(data.fallback_failed_fields)
+      ? (data.fallback_failed_fields as unknown[]).filter((value): value is string => typeof value === "string")
+      : [];
+    const results = asUnknownRecordArray(data.results);
 
     const lines: string[] = [];
     lines.push(`Query: ${rawQuery || query}`);
@@ -9522,21 +9536,21 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     for (const result of results) {
-      const docId = String(result.doc_id || "").trim();
-      const chunkId = String(result.chunk_id || "").trim();
-      const pageStart = String(result.page_start || "").trim();
-      const pageEnd = String(result.page_end || "").trim();
-      const title = String(result.title || "").trim();
-      const section = String(result.section || "").trim();
-      const score = String(result.score || "").trim();
-      const authors = String(result.authors || "").trim();
-      const itemType = String(result.item_type || "").trim();
-      const year = String(result.year || "").trim();
-      const tags = String(result.tags || "").trim();
-      const chunkTags = String(result.chunk_tags || "").trim();
-      const attachmentKey = String(result.attachment_key || "").trim();
-      const sourcePdf = String(result.source_pdf || "").trim();
-      const text = String(result.text || "").replace(/\s+/g, " ").trim();
+      const docId = coerceString(result.doc_id);
+      const chunkId = coerceString(result.chunk_id);
+      const pageStart = coerceString(result.page_start);
+      const pageEnd = coerceString(result.page_end);
+      const title = coerceString(result.title);
+      const section = coerceString(result.section);
+      const score = coerceString(result.score);
+      const authors = coerceString(result.authors);
+      const itemType = coerceString(result.item_type);
+      const year = coerceString(result.year);
+      const tags = coerceString(result.tags);
+      const chunkTags = coerceString(result.chunk_tags);
+      const attachmentKey = coerceString(result.attachment_key);
+      const sourcePdf = coerceString(result.source_pdf);
+      const text = coerceString(result.text).replace(/\s+/g, " ").trim();
       const snippet = text.length > 220 ? `${text.slice(0, 220)}…` : text;
 
       const labelParts = [docId];
@@ -9616,7 +9630,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       await this.ensureBundledTools();
       const output = await this.runPythonWithOutput(scriptPath, args);
-      const payload = JSON.parse(output || "{}");
+      const payload = parseJsonUnknown(output || "{}");
       const body = this.formatRedisSearchResults(payload);
       return body || "(no results)";
     } catch (error) {
@@ -9640,7 +9654,7 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       await this.ensureBundledTools();
       const output = await this.runPythonWithOutput(scriptPath, args);
-      const payload = JSON.parse(output || "{}");
+      const payload = parseJsonUnknown(output || "{}");
       const body = `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
       new OutputModal(this.app, "Redis diagnostics", body || "(empty)").open();
     } catch (error) {
@@ -9678,7 +9692,7 @@ export default class ZoteroRagPlugin extends Plugin {
       const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/top?${params.toString()}`);
       try {
         const payload = await this.requestLocalApi(url, `Zotero search failed for ${url}`);
-        const items = JSON.parse(payload.toString("utf8"));
+        const items = parseJsonUnknown(payload.toString("utf8"));
         if (!Array.isArray(items)) {
           return [];
         }
@@ -9726,7 +9740,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (await adapter.exists(cachePath)) {
         try {
           const raw = await adapter.read(cachePath);
-          const parsed = JSON.parse(raw);
+          const parsed = parseJsonUnknown(raw);
           item = this.normalizeIndexedSearchItem(parsed, docId);
         } catch (error) {
           console.debug("Failed to parse indexed Zotero cache item", { docId, error });
@@ -10000,7 +10014,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const suffix = params.toString() ? `?${params.toString()}` : "";
     const url = this.buildZoteroUrl(`/${this.getZoteroLibraryPath()}/items/${itemKey}/children${suffix}`);
     const payload = await this.requestLocalApi(url, `Zotero children request failed for ${url}`);
-    return JSON.parse(payload.toString("utf8"));
+    const parsed = parseJsonUnknown(payload.toString("utf8"));
+    return Array.isArray(parsed) ? parsed as unknown[] : [];
   }
 
   private async fetchZoteroChildrenWeb(
@@ -10020,7 +10035,8 @@ export default class ZoteroRagPlugin extends Plugin {
     const suffix = params.toString() ? `?${params.toString()}` : "";
     const webUrl = this.buildWebApiUrl(`/${this.getWebApiLibraryPath()}/items/${itemKey}/children${suffix}`);
     const payload = await this.requestWebApi(webUrl, `Zotero Web API children request failed for ${webUrl}`);
-    return JSON.parse(payload.toString("utf8"));
+    const parsed = parseJsonUnknown(payload.toString("utf8"));
+    return Array.isArray(parsed) ? parsed as unknown[] : [];
   }
 
   private async fetchZoteroChildren(itemKey: string): Promise<unknown[]> {
@@ -10054,8 +10070,9 @@ export default class ZoteroRagPlugin extends Plugin {
     const url = this.buildWebApiUrl("/keys/current");
     try {
       const payload = await this.requestWebApi(url, `Zotero Web API key lookup failed for ${url}`);
-      const parsed = JSON.parse(payload.toString("utf8"));
-      const userId = parsed?.userID ?? parsed?.userId ?? parsed?.data?.userID ?? parsed?.data?.userId;
+      const parsed = this.asRecord(parseJsonUnknown(payload.toString("utf8")));
+      const data = this.asRecord(parsed?.data);
+      const userId = coerceString(parsed?.userID ?? parsed?.userId ?? data?.userID ?? data?.userId);
       if (!userId) {
         return false;
       }
@@ -10151,7 +10168,7 @@ export default class ZoteroRagPlugin extends Plugin {
         },
         (response) => {
           const chunks: Buffer[] = [];
-          response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+          response.on("data", (chunk: Buffer) => chunks.push(chunk));
           response.on("end", () => {
             if (timeoutId) {
               window.clearTimeout(timeoutId);
@@ -10290,11 +10307,11 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await this.app.vault.adapter.read(chunkPath);
-      const payload = JSON.parse(raw);
-      if (!payload || typeof payload !== "object") {
+      const payload = this.asRecord(parseJsonUnknown(raw));
+      if (!payload) {
         return;
       }
-      const metadata = payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+      const metadata = this.asRecord(payload.metadata) ?? {};
       metadata.attachment_key = attachmentKey;
       payload.metadata = metadata;
       await this.app.vault.adapter.write(chunkPath, JSON.stringify(payload, null, 2));
@@ -10309,8 +10326,8 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await this.app.vault.adapter.read(chunkPath);
-      const payload = JSON.parse(raw);
-      if (!payload || typeof payload !== "object") {
+      const payload = this.asRecord(parseJsonUnknown(raw));
+      if (!payload) {
         return;
       }
       payload.source_pdf = sourcePdf;
@@ -10932,14 +10949,25 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(indexPath);
-      const payload = JSON.parse(raw);
-      if (payload && typeof payload === "object") {
+      const payload = this.asRecord(parseJsonUnknown(raw));
+      if (payload) {
         const entries = payload.entries ?? payload;
         if (Array.isArray(entries)) {
           const map: Record<string, DocIndexEntry> = {};
-          for (const entry of entries) {
-            if (entry?.doc_id) {
-              map[String(entry.doc_id)] = entry;
+          for (const candidate of entries) {
+            const entry = this.asRecord(candidate);
+            const docId = coerceString(entry?.doc_id);
+            if (entry && docId) {
+              map[docId] = {
+                doc_id: docId,
+                note_path: coerceString(entry.note_path),
+                note_title: coerceString(entry.note_title),
+                zotero_title: coerceString(entry.zotero_title) || undefined,
+                short_title: coerceString(entry.short_title) || undefined,
+                pdf_path: coerceString(entry.pdf_path) || undefined,
+                attachment_key: coerceString(entry.attachment_key) || undefined,
+                updated_at: coerceString(entry.updated_at),
+              };
             }
           }
           let changed = false;
@@ -11100,8 +11128,8 @@ export default class ZoteroRagPlugin extends Plugin {
     if (await adapter.exists(itemPath)) {
       try {
         const raw = await adapter.read(itemPath);
-        const item = JSON.parse(raw);
-        const values: ZoteroItemValues = item?.data ?? item ?? {};
+        const item = this.asRecord(parseJsonUnknown(raw));
+        const values = (this.asRecord(item?.data) ?? item ?? {}) as ZoteroItemValues;
         const title = typeof values.title === "string" ? values.title : "";
         if (title) {
           updates.zotero_title = title;
@@ -11138,7 +11166,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (await adapter.exists(chunkPath)) {
       try {
         const raw = await adapter.read(chunkPath);
-        const payload = JSON.parse(raw);
+        const payload = this.asRecord(parseJsonUnknown(raw));
         if (typeof payload?.source_pdf === "string") {
           updates.pdf_path = payload.source_pdf;
         }
@@ -11170,8 +11198,8 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     try {
       const raw = await adapter.read(itemPath);
-      const item = JSON.parse(raw);
-      const values: ZoteroItemValues = item?.data ?? item ?? {};
+      const item = this.asRecord(parseJsonUnknown(raw));
+      const values = (this.asRecord(item?.data) ?? item ?? {}) as ZoteroItemValues;
       const title = typeof values.title === "string" ? values.title : "";
       const baseName = this.sanitizeFileName(title) || docId;
       const primaryNote = normalizePath(`${this.settings.outputNoteDir}/${baseName}.md`);
@@ -11215,7 +11243,17 @@ export default class ZoteroRagPlugin extends Plugin {
     let item: ZoteroLocalItem;
     try {
       const itemRaw = await adapter.read(itemPath);
-      item = JSON.parse(itemRaw);
+      const itemRecord = this.asRecord(parseJsonUnknown(itemRaw));
+      const itemData = this.asRecord(itemRecord?.data) ?? itemRecord;
+      if (!itemRecord || !itemData) {
+        throw new Error("Cached item JSON must contain an object.");
+      }
+      const itemKey = itemRecord.key ?? itemData.key;
+      item = {
+        key: typeof itemKey === "string" ? itemKey : docId,
+        data: itemData,
+        meta: this.asRecord(itemRecord.meta) ?? undefined,
+      };
     } catch (error) {
       if (showNotices) {
         new Notice("Failed to read cached item JSON.");
@@ -11228,7 +11266,11 @@ export default class ZoteroRagPlugin extends Plugin {
     let chunkPayload: Record<string, unknown>;
     try {
       const chunkRaw = await adapter.read(chunkPath);
-      chunkPayload = JSON.parse(chunkRaw);
+      const parsedChunkPayload = this.asRecord(parseJsonUnknown(chunkRaw));
+      if (!parsedChunkPayload) {
+        throw new Error("Cached chunks JSON must contain an object.");
+      }
+      chunkPayload = parsedChunkPayload;
     } catch (error) {
       if (showNotices) {
         new Notice("Failed to read cached chunks JSON.");
@@ -11682,7 +11724,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (response.statusCode >= 400) {
       throw new Error(`Model list request failed (${response.statusCode})`);
     }
-    const parsed = JSON.parse(response.body.toString("utf8"));
+    const parsed = parseJsonUnknown(response.body.toString("utf8"));
     return this.extractModelIds(parsed);
   }
 
@@ -11695,7 +11737,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(response.body.toString("utf8"));
+      parsed = parseJsonUnknown(response.body.toString("utf8"));
     } catch (error) {
       console.warn("Failed to parse Ollama tags response", error);
       return [];
@@ -11725,7 +11767,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (response.statusCode >= 400) {
       throw new Error(`Anthropic model list request failed (${response.statusCode})`);
     }
-    const parsed = JSON.parse(response.body.toString("utf8"));
+    const parsed = parseJsonUnknown(response.body.toString("utf8"));
     return this.extractModelIds(parsed);
   }
 
@@ -11747,10 +11789,7 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private asRecord(value: unknown): Record<string, unknown> | null {
-    if (!value || typeof value !== "object") {
-      return null;
-    }
-    return value as Record<string, unknown>;
+    return asUnknownRecord(value);
   }
 
   private extractModelId(entry: unknown): string | null {
@@ -11810,7 +11849,7 @@ export default class ZoteroRagPlugin extends Plugin {
   ): Array<{ value: string; label: string }> {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(payload.toString("utf8"));
+      parsed = parseJsonUnknown(payload.toString("utf8"));
     } catch (error) {
       console.warn("Failed to parse Zotero group payload", error);
       return [];
@@ -12336,7 +12375,10 @@ export default class ZoteroRagPlugin extends Plugin {
     fallback: string,
     options: { appendDocling?: boolean } = {}
   ): string {
-    let rendered = template.replace(/{{\s*([a-z0-9_]+)\s*}}/gi, (_, key) => vars[key] ?? "");
+    let rendered = template.replace(
+      /{{\s*([a-z0-9_]+)\s*}}/gi,
+      (_match: string, key: string) => vars[key] ?? ""
+    );
     if (options.appendDocling && !template.includes("{{docling_markdown}}") && vars["docling_markdown"]) {
       rendered = `${rendered}\n\n${vars["docling_markdown"]}`;
     }
@@ -12359,7 +12401,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const parsedDate = typeof meta?.parsedDate === "string" ? meta.parsedDate : "";
     const year = extractYear(parsedDate || date);
     const yearNumber = /^\d{4}$/.test(year) ? year : "";
-    const creators = Array.isArray(values.creators) ? values.creators : [];
+    const creators = asUnknownRecordArray(values.creators);
     const authorsList = creators.filter((c) => c.creatorType === "author").map((c) => formatCreatorName(c));
     const authors = authorsList.join("; ");
     const editorsList = creators
@@ -12715,7 +12757,7 @@ export default class ZoteroRagPlugin extends Plugin {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return false;
       }
-      const payload = JSON.parse(response.body.toString("utf8"));
+      const payload = this.asRecord(parseJsonUnknown(response.body.toString("utf8")));
       return Boolean(payload?.ok);
     } catch {
       return false;
@@ -13770,7 +13812,7 @@ export default class ZoteroRagPlugin extends Plugin {
           }
         );
         let stdout = "";
-        child.stdout.on("data", (data) => {
+        child.stdout.on("data", (data: Buffer) => {
           stdout += data.toString();
         });
         child.on("error", (error) => {
@@ -14406,7 +14448,7 @@ export default class ZoteroRagPlugin extends Plugin {
         env: this.buildPythonEnv(),
       });
       let stdout = "";
-      child.stdout.on("data", (data) => {
+      child.stdout.on("data", (data: Buffer) => {
         stdout += data.toString();
       });
       child.on("error", () => resolve({ ok: false }));
@@ -14416,7 +14458,7 @@ export default class ZoteroRagPlugin extends Plugin {
           return;
         }
         try {
-          const parsed = JSON.parse(stdout.trim());
+          const parsed = parseJsonUnknown(stdout.trim());
           resolve({ ok: true, data: parsed });
         } catch {
           resolve({ ok: false });
@@ -14539,7 +14581,7 @@ export default class ZoteroRagPlugin extends Plugin {
         "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
       ]);
       let stdout = "";
-      child.stdout.on("data", (data) => {
+      child.stdout.on("data", (data: Buffer) => {
         stdout += data.toString();
       });
       child.on("error", () => resolve(null));
@@ -14613,10 +14655,10 @@ export default class ZoteroRagPlugin extends Plugin {
 
       let stdout = "";
       let stderr = "";
-      child.stdout.on("data", (data) => {
+      child.stdout.on("data", (data: Buffer) => {
         stdout += data.toString();
       });
-      child.stderr.on("data", (data) => {
+      child.stderr.on("data", (data: Buffer) => {
         stderr += data.toString();
       });
 
@@ -14649,7 +14691,7 @@ export default class ZoteroRagPlugin extends Plugin {
       });
 
       let stderr = "";
-      child.stderr.on("data", (data) => {
+      child.stderr.on("data", (data: Buffer) => {
         stderr += data.toString();
       });
 
@@ -14719,11 +14761,12 @@ export default class ZoteroRagPlugin extends Plugin {
           return;
         }
         try {
-          const payload = JSON.parse(line);
+          const payload = parseJsonUnknown(line);
+          const record = this.asRecord(payload);
           lastPayload = payload;
-          if (payload?.type === "final") {
+          if (record?.type === "final") {
             sawFinal = true;
-          } else if (payload?.answer) {
+          } else if (record?.answer) {
             sawFinal = true;
           }
           onPayload(payload);
@@ -14732,7 +14775,7 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       };
 
-      child.stdout.on("data", (data) => {
+      child.stdout.on("data", (data: Buffer) => {
         stdoutBuffer += data.toString();
         const lines = stdoutBuffer.split(/\r?\n/);
         stdoutBuffer = lines.pop() ?? "";
@@ -14741,7 +14784,7 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       });
 
-      child.stderr.on("data", (data) => {
+      child.stderr.on("data", (data: Buffer) => {
         stderr += data.toString();
       });
 
@@ -14801,7 +14844,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
       let stderr = "";
       child.stdout.on("data", handleChunk);
-      child.stderr.on("data", (data) => {
+      child.stderr.on("data", (data: Buffer) => {
         stderr += data.toString();
         handleChunk(data);
       });
@@ -14918,16 +14961,18 @@ export default class ZoteroRagPlugin extends Plugin {
               return;
             }
             try {
-              const payload = JSON.parse(line);
+              const payload = parseJsonUnknown(line);
+              const record = this.asRecord(payload);
               lastPayload = payload;
-              if (payload?.type === "final" || payload?.answer) {
+              if (record?.type === "final" || record?.answer) {
                 sawFinal = true;
-                if (!toolTimingLogged && payload?.timing && typeof payload.timing === "object") {
+                const timing = this.asRecord(record?.timing);
+                if (!toolTimingLogged && timing) {
                   toolTimingLogged = true;
                   this.logPythonWorkerTiming("stream-tool-timing", {
                     requestId,
                     tool: toolName,
-                    timing: payload.timing,
+                    timing,
                   });
                 }
               }
@@ -14942,13 +14987,13 @@ export default class ZoteroRagPlugin extends Plugin {
               return;
             }
             try {
-              const event = JSON.parse(line);
+              const event = this.asRecord(parseJsonUnknown(line));
               if (event?.type === "stdout") {
                 stdoutEvents += 1;
                 if (firstStdoutEventAt === null) {
                   firstStdoutEventAt = Date.now();
                 }
-                handleToolLine(String(event.line ?? ""));
+                handleToolLine(coerceString(event.line));
                 return;
               }
               if (event?.type === "done") {
@@ -14963,7 +15008,7 @@ export default class ZoteroRagPlugin extends Plugin {
 
           if ((response.statusCode ?? 0) >= 400) {
             const chunks: Buffer[] = [];
-            response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+            response.on("data", (chunk: Buffer) => chunks.push(chunk));
             response.on("end", () => {
               markRequestKilled();
               const details = Buffer.concat(chunks).toString("utf8");
@@ -14982,7 +15027,7 @@ export default class ZoteroRagPlugin extends Plugin {
             return;
           }
 
-          response.on("data", (chunk) => {
+          response.on("data", (chunk: Buffer) => {
             ndjsonBuffer += chunk.toString();
             const lines = ndjsonBuffer.split(/\r?\n/);
             ndjsonBuffer = lines.pop() ?? "";
@@ -15383,9 +15428,9 @@ export default class ZoteroRagPlugin extends Plugin {
         `Python worker API request failed (${response.statusCode}): ${details || "no response body"}`
       );
     }
-    const payload = JSON.parse(response.body.toString("utf8") || "{}");
-    const stdout = String(payload?.stdout ?? "");
-    const stderr = String(payload?.stderr ?? "");
+    const payload = this.asRecord(parseJsonUnknown(response.body.toString("utf8") || "{}"));
+    const stdout = typeof payload?.stdout === "string" ? payload.stdout : "";
+    const stderr = typeof payload?.stderr === "string" ? payload.stderr : "";
     if (payload?.timing && typeof payload.timing === "object") {
       this.logPythonWorkerTiming("run-tool-timing", {
         requestId,
@@ -15396,7 +15441,10 @@ export default class ZoteroRagPlugin extends Plugin {
     if (stderrLogPath && stderr) {
       await this.appendToLogFile(stderrLogPath, stderr, stderrLogLabel, "STDERR");
     }
-    const exitCode = Number.parseInt(String(payload?.exit_code ?? 1), 10);
+    const exitCodeRaw = payload?.exit_code;
+    const exitCode = typeof exitCodeRaw === "number"
+      ? exitCodeRaw
+      : Number.parseInt(typeof exitCodeRaw === "string" ? exitCodeRaw : "1", 10);
     this.logPythonWorkerTiming("run-done", {
       requestId,
       tool: toolName,
@@ -15455,11 +15503,11 @@ export default class ZoteroRagPlugin extends Plugin {
       let stdout = "";
       let stderr = "";
 
-      child.stdout.on("data", (data) => {
+      child.stdout.on("data", (data: Buffer) => {
         stdout += data.toString();
       });
 
-      child.stderr.on("data", (data) => {
+      child.stderr.on("data", (data: Buffer) => {
         stderr += data.toString();
       });
 

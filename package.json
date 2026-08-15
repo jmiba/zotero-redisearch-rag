@@ -1,15 +1,17 @@
 {
   "name": "zotero-redisearch-rag",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Obsidian plugin for Zotero -> Docling -> Redis Search RAG",
   "main": "main.js",
   "scripts": {
+    "test:typescript": "node scripts/run-typescript-tests.mjs",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint --config eslint.config.mjs src/**/*.ts",
     "lint:changed": "node scripts/lint-changed.mjs",
     "validate:manifest": "node scripts/validate-manifest.mjs",
     "build": "node scripts/build-tool-assets.mjs && node esbuild.config.mjs production",
     "dev": "node scripts/build-tool-assets.mjs && node esbuild.config.mjs",
-    "build:release": "npm run lint && npm run validate:manifest && npm run build",
+    "build:release": "npm run lint && npm run typecheck && npm run test:typescript && npm run validate:manifest && npm run build",
     "package-release": "npm run build:release && bash scripts/package-release.sh"
   },
   "devDependencies": {

@@ -64,6 +64,14 @@ Provider profiles reduce repeated base URL and API key setup. Embedding settings
 
 Model-list authentication failures are surfaced as Obsidian notices so invalid provider keys are visible without opening the developer console.
 
+## Runtime Data Validation
+
+Persisted settings, cache files, local HTTP responses, and worker events remain unknown until runtime checks establish the shape used by typed plugin code.
+
+JSON parsing is centralized in `src/safeJson.ts`. Saved settings accept known keys with values compatible with their defaults, record arrays discard malformed elements, and process streams normalize chunks before consuming them.
+
+The five TypeScript ESLint unsafe-value rules are release-blocking errors. Declarative settings search remains a separate compatibility advisory and is not part of this boundary contract.
+
 ## User-Facing Surfaces
 
 Users interact through commands, settings, generated notes, chunk controls, the PDF sidebar, and the chat panel.

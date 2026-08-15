@@ -7,7 +7,7 @@ export default defineConfig([
   {
     files: ["src/**/*.ts", "src/**/*.tsx"],
     linterOptions: {
-      reportUnusedDisableDirectives: "off",
+      reportUnusedDisableDirectives: "error",
     },
     languageOptions: {
       parser: tseslint.parser,
@@ -20,11 +20,11 @@ export default defineConfig([
       "no-undef": "off",
       "@typescript-eslint/require-await": "error",
       "@typescript-eslint/unbound-method": "off",
-      "@typescript-eslint/no-unsafe-assignment": "off",
-      "@typescript-eslint/no-unsafe-member-access": "off",
-      "@typescript-eslint/no-unsafe-call": "off",
-      "@typescript-eslint/no-unsafe-argument": "off",
-      "@typescript-eslint/no-unsafe-return": "off",
+      "@typescript-eslint/no-unsafe-assignment": "error",
+      "@typescript-eslint/no-unsafe-member-access": "error",
+      "@typescript-eslint/no-unsafe-call": "error",
+      "@typescript-eslint/no-unsafe-argument": "error",
+      "@typescript-eslint/no-unsafe-return": "error",
       "@typescript-eslint/await-thenable": "off",
       "obsidianmd/ui/sentence-case": [
         "error",
