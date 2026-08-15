@@ -7,49 +7,20 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 import redis
+from utils_redis import (
+    create_redis_client,
+    iter_info_attributes,
+    parse_info_map,
+    parse_search_results as parse_results,
+    parse_search_total,
+)
 
 
 def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
 
 
-def decode_value(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
-    return value
-
-
-def parse_results(raw: List[Any]) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
-    if not raw or len(raw) < 2:
-        return results
-    for idx in range(1, len(raw), 2):
-        if idx + 1 >= len(raw):
-            break
-        fields_raw = raw[idx + 1]
-        if not isinstance(fields_raw, list):
-            continue
-        field_map: Dict[str, Any] = {}
-        for i in range(0, len(fields_raw), 2):
-            key = decode_value(fields_raw[i])
-            value = decode_value(fields_raw[i + 1]) if i + 1 < len(fields_raw) else ""
-            field_map[str(key)] = value
-        results.append(field_map)
-    return results
-
-
 FIELD_TYPE_CACHE: Dict[str, Dict[str, str]] = {}
-
-
-def parse_info_map(info: Any) -> Dict[str, Any]:
-    if not isinstance(info, (list, tuple)):
-        return {}
-    it = iter(info)
-    result: Dict[str, Any] = {}
-    for key in it:
-        value = next(it, None)
-        result[str(decode_value(key))] = value
-    return result
 
 
 def get_field_types(client: redis.Redis, index: str) -> Dict[str, str]:
@@ -60,19 +31,12 @@ def get_field_types(client: redis.Redis, index: str) -> Dict[str, str]:
     except Exception:
         return {}
     info_map = parse_info_map(info)
-    attributes = info_map.get("attributes") or info_map.get("fields") or []
     field_types: Dict[str, str] = {}
-    if isinstance(attributes, (list, tuple)):
-        for attr in attributes:
-            if not isinstance(attr, (list, tuple)):
-                continue
-            attr_map: Dict[str, Any] = {}
-            for i in range(0, len(attr) - 1, 2):
-                attr_map[str(decode_value(attr[i]))] = decode_value(attr[i + 1])
-            name = attr_map.get("identifier") or attr_map.get("attribute") or attr_map.get("name")
-            ftype = attr_map.get("type")
-            if name and ftype:
-                field_types[str(name)] = str(ftype).upper()
+    for attr_map in iter_info_attributes(info_map):
+        name = attr_map.get("identifier") or attr_map.get("attribute") or attr_map.get("name")
+        ftype = attr_map.get("type")
+        if name and ftype:
+            field_types[str(name)] = str(ftype).upper()
     FIELD_TYPE_CACHE[index] = field_types
     return field_types
 
@@ -207,7 +171,7 @@ def main() -> int:
     parser.add_argument("--raw", action="store_true")
     args = parser.parse_args()
 
-    client = redis.Redis.from_url(args.redis_url, decode_responses=False)
+    client = create_redis_client(args.redis_url)
     field_types = get_field_types(client, args.index)
     query, parts = build_query(args.query, args.raw, field_types)
     if not query:
@@ -217,12 +181,7 @@ def main() -> int:
     try:
         raw = run_search(client, args.index, query, args.offset, args.limit)
         results = parse_results(raw)
-        total = 0
-        if isinstance(raw, list) and raw:
-            try:
-                total = int(raw[0])
-            except Exception:
-                total = 0
+        total = parse_search_total(raw)
         if total == 0 and parts:
             fallback_results: List[Dict[str, Any]] = []
             for _name, clause in parts:

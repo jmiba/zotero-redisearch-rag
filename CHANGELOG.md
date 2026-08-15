@@ -1,4 +1,10 @@
 # Changelog
+## 1.0.4
+- Replace the retired Redis Stack 7.4 image with the latest security-fixed Redis Open Source `8.10.0` image.
+- Keep Redis Insight available as a separately pinned `redis/redisinsight:3.8.0` service, preconfigured for the bundled Redis service.
+- Recreate and startup commands now manage Redis Insight alongside Redis and the optional Python worker.
+- Use RESP3 for bundled Python Redis connections, normalize Redis Search map replies while retaining legacy RESP2-array parsing, and bind redis-py to `>=8,<9`.
+
 ## 1.0.3
 - Stabilize the Python worker runtime after recent dependency and cache-path changes:
   - pin `docling` back to `2.89.0` and keep `paddlepaddle` at `3.2.2` so the Linux Python 3.12 worker image uses a dependency set that actually installs and still exposes the `docling.document_converter` API expected by the importer,

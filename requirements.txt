@@ -12,7 +12,7 @@ pillow
 pypdf
 pytesseract
 pyzotero
-redis
+redis>=8,<9
 requests<3
 urllib3<3,>=2.2.2
 charset-normalizer<4,>=3.3.2

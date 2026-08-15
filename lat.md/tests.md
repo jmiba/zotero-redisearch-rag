@@ -40,6 +40,14 @@ Optional LLM cleanup must fail closed so import does not depend on a flaky clean
 
 Tests ensure GUI-only config keys are filtered, cleanup disables itself after timeout, and total cleanup budget exhaustion prevents future cleanup calls while preserving original text.
 
+## Redis Client Compatibility
+
+Redis client tests preserve retrieval behavior as Redis and redis-py response protocols evolve.
+
+### RAG Parses RESP3
+
+The RAG client uses RESP3 and normalizes map replies into records while retaining RESP2 positional-array parsing for backward compatibility.
+
 ## Integration Test Gaps
 
 Important end-to-end flows are documented but not yet covered by automated tests in this repo.

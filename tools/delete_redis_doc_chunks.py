@@ -4,6 +4,7 @@ import sys
 from typing import List
 
 import redis
+from utils_redis import create_redis_client
 
 
 def eprint(message: str) -> None:
@@ -43,7 +44,7 @@ def main() -> int:
         return 2
 
     try:
-        client = redis.Redis.from_url(args.redis_url, decode_responses=False)
+        client = create_redis_client(args.redis_url)
         deleted = delete_doc_chunks(client, prefix, doc_id)
     except Exception as exc:
         eprint(f"Failed to delete Redis chunk keys for doc_id {doc_id}: {exc}")

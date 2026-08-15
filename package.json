@@ -1,7 +1,7 @@
 {
   "name": "zotero-redisearch-rag",
-  "version": "1.0.3",
-  "description": "Obsidian plugin for Zotero -> Docling -> Redis Stack RAG",
+  "version": "1.0.4",
+  "description": "Obsidian plugin for Zotero -> Docling -> Redis Search RAG",
   "main": "main.js",
   "scripts": {
     "lint": "eslint --config eslint.config.mjs src/**/*.ts",

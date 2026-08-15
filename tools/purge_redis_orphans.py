@@ -7,6 +7,7 @@ import sys
 from typing import Dict, Optional, Set
 
 import redis
+from utils_redis import create_redis_client
 
 
 def eprint(message: str) -> None:
@@ -43,7 +44,7 @@ def main() -> int:
     }
 
     try:
-        client = redis.Redis.from_url(args.redis_url, decode_responses=True)
+        client = create_redis_client(args.redis_url, decode_responses=True)
     except Exception as exc:
         eprint(f"Failed to connect to Redis: {exc}")
         return 2

@@ -5,9 +5,10 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
+from utils_redis import create_redis_client, iter_info_attributes, parse_info_map
 import redis
 import requests
 
@@ -40,27 +41,6 @@ def truncate_for_embedding(text: str) -> Tuple[str, bool]:
     return trimmed, True
 
 
-def _list_to_dict(items: Sequence[Any]) -> Dict[str, Any]:
-    data: Dict[str, Any] = {}
-    for i in range(0, len(items) - 1, 2):
-        key = items[i]
-        value = items[i + 1]
-        if isinstance(key, bytes):
-            key = key.decode("utf-8", "ignore")
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", "ignore")
-        data[str(key)] = value
-    return data
-
-
-def _iter_attributes(info_value: Any) -> Iterable[Dict[str, Any]]:
-    if not isinstance(info_value, list):
-        return []
-    for entry in info_value:
-        if isinstance(entry, list):
-            yield _list_to_dict(entry)
-
-
 def get_index_vector_dim(
     client: redis.Redis, index_name: str, field_name: str = "embedding"
 ) -> Optional[int]:
@@ -68,9 +48,8 @@ def get_index_vector_dim(
         info = client.execute_command("FT.INFO", index_name)
     except Exception:
         return None
-    info_dict = _list_to_dict(info if isinstance(info, list) else [])
-    attrs = info_dict.get("attributes")
-    for attr in _iter_attributes(attrs):
+    info_dict = parse_info_map(info)
+    for attr in iter_info_attributes(info_dict):
         attr_name = attr.get("attribute") or attr.get("identifier")
         if attr_name != field_name:
             continue
@@ -848,7 +827,7 @@ def main() -> int:
     except Exception:
         attachment_key = None
 
-    client = redis.Redis.from_url(args.redis_url, decode_responses=False)
+    client = create_redis_client(args.redis_url)
 
     if not incremental:
         # Delete all existing chunk keys for this doc_id before indexing

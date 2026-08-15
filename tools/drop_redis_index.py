@@ -4,6 +4,7 @@ import argparse
 import sys
 
 import redis
+from utils_redis import create_redis_client
 
 
 def main() -> int:
@@ -14,7 +15,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        client = redis.Redis.from_url(args.redis_url, decode_responses=True)
+        client = create_redis_client(args.redis_url, decode_responses=True)
     except Exception as exc:
         print(f"Failed to connect to Redis: {exc}", file=sys.stderr)
         return 2

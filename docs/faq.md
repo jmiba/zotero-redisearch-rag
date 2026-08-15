@@ -1,7 +1,7 @@
 # FAQ
 
 ## Why do I need Redis?
-Redis Stack provides a fast vector index so the plugin can find relevant chunks quickly. It keeps the search local and responsive.
+Redis 8 includes Redis Search, which provides a fast vector index so the plugin can find relevant chunks quickly. It keeps the search local and responsive.
 
 ## Why does the plugin create chunk markers in my notes?
 Chunk markers tell the plugin which text is synced and where each chunk starts and ends. This lets it reindex only what changed instead of reprocessing the whole document.

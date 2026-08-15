@@ -80,4 +80,4 @@ docker compose logs python-worker
 
 In Obsidian you can also run:
 
-- **Command palette → Recreate Redis Stack (Pull Configured Image)**
+- **Command palette → Recreate Redis Stack (Pull Configured Image)** to refresh both the pinned Redis and Redis Insight images.

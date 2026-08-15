@@ -14,6 +14,7 @@ const tools = [
   { name: "purge_redis_orphans.py", path: "tools/purge_redis_orphans.py" },
   { name: "batch_index_pyzotero.py", path: "tools/batch_index_pyzotero.py" },
   { name: "utils_embedding.py", path: "tools/utils_embedding.py" },
+  { name: "utils_redis.py", path: "tools/utils_redis.py" },
   { name: "ocr_wordlist.txt", path: "tools/ocr_wordlist.txt" },
   { name: "requirements.txt", path: "requirements.txt" },
   { name: "docker-compose.yml", path: "docker-compose.yml" },

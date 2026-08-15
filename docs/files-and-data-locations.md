@@ -22,7 +22,7 @@ The plugin keeps local cache files under:
 These caches let you reindex without re‑running Docling or OCR.
 
 ## Redis data directory
-Redis Stack stores its own data separately:
+Redis stores its own data separately:
 
 - When started from the plugin, it uses a per‑vault data folder under your vault’s `.obsidian/zotero-redisearch-rag/redis-data` (unless overridden).
 - If you run Redis yourself, data location depends on your Redis configuration.

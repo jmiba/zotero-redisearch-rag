@@ -120,6 +120,7 @@ const ZRR_PICKER_ICON = ICON_ASSETS["zrr-picker"];
 const ZRR_CHAT_ICON = ICON_ASSETS["zrr-chat"];
 const ZRR_PDF_ICON = ICON_ASSETS["zrr-pdf"];
 const REDIS_STACK_SERVICE = "redis-stack";
+const REDIS_INSIGHT_SERVICE = "redis-insight";
 const PYTHON_WORKER_SERVICE = "python-worker";
 const PYTHON_WORKER_PLUGIN_ROOT = "/workspace/plugin";
 const PYTHON_WORKER_VAULT_ROOT = "/workspace/vault";
@@ -12740,9 +12741,9 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private getComposeServiceNamesForCurrentRuntime(): string[] {
     if (this.usePythonWorker()) {
-      return [REDIS_STACK_SERVICE, PYTHON_WORKER_SERVICE];
+      return [REDIS_STACK_SERVICE, REDIS_INSIGHT_SERVICE, PYTHON_WORKER_SERVICE];
     }
-    return [REDIS_STACK_SERVICE];
+    return [REDIS_STACK_SERVICE, REDIS_INSIGHT_SERVICE];
   }
 
   private toContainerPath(base: string, target: string, containerRoot: string): string | null {
@@ -13813,6 +13814,7 @@ export default class ZoteroRagPlugin extends Plugin {
     const serviceSet = new Set<string>([
       ...services,
       REDIS_STACK_SERVICE,
+      REDIS_INSIGHT_SERVICE,
       PYTHON_WORKER_SERVICE,
     ]);
     return Array.from(serviceSet).map((service) => `${project}-${service}-1`);
@@ -14078,7 +14080,16 @@ export default class ZoteroRagPlugin extends Plugin {
       await this.maybeShowFirstContainerStartupNotice(silent);
       await this.runCommand(
         context.composeCommand.command,
-        [...context.composeCommand.argsPrefix, "-p", context.project, "-f", context.composePath, "pull", REDIS_STACK_SERVICE],
+        [
+          ...context.composeCommand.argsPrefix,
+          "-p",
+          context.project,
+          "-f",
+          context.composePath,
+          "pull",
+          REDIS_STACK_SERVICE,
+          REDIS_INSIGHT_SERVICE,
+        ],
         {
           cwd: path.dirname(context.composePath),
           env: context.composeEnv,
@@ -14096,6 +14107,7 @@ export default class ZoteroRagPlugin extends Plugin {
           "-d",
           "--force-recreate",
           REDIS_STACK_SERVICE,
+          REDIS_INSIGHT_SERVICE,
         ],
         {
           cwd: path.dirname(context.composePath),

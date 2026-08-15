@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from typing import Iterable, Tuple, Dict, Set
 
 import redis
+from utils_redis import create_redis_client
 
 try:
     from wordfreq import zipf_frequency as _zipf
@@ -250,7 +251,7 @@ def main() -> int:
     if hunspell_filters:
         print(f"Loaded {len(hunspell_filters)} Hunspell/spylls dictionaries for filtering.")
 
-    client = redis.Redis.from_url(args.redis_url, decode_responses=False)
+    client = create_redis_client(args.redis_url)
 
     counter: Counter[str] = Counter()
     doc_coverage: Dict[str, Set[str]] = defaultdict(set)

@@ -32,7 +32,7 @@ This page lists the main commands and what they do.
 
 ## Redis diagnostics and search
 - **Recreate Redis Stack (Pull Configured Image)**
-  - Pull the configured Redis image and force-recreate the `redis-stack` service.
+  - Pull the pinned Redis and Redis Insight images and force-recreate both services.
 - **Search Redis index for term**
   - Run a keyword search against the index.
 - **Show Redis diagnostics**

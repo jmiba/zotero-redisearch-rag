@@ -34,7 +34,9 @@ The extraction and indexing flow is documented in [[rag-pipeline#Import Pipeline
 
 The recommended Python runtime is the worker container, with local Python kept as a legacy path.
 
-Worker mode runs Redis Stack and a `python-worker` service through Docker or Podman compose. The plugin maps vault and plugin paths into container paths, rewrites local Redis URLs for the compose network, and restricts worker calls to bundled tools in the plugin `tools` directory.
+Worker mode runs Redis Open Source 8, Redis Insight, and a `python-worker` service through Docker or Podman compose. The plugin maps vault and plugin paths into container paths, rewrites local Redis URLs for the compose network, and restricts worker calls to bundled tools in the plugin `tools` directory.
+
+The bundled database uses a pinned Redis Open Source 8 image because Redis Stack is retired. Redis Insight runs as a separately pinned Compose service, and startup/recreate operations manage it alongside Redis without coupling index persistence to the UI container.
 
 The worker service runs heavyweight Python tools through a single execution slot, so Docling extraction, chunk indexing, and RAG/reranking do not compete for container memory. Child tool processes inherit the worker cache environment.
 

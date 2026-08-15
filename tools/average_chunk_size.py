@@ -2,9 +2,10 @@
 import sys
 import redis
 import argparse
+from utils_redis import create_redis_client
 
 def compute_average_chunk_size(redis_url: str, prefix: str, doc_id: str = None) -> None:
-    client = redis.Redis.from_url(redis_url, decode_responses=True)
+    client = create_redis_client(redis_url, decode_responses=True)
     pattern = f"{prefix}*" if not doc_id else f"{prefix}{doc_id}:*"
     keys = client.keys(pattern)
     total_chars = 0

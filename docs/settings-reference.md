@@ -7,8 +7,8 @@ This page summarizes the main settings tabs and what they control.
 - **Python runtime**: Defaults to `Python worker container` (recommended). Editable when advanced options are enabled.
 - **Python path**: Local mode only (shown in advanced mode). Interpreter used for Docling tools.
 - **Python env location**: Local mode only (shown in advanced mode). Store the venv in a shared cache or inside the plugin folder.
-- **Docker/Podman path**: CLI path used to start Redis Stack and Python worker.
-- **Redis URL**: Connection string for Redis Stack.
+- **Docker/Podman path**: CLI path used to start Redis, Redis Insight, and the Python worker.
+- **Redis URL**: Connection string for Redis.
 - **Auto‑assign Redis port**: Pick a free local port when starting Redis.
 - **Auto‑start Redis stack**: Start Redis automatically when needed.
 - **Start Redis stack now**: Manual start/restart button (starts only services required by the selected runtime).

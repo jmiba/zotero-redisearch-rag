@@ -5,7 +5,7 @@ This page walks you through a minimal, working setup so you can import a Zotero 
 ## Prerequisites
 - Obsidian (desktop)
 - Zotero 7, 8, or 9 (desktop)
-- Docker Desktop or Podman (for Redis Stack)
+- Docker Desktop or Podman (for Redis)
 - A local or cloud OpenAI-compatible model provider
 
 ## 1) Enable the Zotero local API (read-only)
@@ -47,7 +47,7 @@ Alternatives:
 In Obsidian, run:
 
 - **Command palette → Start Redis Stack (Docker/Podman Compose)**
-- **Command palette → Recreate Redis Stack (Pull Configured Image)** if you need to refresh the Redis container after a plugin update
+- **Command palette → Recreate Redis Stack (Pull Configured Image)** if you need to refresh the Redis and Redis Insight containers after a plugin update
 
 If Docker or Podman isn’t running, start it first.
 First startup can be slow because Docker/Podman may need to pull images and build worker dependencies. On slower networks/machines this can take 10+ minutes.

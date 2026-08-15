@@ -2,7 +2,7 @@
 
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18341648-blue)](https://doi.org/10.5281/zenodo.18341648)
 
-Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis Stack, and returns answers with citations that jump straight to the relevant chunk in your note.
+Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis 8, and returns answers with citations that jump straight to the relevant chunk in your note.
 
 **Documentation:** [Zotero Research Assistant docs](https://jmiba.github.io/zotero-redisearch-rag/)  
 **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -13,7 +13,7 @@ Zotero is your source of truth for references, and Obsidian is where you think. 
 
 ## Highlights
 
-- Local-first RAG over your Zotero PDFs (Redis Stack + local embeddings/chat).
+- Local-first RAG over your Zotero PDFs (Redis 8 + local embeddings/chat).
 - Rich Obsidian notes with chunk markers you can edit.
 - Incremental reindexing: edits update only the affected chunks.
 - Citations link back to the exact chunk in the note (or Zotero if you prefer).
@@ -27,7 +27,7 @@ Zotero is your source of truth for references, and Obsidian is where you think. 
 
 1) Pick a Zotero item in Obsidian.  
 2) Docling extracts text (OCR when needed).  
-3) Chunks are embedded and indexed in Redis Stack.  
+3) Chunks are embedded and indexed with Redis Search.
 4) Ask questions; responses cite the chunks used.
 
 ## Notes and syncing
@@ -138,7 +138,7 @@ Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate 
 
 - Obsidian (desktop)
 - Zotero 7, 8, or 9 (desktop)
-- Docker Desktop or Podman (for Redis Stack + Python worker)
+- Docker Desktop or Podman (for Redis + Python worker)
 - LM Studio or Ollama (or any OpenAI-compatible local server) — cloud providers like OpenAI/OpenRouter also work
 - Optional (advanced legacy local runtime only): Python 3.11–3.13
 
@@ -177,7 +177,7 @@ The plugin does not scan arbitrary user directories. File access is tied to Zote
 
 The plugin uses `child_process.spawn` to run local tools for user-triggered workflows:
 
-- Docker or Podman for Redis Stack and the Python worker container,
+- Docker or Podman for Redis and the Python worker container,
 - Python helper scripts for Docling/OCR/indexing in legacy local runtime mode,
 - platform open commands for opening PDFs/Zotero targets from plugin actions.
 
@@ -201,7 +201,7 @@ Depending on your configuration, the plugin may interact with:
 
 The plugin depends on local tools installed on your system:
 
-- Docker Desktop or Podman (for Redis Stack + Python worker startup)
+- Docker Desktop or Podman (for Redis + Python worker startup)
 - Optional (advanced legacy local runtime only): Python 3.11–3.13
 - Optional (advanced legacy local runtime only): Tesseract and Poppler (worker mode includes these in the `python-worker` image)
 
@@ -278,7 +278,7 @@ Notes:
    - macOS: paths under /Users are shared by default.
    - Windows: C:\Users\... is typically accessible via WSL2.
 - Redis data is stored under `<vault>/.zotero-redisearch-rag/redis-data`.
-- The bundled Redis container now uses `redis/redis-stack`, so Redis Insight is included and exposed on `http://127.0.0.1:8001` by default.
+- The bundled database uses the pinned `redis:8.10.0` image. Redis Insight runs as a separate pinned service and remains available at `http://127.0.0.1:8001` by default.
 - If Auto-assign Redis port is enabled, the plugin also shifts the Redis Insight host port to a vault-specific value to avoid multi-vault conflicts.
 - Multiple vaults:
    - Starting from the plugin creates a per‑vault Docker Compose project and data folder.

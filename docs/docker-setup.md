@@ -1,6 +1,6 @@
 # Docker Setup
 
-This guide explains how to configure Docker (or Podman) so the plugin can start Redis Stack and the Python worker reliably.
+This guide explains how to configure Docker (or Podman) so the plugin can start Redis 8, Redis Insight, and the Python worker reliably.
 
 ## 1) Install and start Docker/Podman
 
@@ -65,16 +65,17 @@ If needed, run:
 
 ```bash
 docker compose config
-docker compose pull redis-stack
-docker compose up -d redis-stack python-worker
+docker compose pull redis-stack redis-insight
+docker compose up -d redis-stack redis-insight python-worker
 docker compose ps -a
 docker compose logs redis-stack
+docker compose logs redis-insight
 docker compose logs python-worker
 ```
 
 Redis Insight:
 
-- With the bundled `redis/redis-stack` image, Redis Insight is available at [http://127.0.0.1:8001](http://127.0.0.1:8001) by default.
+- The bundled database uses the pinned `redis:8.10.0` image, with Redis Insight provided by a separate pinned service at [http://127.0.0.1:8001](http://127.0.0.1:8001) by default.
 - If **Auto-assign Redis port** is enabled, the plugin also chooses a matching vault-specific Redis Insight host port so multiple vaults can run without port collisions.
 
 ## Common pitfalls

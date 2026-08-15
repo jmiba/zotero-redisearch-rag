@@ -54,6 +54,8 @@ RedisSearch stores vectorized chunks with document metadata, page fields, tags, 
 
 `tools/index_redisearch.py` normalizes Markdown to index text, optionally prepends metadata, optionally splits chunks into embedding subchunks, builds embedding context from neighbors, generates chunk tags when configured, and upserts or deletes specific chunk IDs for incremental updates.
 
+Bundled Python tools use RESP3 and normalize Redis Search map replies at a shared parser boundary. The normalizer also accepts legacy RESP2 positional arrays, so the wire format never changes stored hashes or retrieval records.
+
 Embedding dimension mismatches trigger a drop/rebuild prompt because Redis vector schema dimensions must match the active embedding model.
 
 ## Chat Query Flow

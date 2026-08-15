@@ -34,7 +34,7 @@ The plugin does not scan arbitrary directories. File access is tied to Zotero at
 ## Shell/process execution
 The plugin starts local processes for user-triggered workflows:
 
-- Docker or Podman for Redis Stack and the Python worker container,
+- Docker or Podman for Redis and the Python worker container,
 - Python helper scripts for Docling/OCR/indexing in legacy local runtime mode,
 - platform open commands for opening PDFs or Zotero targets.
 

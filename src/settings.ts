@@ -484,7 +484,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       new Setting(tabEl)
         .setName("Docker/podman path")
         .setDesc(
-          "CLI path for Docker or Podman (used to start Redis Stack and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
+          "CLI path for Docker or Podman (used to start Redis, Redis Insight, and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
             "and common locations without saving an absolute path (keeps cross-OS sync). Supports ~. " +
             "Relative paths with separators resolve from your home dir."
         )
@@ -2456,7 +2456,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       new Setting(tabEl)
         .setName("Recreate redis stack")
-        .setDesc("Pulls the configured redis image and force-recreates the redis-stack service.")
+        .setDesc("Pulls both pinned images and force-recreates the redis and insight services.")
         .addButton((button) =>
           button.setButtonText("Recreate").onClick(async () => {
             await this.plugin.recreateRedisStack();

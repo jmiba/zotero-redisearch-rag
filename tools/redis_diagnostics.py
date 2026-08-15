@@ -6,27 +6,11 @@ import sys
 from typing import Any, Dict, Tuple
 
 import redis
+from utils_redis import create_redis_client, decode_nested, parse_info_map
 
 
 def eprint(message: str) -> None:
     sys.stderr.write(message + "\n")
-
-
-def decode_value(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
-    return value
-
-
-def parse_info_map(info: Any) -> Dict[str, Any]:
-    if not isinstance(info, (list, tuple)):
-        return {}
-    it = iter(info)
-    result: Dict[str, Any] = {}
-    for key in it:
-        value = next(it, None)
-        result[str(decode_value(key))] = value
-    return result
 
 
 def extract_summary(info_map: Dict[str, Any]) -> Dict[str, Any]:
@@ -41,7 +25,7 @@ def extract_summary(info_map: Dict[str, Any]) -> Dict[str, Any]:
         "gc_stats",
     ):
         if key in info_map:
-            summary[key] = decode_value(info_map[key])
+            summary[key] = decode_nested(info_map[key])
     return summary
 
 
@@ -67,16 +51,14 @@ def main() -> int:
     }
 
     try:
-        client = redis.Redis.from_url(args.redis_url, decode_responses=False)
+        client = create_redis_client(args.redis_url)
         pong = client.ping()
         payload["ping"] = bool(pong)
         try:
             info = client.execute_command("FT.INFO", args.index)
             info_map = parse_info_map(info)
             payload["ft_info"] = extract_summary(info_map)
-            payload["ft_info_raw"] = {
-                key: decode_value(value) for key, value in info_map.items()
-            }
+            payload["ft_info_raw"] = decode_nested(info_map)
         except Exception as exc:
             payload["ft_info_error"] = str(exc)
     except Exception as exc:
