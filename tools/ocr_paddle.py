@@ -13,6 +13,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 LOGGER = logging.getLogger("docling_extract")
+PADDLEOCR_VL_PIPELINE_VERSION = "v1.6"
 
 _INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)")
 _CURRENCY_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?%?$")
@@ -2643,6 +2644,7 @@ def ocr_pages_with_paddle_vl(
     if getattr(config, "paddle_vl_use_queues", None) is not None:
         predict_kwargs["use_queues"] = bool(config.paddle_vl_use_queues)
 
+    pipeline_kwargs["pipeline_version"] = PADDLEOCR_VL_PIPELINE_VERSION
     pipeline = PaddleOCRVL(**pipeline_kwargs)
 
     def _as_dict(obj: Any) -> Optional[Dict[str, Any]]:
@@ -2835,7 +2837,7 @@ def ocr_pages_with_paddle_vl(
     )
     stats: Dict[str, Any] = {
         "layout_used": True,
-        "layout_model": "PaddleOCR-VL",
+        "layout_model": "PaddleOCR-VL-1.6",
     }
     if isinstance(layout_markdown, str) and layout_markdown.strip():
         stats["layout_markdown"] = layout_markdown

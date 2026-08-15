@@ -69,7 +69,7 @@ Start with these files when orienting yourself:
 npm run lint
 npm run build
 npm run package-release
-python3 -m unittest tests.test_docling_processing
+python3 -m unittest discover -s tests -p 'test_*.py'
 lat check
 ```
 
@@ -77,7 +77,7 @@ Use them selectively:
 
 - Run `npm run lint` for TypeScript changes.
 - Run `npm run build` whenever plugin code or bundled tool assets change.
-- Run `python3 -m unittest tests.test_docling_processing` when touching `tools/docling_extract.py` or related OCR and cleanup logic.
+- Run `python3 -m unittest discover -s tests -p 'test_*.py'` when touching `tools/docling_extract.py` or related OCR and cleanup logic.
 - Run `npm run package-release` only when preparing a release build.
 - Run `lat check` before finishing any task.
 

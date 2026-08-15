@@ -21,7 +21,7 @@ Options
 - --out: Write the full OCR text to the specified file path.
 - --out-md: Write layout-labeled markdown output (only when layout OCR is used).
 - --pp-structure-v3: Use a layout pipeline instead of plain OCR (PaddleX layout first), with plain OCR fallback for text. Requires extra deps (cv2, shapely, pyclipper, paddlex). Default off unless enabled explicitly.
-- --paddle-vl: Use PaddleOCR-VL (PaddleOCRVL) end-to-end pipeline instead of PaddleOCR/PP-Structure. Default on.
+- --paddle-vl: Use PaddleOCR-VL 1.6 (PaddleOCRVL) end-to-end pipeline instead of PaddleOCR/PP-Structure. Default on.
 - Recommended for PaddleOCR-VL: --no-doc-unwarping --no-doc-orientation --paddle-vl-prompt-label ocr --layout-unclip 1.2 --layout-threshold 0.2
 
 OCR toggles
@@ -879,6 +879,7 @@ def main() -> int:
             predict_kwargs["max_pixels"] = args.paddle_vl_max_pixels
 
         try:
+            pipeline_kwargs["pipeline_version"] = "v1.6"
             pipeline = PaddleOCRVL(**pipeline_kwargs)
         except Exception as exc:
             print(f"PaddleOCR-VL failed: {exc}")

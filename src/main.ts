@@ -14427,7 +14427,7 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     const script = [
-      "import importlib.util, json",
+      "import importlib.metadata, importlib.util, json, re",
       "def has_module(name):",
       "    return importlib.util.find_spec(name) is not None",
       "has_paddle = has_module('paddle')",
@@ -14437,7 +14437,9 @@ export default class ZoteroRagPlugin extends Plugin {
       "if has_paddleocr:",
       "    try:",
       "        from paddleocr import PaddleOCRVL",
-      "        has_vl = True",
+      "        version_parts = [int(part) for part in re.findall(r'\\d+', importlib.metadata.version('paddleocr'))[:3]]",
+      "        version_parts += [0] * (3 - len(version_parts))",
+      "        has_vl = tuple(version_parts) >= (3, 6, 0)",
       "    except Exception:",
       "        has_vl = False",
       "print(json.dumps({'paddle': has_paddle, 'paddleocr': has_paddleocr, 'paddlex': has_paddlex, 'paddle_vl': has_vl}))",

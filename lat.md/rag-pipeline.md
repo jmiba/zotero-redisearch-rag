@@ -26,6 +26,8 @@ The plugin can run this tool through the Python worker API or legacy local Pytho
 
 The worker dependency baseline pins Docling `2.89.0` while keeping `onnxruntime` explicit, so RapidOCR ONNX routing remains available without relying on optional extras resolution. The worker stays on a Docling release that still provides the `docling.document_converter` API used by `tools/docling_extract.py` on Linux Python 3.12.
 
+The opt-in local VL route pins PaddleOCR `3.6.0` with PaddleX `3.6.1` and explicitly selects the `v1.6` pipeline. Legacy local runtimes expose this option only with PaddleOCR 3.6 or newer, and explicit selection prevents future defaults from silently changing the model.
+
 The default Auto OCR engine follows the stable release behavior: basic local Paddle is preferred when available, with Tesseract as fallback. Paddle VL and structure APIs remain opt-in.
 
 When an external OCR route is selected, Docling conversion is configured with explicit OCR options so layout conversion does not fall back to an unintended RapidOCR backend. Paddle routes use RapidOCR's packaged ONNX models through `onnxruntime` during Docling conversion, and the external OCR pass can still replace page text after conversion.

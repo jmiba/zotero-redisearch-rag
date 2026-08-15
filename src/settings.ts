@@ -1283,12 +1283,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           options.push({ value: "paddle_structure_local", label: "Paddle PP-StructureV3 (local)" });
         }
         if (availability.paddleVlLocal) {
-          options.push({ value: "paddle_vl_local", label: "PaddleOCR-VL (local)" });
+          options.push({ value: "paddle_vl_local", label: "PaddleOCR-VL 1.6 (local)" });
         }
         const apiKey = (this.plugin.settings.paddleApiKey || "").trim();
         if (apiKey) {
           options.push({ value: "paddle_structure_api", label: "PP-StructureV3 API" });
-          options.push({ value: "paddle_vl_api", label: "PaddleOCR-VL API" });
+          options.push({ value: "paddle_vl_api", label: "PaddleOCR-VL 1.6 (API)" });
         }
         applyOcrEngineOptions(options);
         ocrEngineDropdown.setDisabled(false);

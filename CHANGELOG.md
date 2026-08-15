@@ -1,4 +1,16 @@
 # Changelog
+## 1.0.7
+- Upgrade the opt-in PaddleOCR-VL route to PaddleOCR-VL 1.6:
+  - pin local worker/runtime dependencies to `paddleocr[doc-parser]==3.6.0` and `paddlex==3.6.1`,
+  - explicitly select local pipeline `v1.6` so future dependency defaults cannot silently change OCR behavior,
+  - expose the local PaddleOCR-VL option only when `paddleocr>=3.6` is available.
+- Refresh the PaddleOCR setup/docs and tests:
+  - replace the old 1.5 setup page with a 1.6 guide for both local and API modes,
+  - relabel OCR engine settings to `PaddleOCR-VL 1.6`,
+  - add a regression test that verifies explicit `v1.6` pipeline selection for the local VL route.
+
+## Unreleased
+
 ## 1.0.6
 - Keep parsed JSON, saved settings, cache records, API responses, and worker events behind explicit `unknown` boundaries until their runtime shape is checked.
 - Reject unknown or type-incompatible saved setting values while preserving compatible settings and legacy migrations.

@@ -41,7 +41,7 @@ Step-by-step setup guides:
 - **OCR cleanup**: Optional LLM cleanup for low‑quality OCR.
 
 ### Paddle OCR (API)
-If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-VL guide](paddleocr-vl-1.5-setup.md).
+If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-VL 1.6 guide](paddleocr-vl-1.6-setup.md).
 
 ## LLMs
 - **Provider profiles**: Store base URL + API key once.

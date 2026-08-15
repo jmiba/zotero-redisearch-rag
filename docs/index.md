@@ -20,7 +20,7 @@ The notes it creates are normal Obsidian notes that you can edit. Sync markers a
 - [Python Setup](python-setup.md)
 - [Docker Setup](docker-setup.md)
 - [LM Studio Provider Setup](lm-studio-provider-setup.md)
-- [PaddleOCR-VL 1.5 Setup](paddleocr-vl-1.5-setup.md)
+- [PaddleOCR-VL 1.6 Setup](paddleocr-vl-1.6-setup.md)
 - [Command Palette Reference](command-palette-reference.md)
 - [Files and Data Locations](files-and-data-locations.md)
 - [Troubleshooting](troubleshooting.md)

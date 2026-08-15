@@ -22,6 +22,10 @@ OCR routing must choose OCR only when the configured mode and quality signals ju
 
 Tests cover low-quality forced OCR, text-layer preservation including low-quality text layers that are not explicitly re-OCRed, per-page OCR decisions, rasterization triggers, engine language selection, the default Paddle-first route, explicit Paddle routing, missing external OCR diagnostics, Docling converter ONNX OCR options and low-memory runtime limits for external routes, filtering unstable Paddle orientation overrides, and zero-character OCR page detection.
 
+### PaddleOCR-VL Version Selection
+
+The local PaddleOCR-VL route must explicitly select pipeline `v1.6` so dependency defaults cannot silently change OCR behavior.
+
 ### Text Cleanup
 
 Text cleanup must repair common OCR artifacts without damaging valid Markdown or domain text.
