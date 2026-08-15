@@ -7,6 +7,13 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "1.0.8",
+    markdown: `- Make Obsidian Community release assets reproducible from the tagged commit:
+  - check out the exact release tag and build committed release-note source unchanged,
+  - fail release CI if generated plugin assets or bundled source differ from the tagged files,
+  - document that release notes and generated assets must be committed before tagging.`,
+  },
+  {
     version: "1.0.7",
     markdown: `- Upgrade the opt-in PaddleOCR-VL route to PaddleOCR-VL 1.6:
   - pin local worker/runtime dependencies to \`paddleocr[doc-parser]==3.6.0\` and \`paddlex==3.6.1\`,

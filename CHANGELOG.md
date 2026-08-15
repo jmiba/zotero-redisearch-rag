@@ -1,5 +1,5 @@
 # Changelog
-## Unreleased
+## 1.0.8
 - Make Community release artifacts reproducible from the tagged commit:
   - build the explicitly selected release tag without rewriting bundled release notes from the GitHub release body,
   - fail release CI when generated plugin assets or bundled source differ from the tagged files,
