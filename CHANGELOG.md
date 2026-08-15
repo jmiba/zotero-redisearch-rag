@@ -1,4 +1,9 @@
 # Changelog
+## 1.0.5
+- Restore Obsidian Community verification compatibility by removing an unmatched file-wide ESLint suppression and unnecessary type assertion.
+- Use `window` timer functions throughout plugin UI and worker orchestration code, as required by the current Obsidian developer guidelines.
+- Update the local Obsidian ESLint plugin to `0.4.1` so release checks match the Community verifier more closely.
+
 ## 1.0.4
 - Replace the retired Redis Stack 7.4 image with the latest security-fixed Redis Open Source `8.10.0` image.
 - Keep Redis Insight available as a separately pinned `redis/redisinsight:3.8.0` service, preconfigured for the bundled Redis service.

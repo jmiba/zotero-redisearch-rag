@@ -599,7 +599,7 @@ export class ZoteroChatView extends ItemView {
     this.messageEls.delete(messageId);
     const pending = this.pendingRender.get(messageId);
     if (pending !== undefined) {
-      activeWindow.clearTimeout(pending);
+      window.clearTimeout(pending);
       this.pendingRender.delete(messageId);
     }
     this.pendingThinking.delete(messageId);
@@ -616,7 +616,7 @@ export class ZoteroChatView extends ItemView {
     if (this.pendingRender.has(message.id)) {
       return;
     }
-    const handle = activeWindow.setTimeout(() => {
+    const handle = window.setTimeout(() => {
       this.pendingRender.delete(message.id);
       void this.renderMessageContent(message).then(() => {
         this.scrollToBottom();
@@ -901,7 +901,7 @@ export class ZoteroChatView extends ItemView {
       return;
     }
     this.clearMentionPickerDebounce();
-    this.mentionDebounceHandle = activeWindow.setTimeout(() => {
+    this.mentionDebounceHandle = window.setTimeout(() => {
       this.mentionDebounceHandle = null;
       void this.updateMentionSuggestions();
     }, 180);
@@ -909,7 +909,7 @@ export class ZoteroChatView extends ItemView {
 
   private clearMentionPickerDebounce(): void {
     if (this.mentionDebounceHandle !== null) {
-      activeWindow.clearTimeout(this.mentionDebounceHandle);
+      window.clearTimeout(this.mentionDebounceHandle);
       this.mentionDebounceHandle = null;
     }
   }

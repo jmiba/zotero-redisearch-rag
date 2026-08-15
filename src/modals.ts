@@ -1175,7 +1175,7 @@ export class ZoteroItemSuggestModal extends SuggestModal<ZoteroLocalItem> {
     const sequence = ++this.querySequence;
     try {
       await new Promise<void>((resolve) => {
-        activeWindow.setTimeout(resolve, this.queryDebounceMs);
+        window.setTimeout(resolve, this.queryDebounceMs);
       });
       if (sequence !== this.querySequence) {
         return [];

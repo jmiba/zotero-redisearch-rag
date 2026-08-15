@@ -7,6 +7,12 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    version: "1.0.5",
+    markdown: `- Restore Obsidian Community verification compatibility by removing an unmatched file-wide ESLint suppression and unnecessary type assertion.
+- Use \`window\` timer functions throughout plugin UI and worker orchestration code, as required by the current Obsidian developer guidelines.
+- Update the local Obsidian ESLint plugin to \`0.4.1\` so release checks match the Community verifier more closely.`,
+  },
+  {
     version: "1.0.4",
     markdown: `- Replace the retired Redis Stack 7.4 image with the security-fixed Redis Open Source \`8.10.0\` image.
 - Keep Redis Insight available as a separately pinned \`redis/redisinsight:3.8.0\` service, preconfigured for the bundled Redis service.

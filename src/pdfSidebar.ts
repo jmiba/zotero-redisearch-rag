@@ -629,7 +629,7 @@ export class PdfSidebarController {
   }
 
   private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => activeWindow.setTimeout(resolve, ms));
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   private getPluginsRegistry(): Record<string, unknown> | undefined {
