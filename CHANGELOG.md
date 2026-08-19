@@ -1,4 +1,11 @@
 # Changelog
+## 1.0.9
+- Fix Docker Compose startup and recreation on Windows:
+  - preserve the host environment required by Docker Desktop to discover the Compose CLI plugin,
+  - use a consistent environment for Docker/Compose detection and execution,
+  - normalize Windows `.exe` command names for Docker and Podman detection.
+- Add Windows-focused regression tests for container-runtime environment handling.
+
 ## 1.0.8
 - Make Community release artifacts reproducible from the tagged commit:
   - build the explicitly selected release tag without rewriting bundled release notes from the GitHub release body,
