@@ -12,7 +12,7 @@
     "build": "node scripts/build-tool-assets.mjs && node esbuild.config.mjs production",
     "dev": "node scripts/build-tool-assets.mjs && node esbuild.config.mjs",
     "build:release": "npm run lint && npm run typecheck && npm run test:typescript && npm run validate:manifest && npm run build",
-    "package-release": "npm run build:release && bash scripts/package-release.sh"
+    "package-release": "bash scripts/package-release.sh"
   },
   "devDependencies": {
     "@codemirror/state": "6.5.0",

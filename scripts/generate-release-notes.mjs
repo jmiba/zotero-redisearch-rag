@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { parseChangelogEntries } from "./release-changelog.mjs";
 
 const normalizeVersion = (value) =>
   String(value || "")
@@ -191,6 +192,7 @@ if (!releaseVersion) {
 }
 
 const bundledMarkdown = normalizeMarkdown(process.env.GITHUB_RELEASE_BODY);
+const changelogEntries = toEntries(parseChangelogEntries(readFileSync("CHANGELOG.md", "utf8")));
 const existingEntries = parseExistingReleaseNotes();
 let githubEntries = [];
 try {
@@ -203,6 +205,7 @@ try {
 }
 const mergedEntries = mergeEntries(
   [{ version: releaseVersion, markdown: bundledMarkdown }],
+  changelogEntries,
   githubEntries,
   existingEntries
 ).sort((left, right) => compareVersions(right.version, left.version));

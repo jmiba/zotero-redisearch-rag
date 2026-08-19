@@ -80,6 +80,8 @@ Community release assets must be reproducible from the exact tagged commit so ex
 
 Bundled release notes and generated tool assets are committed before tagging. The release workflow checks out the release tag, builds without rewriting release-note source, and fails if the build changes `main.js`, `manifest.json`, `styles.css`, `src/toolAssets.ts`, or `src/releaseNotes.ts`.
 
+Local release packaging treats the top `CHANGELOG.md` entry as the release-note source, requires its version to match `manifest.json`, regenerates the full in-app history, and only then builds `main.js`. This keeps tagged source and packaged assets reproducible.
+
 ## User-Facing Surfaces
 
 Users interact through commands, settings, generated notes, chunk controls, the PDF sidebar, and the chat panel.

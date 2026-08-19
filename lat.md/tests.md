@@ -62,6 +62,10 @@ The TypeScript test suite covers primitive rejection, nested provider-profile va
 
 Container-runtime tests ensure Windows Docker CLI plugin discovery variables survive child-process setup and Windows executable suffixes do not change Docker or Podman command classification.
 
+## Release Packaging
+
+Release-packaging tests ensure the top changelog entry supplies the current release body, rejects manifest-version mismatches, and retains older changelog entries for deterministic in-app history.
+
 ## Integration Test Gaps
 
 Important end-to-end flows are documented but not yet covered by automated tests in this repo.
