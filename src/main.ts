@@ -108,6 +108,12 @@ import {
   mergeCompatibleSettings,
   parseJsonUnknown,
 } from "./safeJson";
+import {
+  buildContainerChildEnv,
+  getContainerCliExecutableName,
+  getContainerCliKind,
+  type ContainerCliKind,
+} from "./containerRuntime";
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -13257,6 +13263,14 @@ export default class ZoteroRagPlugin extends Plugin {
     return { PATH: this.getDefaultChildPath() };
   }
 
+  private buildContainerRuntimeEnv(...binaryPaths: string[]): NodeJS.ProcessEnv {
+    const env = buildContainerChildEnv(process.env, this.getDefaultChildPath());
+    for (const binaryPath of binaryPaths) {
+      this.prependBinaryDirToPath(env, binaryPath);
+    }
+    return env;
+  }
+
   private async resolveDockerPath(): Promise<string> {
     const configuredRaw = this.settings.dockerPath?.trim();
     const configured = configuredRaw ? this.resolveUserPath(configuredRaw) : "";
@@ -13326,21 +13340,16 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async isContainerCliAvailable(cliPath: string): Promise<boolean> {
     return new Promise((resolve) => {
-      const child = spawn(cliPath, ["--version"]);
+      const child = spawn(cliPath, ["--version"], {
+        env: this.buildContainerRuntimeEnv(cliPath),
+      });
       child.on("error", () => resolve(false));
       child.on("close", (code) => resolve(code === 0));
     });
   }
 
-  private getContainerCliKind(cliPath: string): "docker" | "podman" | "podman-compose" {
-    const base = path.basename(cliPath);
-    if (base === "podman-compose") {
-      return "podman-compose";
-    }
-    if (base.includes("podman")) {
-      return "podman";
-    }
-    return "docker";
+  private getContainerCliKind(cliPath: string): ContainerCliKind {
+    return getContainerCliKind(cliPath);
   }
 
   private async isContainerDaemonRunning(cliPath: string): Promise<boolean> {
@@ -13356,7 +13365,9 @@ export default class ZoteroRagPlugin extends Plugin {
     }
 
     return new Promise((resolve) => {
-      const child = spawn(command, args);
+      const child = spawn(command, args, {
+        env: this.buildContainerRuntimeEnv(command),
+      });
       let resolved = false;
       const finish = (ok: boolean): void => {
         if (resolved) {
@@ -13390,7 +13401,9 @@ export default class ZoteroRagPlugin extends Plugin {
 
   private async supportsComposeSubcommand(cliPath: string): Promise<boolean> {
     return new Promise((resolve) => {
-      const child = spawn(cliPath, ["compose", "version"]);
+      const child = spawn(cliPath, ["compose", "version"], {
+        env: this.buildContainerRuntimeEnv(cliPath),
+      });
       child.on("error", () => resolve(false));
       child.on("close", (code) => resolve(code === 0));
     });
@@ -13432,7 +13445,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private async resolveComposeCommand(
     cliPath: string
   ): Promise<ComposeCommandSpec | null> {
-    const base = path.basename(cliPath);
+    const base = getContainerCliExecutableName(cliPath);
     if (base === "podman-compose") {
       return { command: cliPath, argsPrefix: [] };
     }
@@ -13457,10 +13470,8 @@ export default class ZoteroRagPlugin extends Plugin {
     composeCommand: ComposeCommandSpec,
     options?: { dataDir?: string; redisPort?: number }
   ): Promise<NodeJS.ProcessEnv> {
-    const composeEnv = this.buildChildEnv();
-    this.prependBinaryDirToPath(composeEnv, dockerPath);
-    this.prependBinaryDirToPath(composeEnv, composeCommand.command);
-    if (path.basename(composeCommand.command) === "podman-compose") {
+    const composeEnv = this.buildContainerRuntimeEnv(dockerPath, composeCommand.command);
+    if (getContainerCliExecutableName(composeCommand.command) === "podman-compose") {
       const podmanBin = await this.resolvePodmanBin();
       if (podmanBin) {
         composeEnv.PODMAN_BIN = podmanBin;
@@ -13864,7 +13875,7 @@ export default class ZoteroRagPlugin extends Plugin {
   private async resolveContainerRuntimeCommandForCompose(
     context: ComposeProjectContext
   ): Promise<string | null> {
-    const composeCmd = path.basename(context.composeCommand.command || "");
+    const composeCmd = getContainerCliExecutableName(context.composeCommand.command || "");
     if (composeCmd === "podman-compose") {
       const explicit = String(context.composeEnv.PODMAN_BIN || "").trim();
       if (explicit) {

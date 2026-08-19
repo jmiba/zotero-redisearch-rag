@@ -58,6 +58,10 @@ Boundary tests verify that parsed JSON remains unknown and malformed saved setti
 
 The TypeScript test suite covers primitive rejection, nested provider-profile validation, dynamic record validation, unknown setting removal, and preservation of compatible saved values.
 
+## Container Runtime Environment
+
+Container-runtime tests ensure Windows Docker CLI plugin discovery variables survive child-process setup and Windows executable suffixes do not change Docker or Podman command classification.
+
 ## Integration Test Gaps
 
 Important end-to-end flows are documented but not yet covered by automated tests in this repo.

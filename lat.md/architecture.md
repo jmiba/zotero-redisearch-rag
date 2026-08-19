@@ -36,6 +36,8 @@ The recommended Python runtime is the worker container, with local Python kept a
 
 Worker mode runs Redis Open Source 8, Redis Insight, and a `python-worker` service through Docker or Podman compose. The plugin maps vault and plugin paths into container paths, rewrites local Redis URLs for the compose network, and restricts worker calls to bundled tools in the plugin `tools` directory.
 
+Container-runtime checks and Compose execution use the same inherited host environment through [[src/containerRuntime.ts#buildContainerChildEnv]]. This preserves Windows Docker CLI plugin discovery and configured Docker contexts while local Python tools retain a minimal child environment.
+
 The bundled database uses a pinned Redis Open Source 8 image because Redis Stack is retired. Redis Insight runs as a separately pinned Compose service, and startup/recreate operations manage it alongside Redis without coupling index persistence to the UI container.
 
 The worker service runs heavyweight Python tools through a single execution slot, so Docling extraction, chunk indexing, and RAG/reranking do not compete for container memory. Child tool processes inherit the worker cache environment.
