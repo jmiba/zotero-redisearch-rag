@@ -1,6 +1,8 @@
 # Zotero Research Assistant for Obsidian
 
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.18341648-blue)](https://doi.org/10.5281/zenodo.18341648)
+[![Available in Obsidian](https://img.shields.io/badge/Available%20in%20Obsidian-7C3AED?logo=obsidian&logoColor=white&style=flat-square)](https://obsidian.md/plugins?id=zotero-redisearch-rag)
+[![Downloads](https://img.shields.io/github/downloads/flowing-abyss/obsidian-hybrid-search-plugin/total?style=flat-square&label=downloads&color=blue)](https://github.com/jmiba/zotero-redisearch-rag/releases)
 
 Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis 8, and returns answers with citations that jump straight to the relevant chunk in your note.
 
