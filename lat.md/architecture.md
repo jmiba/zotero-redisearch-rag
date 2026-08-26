@@ -12,6 +12,12 @@ The Obsidian plugin owns user commands, settings, editor integrations, cache pat
 
 Key commands include import, chat, Redis startup, cache rebuilds, note reindexing, chunk exclusion, Redis diagnostics, companion health checks, and note/cache deletion.
 
+### Searchable Settings
+
+Settings use Obsidian 1.13's declarative API so control names and descriptions participate in the application's global settings search.
+
+The six native sub-pages group prerequisites, Zotero import, annotations, OCR, LLMs, and maintenance. Dynamic controls use deferred render callbacks through [[src/settingsDefinitionBuilder.ts#SearchableSettingsPageBuilder]], keeping definition discovery free of network and file I/O.
+
 ## Zotero Data Boundary
 
 Zotero is the source of bibliographic truth while Obsidian is the editable working surface.
@@ -56,6 +62,12 @@ RedisSearch is the local vector index, while Obsidian files remain the durable u
 
 Index names and key prefixes are namespaced per vault unless a user configures shared Redis behavior. Cached chunk JSON is the source for reindexing, drop/rebuild recovery, orphan cleanup, and incremental updates after note edits.
 
+### Stable Redis Namespace
+
+The Redis namespace is persisted in plugin settings so moving a vault does not orphan its index and chunk keys.
+
+Existing installations migrate once by storing the legacy vault-path-derived namespace. Users can intentionally select an earlier namespace in Maintenance without renaming or deleting Redis data. Index names and key prefixes always use the same stored namespace through [[src/redisNamespace.ts#resolveRedisNamespace]].
+
 Redis and query behavior are documented in [[rag-pipeline#Indexing And Retrieval]].
 
 ## LLM Provider Boundary
@@ -72,7 +84,7 @@ Persisted settings, cache files, local HTTP responses, and worker events remain 
 
 JSON parsing is centralized in `src/safeJson.ts`. Saved settings accept known keys with values compatible with their defaults, record arrays discard malformed elements, and process streams normalize chunks before consuming them.
 
-The five TypeScript ESLint unsafe-value rules are release-blocking errors. Declarative settings search remains a separate compatibility advisory and is not part of this boundary contract.
+The five TypeScript ESLint unsafe-value rules are release-blocking errors. The settings tab also targets Obsidian's declarative, searchable API instead of maintaining a legacy imperative rendering path.
 
 ## Release Artifact Boundary
 

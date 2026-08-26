@@ -28,6 +28,8 @@ Use the CLI tools when you need:
 ## Multi‑vault behavior and Redis namespacing
 If multiple vaults share a Redis instance, the plugin namespaces the index and key prefix with a vault‑specific hash. This prevents chunks from different vaults from mixing.
 
+The derived namespace is stored in the plugin settings the first time this version loads. Moving the vault later keeps the stored namespace, so the existing Redis index and chunk keys remain selected. Maintenance → Redis indexing → Redis namespace can intentionally select an older namespace after a move that happened before this migration. Changing the field does not rename or delete Redis data.
+
 If you enable **Auto‑assign Redis port**, each vault can start its own Redis instance on a unique local port.
 
 ## Shared compose project overrides across vaults

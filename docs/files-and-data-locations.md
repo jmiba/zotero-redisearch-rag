@@ -9,7 +9,7 @@ By default, the plugin writes:
 - **PDFs**: `Zotero/PDFs/` (if Copy PDFs to vault is enabled)
 - **Chat exports**: `Zotero/Chats/`
 
-All of these paths are configurable in Settings → Output.
+All of these paths are configurable in Settings → Zotero import → Output.
 
 ## Cache directories
 The plugin keeps local cache files under:

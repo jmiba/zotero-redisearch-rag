@@ -1,4 +1,21 @@
 # Changelog
+## 1.0.10
+- Adopt Obsidian's declarative settings API:
+  - expose the settings as six native sub-pages with searchable control names and descriptions,
+  - keep dynamic provider, model, annotation-map, and maintenance actions inside searchable declarative rows,
+  - require Obsidian `1.13.0` or newer and compile against the released `1.13.1` API typings.
+- Keep Redis identity stable when a vault moves:
+  - persist the legacy vault-derived namespace in plugin settings,
+  - add a **Maintenance → Redis indexing namespace** control that can reconnect a moved vault to existing indexes and keys without renaming or deleting Redis data.
+- Restore automatic missing-index creation across Redis Search error variants:
+  - centralize detection for `SEARCH_INDEX_NOT_FOUND`, `Index not found`, `No such index`, and the legacy `Unknown index name`,
+  - use the shared detector for both index creation and idempotent drop/rebuild,
+  - add regression tests proving `FT.CREATE` runs for every supported missing-index response while unrelated Redis errors remain fatal.
+- Harden Paddle API OCR failures:
+  - retry temporary PaddleOCR-VL queue saturation (`errorCode` 10010 / HTTP 503) twice with bounded backoff,
+  - keep explicitly selected Paddle API engines strict instead of falling through to native local Paddle,
+  - report native worker exits such as `SIGSEGV` ahead of generic Paddle error headers and retain non-JSON stdout diagnostics in the import log.
+
 ## 1.0.9
 - Fix Docker Compose startup and recreation on Windows:
   - preserve the host environment required by Docker Desktop to discover the Compose CLI plugin,

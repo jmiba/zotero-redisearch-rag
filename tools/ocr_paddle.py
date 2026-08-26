@@ -1958,15 +1958,41 @@ def ocr_pages_with_paddle_vl(
                 return True
             return False
 
+        def _is_queue_full_payload(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            error_code = value.get("errorCode")
+            if error_code is None:
+                error_code = value.get("error_code")
+            try:
+                if int(error_code) == 10010:
+                    return True
+            except (TypeError, ValueError):
+                pass
+            message = " ".join(
+                str(value.get(key) or "")
+                for key in ("error_msg", "errorMsg", "message", "msg", "error")
+            ).lower()
+            return (
+                "queue is full" in message
+                or "queue full" in message
+                or "任务提交队列已满" in message
+            )
+
+        def _response_json(response: Any) -> Optional[Dict[str, Any]]:
+            try:
+                value = response.json()
+            except Exception:
+                return None
+            return value if isinstance(value, dict) else None
+
         def _request_api(file_bytes: bytes, file_type: int, label: str) -> Dict[str, Any]:
             payload = _build_payload(file_bytes, file_type)
             max_attempts = 3
             delay_sec = 2
-            response = None
             for attempt in range(1, max_attempts + 1):
                 try:
                     response = requests.post(api_url, json=payload, headers=headers, timeout=api_timeout)
-                    break
                 except Exception as exc:
                     if _is_timeout_error(exc) and attempt < max_attempts:
                         LOGGER.warning(
@@ -1980,9 +2006,58 @@ def ocr_pages_with_paddle_vl(
                         delay_sec *= 2
                         continue
                     raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): {exc}") from exc
-            if response is None:
-                raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): no response")
-            if response.status_code != 200:
+
+                data = _response_json(response)
+                queue_full = response.status_code == 503 or _is_queue_full_payload(data)
+                if queue_full:
+                    if attempt < max_attempts:
+                        LOGGER.warning(
+                            "PaddleOCR-VL API queue full (%s). Retrying %d/%d in %ds.",
+                            label,
+                            attempt,
+                            max_attempts,
+                            delay_sec,
+                        )
+                        time.sleep(delay_sec)
+                        delay_sec *= 2
+                        continue
+                    body = ""
+                    try:
+                        body = response.text.strip()
+                    except Exception:
+                        body = ""
+                    detail = body or (
+                        json.dumps(data, ensure_ascii=False) if data is not None else "no response body"
+                    )
+                    raise RuntimeError(
+                        "PaddleOCR-VL API queue is full after "
+                        f"{max_attempts} attempts ({label}): status={response.status_code} {detail}"
+                    )
+
+                if response.status_code == 200:
+                    if data is None:
+                        try:
+                            parsed = response.json()
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"PaddleOCR-VL API response parse failed ({label}): {exc}"
+                            ) from exc
+                        if not isinstance(parsed, dict):
+                            raise RuntimeError(
+                                f"PaddleOCR-VL API response parse failed ({label}): expected an object"
+                            )
+                        data = parsed
+                    summary = _summarize_api_response(data)
+                    try:
+                        LOGGER.info(
+                            "PaddleOCR-VL API response (%s): %s",
+                            label,
+                            json.dumps(summary, ensure_ascii=True),
+                        )
+                    except Exception:
+                        LOGGER.info("PaddleOCR-VL API response (%s): %r", label, summary)
+                    return data
+
                 if response.status_code == 429:
                     retry_after = response.headers.get("Retry-After")
                     message = (
@@ -2000,16 +2075,8 @@ def ocr_pages_with_paddle_vl(
                 raise RuntimeError(
                     f"PaddleOCR-VL API request failed ({label}): status={response.status_code} {body}"
                 )
-            try:
-                data = response.json()
-            except Exception as exc:
-                raise RuntimeError(f"PaddleOCR-VL API response parse failed ({label}): {exc}") from exc
-            summary = _summarize_api_response(data)
-            try:
-                LOGGER.info("PaddleOCR-VL API response (%s): %s", label, json.dumps(summary, ensure_ascii=True))
-            except Exception:
-                LOGGER.info("PaddleOCR-VL API response (%s): %r", label, summary)
-            return data
+
+            raise RuntimeError(f"PaddleOCR-VL API request failed ({label}): no response")
 
         def _extract_layout_results(data: Any) -> List[Dict[str, Any]]:
             if isinstance(data, dict):

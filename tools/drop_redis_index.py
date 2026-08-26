@@ -3,8 +3,7 @@
 import argparse
 import sys
 
-import redis
-from utils_redis import create_redis_client
+from utils_redis import create_redis_client, is_missing_search_index_error
 
 
 def main() -> int:
@@ -26,8 +25,7 @@ def main() -> int:
         else:
             client.execute_command("FT.DROPINDEX", args.index)
     except Exception as exc:
-        message = str(exc)
-        if "Unknown Index name" in message or "Unknown index name" in message:
+        if is_missing_search_index_error(exc):
             print(f"Index {args.index} did not exist; continuing.", file=sys.stderr)
             return 0
         print(f"Failed to drop index {args.index}: {exc}", file=sys.stderr)

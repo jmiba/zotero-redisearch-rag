@@ -235,6 +235,7 @@ class DoclingProcessingConfig:
     paddle_vl_layout_unclip: Optional[float] = 1.2
     paddle_vl_layout_merge: Optional[str] = "small"
     paddle_vl_api_disable: bool = False
+    paddle_api_strict: bool = False
     paddle_vl_api_url: Optional[str] = None
     paddle_vl_api_token: Optional[str] = None
     paddle_vl_api_timeout_sec: int = 600
@@ -283,6 +284,7 @@ DOCLING_CONFIG_FILE_EXCLUDED_FIELDS: Set[str] = {
     "paddle_use_structure_v3",
     "paddle_use_vl",
     "paddle_vl_api_disable",
+    "paddle_api_strict",
     "paddle_vl_api_token",
     "paddle_vl_api_url",
     "prefer_ocr_engine",
@@ -4111,6 +4113,12 @@ def run_external_ocr_pages(
         api_url = getattr(config, "paddle_vl_api_url", None)
         api_token = getattr(config, "paddle_vl_api_token", None)
         return bool(api_url and api_token)
+    def _paddle_structure_api_enabled() -> bool:
+        if bool(getattr(config, "paddle_structure_api_disable", False)):
+            return False
+        api_url = getattr(config, "paddle_structure_api_url", None)
+        api_token = getattr(config, "paddle_structure_api_token", None)
+        return bool(api_url and api_token)
     if engine == "paddle" and config.paddle_use_vl:
         if _paddle_vl_api_enabled():
             helpers["boilerplate_prepass_enabled"] = False
@@ -4175,6 +4183,11 @@ def run_external_ocr_pages(
             )
     if engine == "paddle":
         if config.paddle_use_vl:
+            api_route_is_strict = bool(getattr(config, "paddle_api_strict", False))
+            if api_route_is_strict and not _paddle_vl_api_enabled():
+                raise RuntimeError(
+                    "PaddleOCR-VL API was explicitly selected, but its API URL or key is missing."
+                )
             try:
                 pages, stats = ocr_pages_with_paddle_vl(
                     images,
@@ -4186,6 +4199,11 @@ def run_external_ocr_pages(
                     progress_span,
                 )
                 if ocr_pages_text_chars(pages) == 0:
+                    if api_route_is_strict:
+                        raise RuntimeError(
+                            "PaddleOCR-VL API returned empty text; local Paddle fallback is disabled "
+                            "because the API engine was explicitly selected."
+                        )
                     LOGGER.warning(
                         "PaddleOCR-VL returned empty text; falling back to PaddleOCR."
                     )
@@ -4201,9 +4219,19 @@ def run_external_ocr_pages(
                     )
                 return pages, stats
             except Exception as exc:
+                if api_route_is_strict:
+                    raise RuntimeError(
+                        "PaddleOCR-VL API failed; local Paddle fallback is disabled because the API "
+                        f"engine was explicitly selected: {exc}"
+                    ) from exc
                 LOGGER.warning("PaddleOCR-VL failed; falling back to PaddleOCR: %s", exc)
                 helpers["boilerplate_prepass_enabled"] = bool(config.enable_boilerplate_removal)
         if config.paddle_use_structure_v3:
+            api_route_is_strict = bool(getattr(config, "paddle_api_strict", False))
+            if api_route_is_strict and not _paddle_structure_api_enabled():
+                raise RuntimeError(
+                    "PP-Structure API was explicitly selected, but its API URL or key is missing."
+                )
             try:
                 pages, stats = ocr_pages_with_paddle_structure(
                     images,
@@ -4215,6 +4243,11 @@ def run_external_ocr_pages(
                     progress_span,
                 )
                 if ocr_pages_text_chars(pages) == 0:
+                    if api_route_is_strict:
+                        raise RuntimeError(
+                            "PP-Structure API returned empty text; local Paddle fallback is disabled "
+                            "because the API engine was explicitly selected."
+                        )
                     LOGGER.warning(
                         "PP-Structure returned empty text; falling back to PaddleOCR."
                     )
@@ -4229,6 +4262,11 @@ def run_external_ocr_pages(
                     )
                 return pages, stats
             except Exception as exc:
+                if api_route_is_strict:
+                    raise RuntimeError(
+                        "PP-Structure API failed; local Paddle fallback is disabled because the API "
+                        f"engine was explicitly selected: {exc}"
+                    ) from exc
                 LOGGER.warning("PP-StructureV3 failed; falling back to PaddleOCR: %s", exc)
         return ocr_pages_with_paddle(
             images,
@@ -5085,6 +5123,11 @@ def main() -> int:
         help="Disable PaddleOCR-VL API.",
     )
     parser.add_argument(
+        "--paddle-api-strict",
+        action="store_true",
+        help="Fail an explicitly selected Paddle API route instead of using local Paddle fallback.",
+    )
+    parser.add_argument(
         "--paddle-vl-api-url",
         help="PaddleOCR-VL API URL (overrides local PaddleOCR-VL).",
     )
@@ -5542,6 +5585,8 @@ def main() -> int:
         config.paddle_vl_layout_nms = args.paddle_vl_layout_nms
     if args.paddle_vl_api_disable is not None:
         config.paddle_vl_api_disable = args.paddle_vl_api_disable
+    if args.paddle_api_strict:
+        config.paddle_api_strict = True
     if args.paddle_vl_api_url:
         config.paddle_vl_api_url = args.paddle_vl_api_url
     if args.paddle_vl_api_token:

@@ -114,6 +114,11 @@ import {
   getContainerCliKind,
   type ContainerCliKind,
 } from "./containerRuntime";
+import { resolveRedisNamespace } from "./redisNamespace";
+import {
+  formatProcessExitDiagnostic,
+  summarizePythonDiagnostic,
+} from "./pythonDiagnostics";
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -530,6 +535,11 @@ export default class ZoteroRagPlugin extends Plugin {
     const data = asUnknownRecord(loadedData) ?? {};
     this.hadSavedSettingsData = Object.keys(data).length > 0;
     const settings = mergeCompatibleSettings(DEFAULT_SETTINGS, data);
+    const redisNamespaceResolution = resolveRedisNamespace(
+      coerceString(data.redisNamespace),
+      this.getVaultBasePath()
+    );
+    settings.redisNamespace = redisNamespaceResolution.namespace;
     const runtimeRaw = (data).pythonRuntime;
     const runtimeMissing = runtimeRaw === undefined || runtimeRaw === null || runtimeRaw === "";
     const runtimeInvalid = !runtimeMissing && runtimeRaw !== "worker" && runtimeRaw !== "local";
@@ -567,7 +577,13 @@ export default class ZoteroRagPlugin extends Plugin {
       settings.preferObsidianNoteForCitations = (data).preferVaultPdfForCitations;
     }
     this.settings = settings;
-    if (!runtimeMigrationDone || runtimeMissing || runtimeInvalid || advancedRuntimeFlagMissing) {
+    if (
+      !runtimeMigrationDone ||
+      runtimeMissing ||
+      runtimeInvalid ||
+      advancedRuntimeFlagMissing ||
+      redisNamespaceResolution.shouldPersist
+    ) {
       await this.saveData(this.settings);
     }
   }
@@ -3928,82 +3944,6 @@ export default class ZoteroRagPlugin extends Plugin {
     }
   }
 
-  private stripAnsiCodes(value: string): string {
-    const escapeChar = String.fromCharCode(27);
-    return value.replace(new RegExp(`${escapeChar}\\[[0-?]*[ -/]*[@-~]`, "g"), "");
-  }
-
-  private isLowSignalPythonDiagnosticLine(line: string): boolean {
-    const trimmed = this.stripAnsiCodes(line).trim();
-    return (
-      /^\d{4}-\d{2}-\d{2}[T\s][^ ]+\s+(DEBUG|INFO)\b/.test(trimmed)
-      || /^\[(DEBUG|INFO)\]\s+\d{4}-\d{2}-\d{2}\b/.test(trimmed)
-      || (
-        trimmed.includes("Connectivity check to the model hoster has been skipped")
-        && trimmed.includes("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK")
-      )
-      || /^Downloading https:\/\/raw\.githubusercontent\.com\/LibreOffice\/dictionaries\/.* -> /.test(trimmed)
-      || /^Successfully downloaded Hunspell dictionary\b/.test(trimmed)
-      || /^Failed to download https:\/\/raw\.githubusercontent\.com\/LibreOffice\/dictionaries\//.test(trimmed)
-      || /^Loading weights:\s+/.test(trimmed)
-    );
-  }
-
-  private formatProcessExitDiagnostic(exitCode: number): string {
-    if (!Number.isFinite(exitCode)) {
-      return "Process exited with code 1";
-    }
-    if (exitCode >= 0) {
-      return `Process exited with code ${exitCode}`;
-    }
-    const signalNumber = Math.abs(Math.trunc(exitCode));
-    const signalNames: Record<number, string> = {
-      9: "SIGKILL",
-      15: "SIGTERM",
-    };
-    const signal = signalNames[signalNumber] ?? `signal ${signalNumber}`;
-    const hint = signalNumber === 9
-      ? " (possible worker memory limit or container kill)"
-      : "";
-    return `Process was terminated by ${signal}${hint}`;
-  }
-
-  private summarizePythonDiagnostic(raw: string, fallback: string): string {
-    const lines = raw
-      .split(/\r?\n/)
-      .map((line) => line.trimEnd())
-      .filter((line) => Boolean(line.trim()));
-    if (!lines.length) {
-      return fallback;
-    }
-
-    const explicit = [...lines].reverse().find((line) =>
-      /^(timeout|timed out|canceled|cancelled|client_disconnected|process exited with code|process was terminated by)\b/i
-        .test(this.stripAnsiCodes(line).trim())
-    );
-    if (explicit) {
-      return explicit;
-    }
-
-    const actionableLines = lines.filter((line) => !this.isLowSignalPythonDiagnosticLine(line));
-    if (!actionableLines.length) {
-      return fallback;
-    }
-
-    const tracebackIndex = actionableLines.findIndex((line) => line.startsWith("Traceback"));
-    if (tracebackIndex >= 0) {
-      return actionableLines.slice(tracebackIndex).slice(-12).join("\n");
-    }
-    const preferred = [...actionableLines].reverse().find((line) => (
-      /(^error[:\s]|exception|traceback|failed|\btimed out\b|\btimeout(?:\b|_while_waiting)|no module named|not found|enoent|econnrefused|enotfound|valueerror|typeerror|runtimeerror|importerror)/i
-        .test(this.stripAnsiCodes(line))
-    ));
-    if (preferred) {
-      return preferred;
-    }
-    return actionableLines.slice(-8).join("\n");
-  }
-
   private buildImportTempPath(finalPath: string, label: string): string {
     const dir = normalizePath(path.dirname(finalPath));
     const ext = path.extname(finalPath);
@@ -4154,14 +4094,9 @@ export default class ZoteroRagPlugin extends Plugin {
     try {
       await this.dropRedisIndex(true);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("Unknown Index name") || message.includes("Unknown index name")) {
-        console.warn("Redis index missing; skipping drop step.");
-      } else {
-        console.error("Failed to drop Redis index", error);
-        new Notice("Failed to drop redis index. See console for details.");
-        return;
-      }
+      console.error("Failed to drop Redis index", error);
+      new Notice("Failed to drop redis index. See console for details.");
+      return;
     }
     await this.reindexRedisFromCache();
   }
@@ -13149,7 +13084,12 @@ export default class ZoteroRagPlugin extends Plugin {
         break;
       case "paddle_structure_api":
         setPreferFallback("paddle");
-        args.push("--paddle-structure-v3", "--no-paddle-vl", "--no-paddle-vl-api");
+        args.push(
+          "--paddle-structure-v3",
+          "--paddle-api-strict",
+          "--no-paddle-vl",
+          "--no-paddle-vl-api"
+        );
         if (apiKey) {
           args.push("--paddle-structure-api", "--paddle-structure-api-token", apiKey);
           if (structureApiUrl) {
@@ -13161,7 +13101,12 @@ export default class ZoteroRagPlugin extends Plugin {
         break;
       case "paddle_vl_api":
         setPreferFallback("paddle");
-        args.push("--paddle-vl", "--no-paddle-structure-v3", "--no-paddle-structure-api");
+        args.push(
+          "--paddle-vl",
+          "--paddle-api-strict",
+          "--no-paddle-structure-v3",
+          "--no-paddle-structure-api"
+        );
         if (apiKey) {
           args.push("--paddle-vl-api", "--paddle-vl-api-token", apiKey);
           if (vlApiUrl) {
@@ -13780,15 +13725,10 @@ export default class ZoteroRagPlugin extends Plugin {
   }
 
   private getRedisNamespace(): string {
-    const vaultPath = this.getVaultBasePath();
-    const vaultName = path
-      .basename(vaultPath)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 24);
-    const hash = createHash("sha1").update(vaultPath).digest("hex").slice(0, 8);
-    return `${vaultName || "vault"}-${hash}`;
+    return resolveRedisNamespace(
+      this.settings.redisNamespace,
+      this.getVaultBasePath()
+    ).namespace;
   }
 
   private getRedisIndexName(): string {
@@ -14823,7 +14763,7 @@ export default class ZoteroRagPlugin extends Plugin {
           this.handlePythonProcessError(diagnosticText);
           reject(
             new Error(
-              this.summarizePythonDiagnostic(
+              summarizePythonDiagnostic(
                 diagnosticText,
                 `Process exited with code ${code}`
               )
@@ -15067,6 +15007,13 @@ export default class ZoteroRagPlugin extends Plugin {
             if (stderrLogPath && stderr) {
               void this.appendToLogFile(stderrLogPath, stderr, stderrLogLabel, "STDERR");
             }
+            if (
+              stderrLogPath
+              && diagnostic.trim()
+              && (!Number.isFinite(exitCode) || exitCode !== 0)
+            ) {
+              void this.appendToLogFile(stderrLogPath, diagnostic, stderrLogLabel, "STDOUT");
+            }
             this.logPythonWorkerTiming("stream-done", {
               requestId,
               tool: toolName,
@@ -15096,9 +15043,9 @@ export default class ZoteroRagPlugin extends Plugin {
             this.handlePythonProcessError(diagnosticText);
             reject(
               new Error(
-                this.summarizePythonDiagnostic(
+                summarizePythonDiagnostic(
                   diagnosticText,
-                  this.formatProcessExitDiagnostic(Number.isFinite(exitCode) ? exitCode : 1)
+                  formatProcessExitDiagnostic(Number.isFinite(exitCode) ? exitCode : 1)
                 )
               )
             );
@@ -15177,14 +15124,14 @@ export default class ZoteroRagPlugin extends Plugin {
     if (missingModule) {
       const notice = this.usePythonWorker()
         ? `Python worker missing module '${missingModule[1]}'. Restart Redis stack to rebuild worker env.`
-        : `Python env missing module '${missingModule[1]}'. Open Settings > Python environment > Create/Update.`;
+        : `Python env missing module '${missingModule[1]}'. Open Settings > Prerequisites > Python environment > Create/Update.`;
       this.notifyPythonEnvOnce(notice, !this.usePythonWorker());
       return;
     }
     if (/No module named ['"]|ImportError: No module named/i.test(raw)) {
       const notice = this.usePythonWorker()
         ? "Python worker missing required modules. Restart Redis stack to rebuild worker env."
-        : "Python env missing required modules. Open Settings > Python environment > Create/Update.";
+        : "Python env missing required modules. Open Settings > Prerequisites > Python environment > Create/Update.";
       this.notifyPythonEnvOnce(notice, !this.usePythonWorker());
       return;
     }
@@ -15198,7 +15145,7 @@ export default class ZoteroRagPlugin extends Plugin {
     if (/ENOENT|No such file or directory|not found|command not found|spawn .* ENOENT/i.test(raw)) {
       const notice = this.usePythonWorker()
         ? "Python worker command failed. Start Redis stack and check container logs."
-        : "Python not found. Configure the Python path or use Settings > Python environment > Create/Update.";
+        : "Python not found. Configure the Python path or use Settings > Prerequisites > Python environment > Create/Update.";
       this.notifyPythonEnvOnce(notice, !this.usePythonWorker());
     }
   }
@@ -15473,9 +15420,9 @@ export default class ZoteroRagPlugin extends Plugin {
       const diagnostic = stderr.trim() ? stderr : stdout;
       this.handlePythonProcessError(diagnostic);
       throw new Error(
-        this.summarizePythonDiagnostic(
+        summarizePythonDiagnostic(
           diagnostic,
-          this.formatProcessExitDiagnostic(Number.isFinite(exitCode) ? exitCode : 1)
+          formatProcessExitDiagnostic(Number.isFinite(exitCode) ? exitCode : 1)
         )
       );
     }
@@ -15540,7 +15487,7 @@ export default class ZoteroRagPlugin extends Plugin {
           this.handlePythonProcessError(diagnostic);
           reject(
             new Error(
-              this.summarizePythonDiagnostic(
+              summarizePythonDiagnostic(
                 diagnostic,
                 `Process exited with code ${code}`
               )

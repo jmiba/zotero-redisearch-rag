@@ -8,7 +8,12 @@ import sys
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from utils_embedding import normalize_vector, vector_to_bytes, request_embedding
-from utils_redis import create_redis_client, iter_info_attributes, parse_info_map
+from utils_redis import (
+    create_redis_client,
+    is_missing_search_index_error,
+    iter_info_attributes,
+    parse_info_map,
+)
 import redis
 import requests
 
@@ -74,8 +79,7 @@ def ensure_index(client: redis.Redis, index_name: str, prefix: str, embedding_di
         ensure_schema_fields(client, index_name)
         return
     except redis.exceptions.ResponseError as exc:
-        message = str(exc).lower()
-        if "unknown index name" not in message:
+        if not is_missing_search_index_error(exc):
             raise
 
     client.execute_command(

@@ -4,7 +4,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class FakeRequestsTimeout(Exception):
@@ -141,6 +141,63 @@ class DoclingProcessingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "External OCR engine unavailable"):
             self.docling.validate_ocr_route(decision, config, [])
+
+    # @lat: [[tests#Tests#Docling Processing Tests#Strict Paddle API Routing]]
+    def test_explicit_paddle_vl_api_failure_never_uses_local_paddle(self):
+        config = self.docling.DoclingProcessingConfig(
+            paddle_use_vl=True,
+            paddle_vl_api_url="https://example.invalid/ocr",
+            paddle_vl_api_token="configured",
+            paddle_api_strict=True,
+        )
+        local_fallback = Mock(return_value=([{"page_num": 1, "text": "fallback"}], {}))
+
+        with (
+            patch.object(self.docling, "render_pdf_pages", return_value=[object()]),
+            patch.object(
+                self.docling,
+                "ocr_pages_with_paddle_vl",
+                side_effect=RuntimeError("API queue is full"),
+            ),
+            patch.object(self.docling, "ocr_pages_with_paddle", local_fallback),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "explicitly selected"):
+                self.docling.run_external_ocr_pages(
+                    "missing-test.pdf",
+                    "paddle",
+                    "eng",
+                    config,
+                )
+
+        local_fallback.assert_not_called()
+
+    def test_explicit_structure_api_failure_never_uses_local_paddle(self):
+        config = self.docling.DoclingProcessingConfig(
+            paddle_use_structure_v3=True,
+            paddle_structure_api_url="https://example.invalid/ocr",
+            paddle_structure_api_token="configured",
+            paddle_api_strict=True,
+        )
+        local_fallback = Mock(return_value=([{"page_num": 1, "text": "fallback"}], {}))
+
+        with (
+            patch.object(self.docling, "render_pdf_pages", return_value=[object()]),
+            patch.object(
+                self.docling,
+                "ocr_pages_with_paddle_structure",
+                side_effect=RuntimeError("API unavailable"),
+            ),
+            patch.object(self.docling, "ocr_pages_with_paddle", local_fallback),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "explicitly selected"):
+                self.docling.run_external_ocr_pages(
+                    "missing-test.pdf",
+                    "paddle",
+                    "eng",
+                    config,
+                )
+
+        local_fallback.assert_not_called()
 
     def test_external_ocr_configures_docling_selected_engine(self):
         class FakeInputFormat:

@@ -7,6 +7,10 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    "version": "1.0.10",
+    "markdown": "- Adopt Obsidian's declarative settings API:\n  - expose the settings as six native sub-pages with searchable control names and descriptions,\n  - keep dynamic provider, model, annotation-map, and maintenance actions inside searchable declarative rows,\n  - require Obsidian `1.13.0` or newer and compile against the released `1.13.1` API typings.\n- Keep Redis identity stable when a vault moves:\n  - persist the legacy vault-derived namespace in plugin settings,\n  - add a **Maintenance → Redis indexing namespace** control that can reconnect a moved vault to existing indexes and keys without renaming or deleting Redis data.\n- Restore automatic missing-index creation across Redis Search error variants:\n  - centralize detection for `SEARCH_INDEX_NOT_FOUND`, `Index not found`, `No such index`, and the legacy `Unknown index name`,\n  - use the shared detector for both index creation and idempotent drop/rebuild,\n  - add regression tests proving `FT.CREATE` runs for every supported missing-index response while unrelated Redis errors remain fatal."
+  },
+  {
     "version": "1.0.9",
     "markdown": "- Fix Docker Compose startup and recreation on Windows:\n  - preserve the host environment required by Docker Desktop to discover the Compose CLI plugin,\n  - use a consistent environment for Docker/Compose detection and execution,\n  - normalize Windows `.exe` command names for Docker and Podman detection.\n- Add Windows-focused regression tests for container-runtime environment handling."
   },

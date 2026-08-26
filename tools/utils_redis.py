@@ -4,6 +4,21 @@ from typing import Any, Dict, Iterable, List
 import redis
 
 
+MISSING_SEARCH_INDEX_MARKERS = (
+    "search_index_not_found",
+    "index not found",
+    "no such index",
+    "unknown index name",
+)
+
+
+# @lat: [[rag-pipeline#Indexing And Retrieval#Missing Index Recovery]]
+def is_missing_search_index_error(error: Any) -> bool:
+    """Return whether a Redis Search error means the requested index is absent."""
+    message = str(error or "").casefold()
+    return any(marker in message for marker in MISSING_SEARCH_INDEX_MARKERS)
+
+
 def create_redis_client(redis_url: str, decode_responses: bool = False) -> redis.Redis:
     """Create a Redis client that uses the native RESP3 wire protocol."""
     return redis.Redis.from_url(

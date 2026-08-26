@@ -1,6 +1,6 @@
 # Settings Reference
 
-This page summarizes the main settings tabs and what they control.
+This page summarizes the native searchable settings pages and what they control. Use Obsidian's settings search to locate any named control directly.
 
 ## Prerequisites
 - **Advanced Python runtime options**: OFF by default. Enables legacy local runtime controls.
@@ -43,6 +43,8 @@ Step-by-step setup guides:
 ### Paddle OCR (API)
 If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-VL 1.6 guide](paddleocr-vl-1.6-setup.md).
 
+API engine choices are strict: a missing key, API failure, or empty API result fails the import with the API diagnostic instead of silently switching to local Paddle OCR.
+
 ## LLMs
 - **Provider profiles**: Store base URL + API key once.
 - **Embeddings**: Model selection, subchunking, context window, metadata inclusion.
@@ -61,6 +63,7 @@ If you select a Paddle OCR API engine, you’ll need an API key. See [PaddleOCR-
 ## Maintenance
 - **Use local runtime (legacy)**: One-click switch to local interpreter/venv mode and enables advanced runtime settings.
 - **Reindex Redis from cache**: Rebuild index without re‑OCR.
+- **Redis namespace**: Persisted identifier used for Redis index names and chunk-key prefixes. Use an earlier value to reconnect a moved vault to existing Redis data; changing it does not rename or delete that data.
 - **Recreate missing notes**: Restore notes from cached data.
 - **Rebuild doc index**: Refresh the index metadata cache.
 - **Logs**: Enable file logging, open or clear the log file.

@@ -11,7 +11,7 @@ Annotation callouts are written in standard Obsidian callout syntax:
 > Highlight text...
 ```
 
-The callout ID comes from **Settings → Annotations → Color map**.
+The callout ID comes from **Settings → Annotations → Annotation color map → Color mappings**.
 
 ## 1) Map Zotero highlight colors to callout IDs
 

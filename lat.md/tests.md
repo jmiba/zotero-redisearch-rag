@@ -26,6 +26,14 @@ Tests cover low-quality forced OCR, text-layer preservation including low-qualit
 
 The local PaddleOCR-VL route must explicitly select pipeline `v1.6` so dependency defaults cannot silently change OCR behavior.
 
+### Strict Paddle API Routing
+
+Explicit Paddle API choices must preserve API failures and empty results instead of invoking native local Paddle as an unrequested fallback.
+
+### Paddle API Queue Retry
+
+PaddleOCR-VL queue saturation must retry only within a bounded budget, recover when capacity returns, and retain provider error code 10010 when all attempts fail.
+
 ### Text Cleanup
 
 Text cleanup must repair common OCR artifacts without damaging valid Markdown or domain text.
@@ -58,9 +66,29 @@ Boundary tests verify that parsed JSON remains unknown and malformed saved setti
 
 The TypeScript test suite covers primitive rejection, nested provider-profile validation, dynamic record validation, unknown setting removal, and preservation of compatible saved values.
 
+## Native Worker Failure Diagnostics
+
+Worker diagnostics must make native process termination more actionable than generic library output while retaining ordinary Python error selection.
+
+### Signal Exit Summary
+
+Negative process exit codes must name common signals, and a `SIGSEGV` diagnosis must outrank Paddle's generic `Error Message Summary:` header.
+
 ## Container Runtime Environment
 
 Container-runtime tests ensure Windows Docker CLI plugin discovery variables survive child-process setup and Windows executable suffixes do not change Docker or Podman command classification.
+
+## Redis Namespace Persistence
+
+Namespace tests ensure the legacy path-derived value is stored once, remains stable after a vault move, and rejects values that could cross Redis key-prefix boundaries.
+
+## Redis Missing Index Recovery
+
+Index-management tests require every supported missing-index response to reach `FT.CREATE` and require unrelated Redis errors to abort without creating an index.
+
+## Searchable Settings Definitions
+
+Settings-builder tests ensure native pages, groups, names, and descriptions are discoverable without rendering controls or starting asynchronous settings work.
 
 ## Release Packaging
 

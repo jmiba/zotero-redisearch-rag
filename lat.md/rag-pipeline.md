@@ -28,6 +28,8 @@ The worker dependency baseline pins Docling `2.89.0` while keeping `onnxruntime`
 
 The opt-in local VL route pins PaddleOCR `3.6.0` with PaddleX `3.6.1` and explicitly selects the `v1.6` pipeline. Legacy local runtimes expose this option only with PaddleOCR 3.6 or newer, and explicit selection prevents future defaults from silently changing the model.
 
+Explicit Paddle API routes are strict: missing credentials, API errors, and empty API results fail with the API diagnostic instead of falling through to local native Paddle. PaddleOCR-VL queue-full responses receive two bounded retries before the original provider error is surfaced.
+
 The default Auto OCR engine follows the stable release behavior: basic local Paddle is preferred when available, with Tesseract as fallback. Paddle VL and structure APIs remain opt-in.
 
 When an external OCR route is selected, Docling conversion is configured with explicit OCR options so layout conversion does not fall back to an unintended RapidOCR backend. Paddle routes use RapidOCR's packaged ONNX models through `onnxruntime` during Docling conversion, and the external OCR pass can still replace page text after conversion.
@@ -37,6 +39,8 @@ Text-layer PDFs are not forced through external Paddle layout OCR unless OCR is 
 Local Paddle OCR keeps document-orientation and text-line orientation classification disabled by default because the native Paddle classifiers can crash the worker on some PDFs and platforms.
 
 If a configured external OCR engine is unavailable, extraction fails with an explicit worker/OCR diagnostic instead of falling back to Docling RapidOCR. This keeps missing Tesseract or Paddle installs from surfacing as obscure RapidOCR model path errors.
+
+Worker failure summaries map negative native exit codes to signals including `SIGABRT`, `SIGKILL`, `SIGSEGV`, and `SIGTERM`. Signal diagnoses outrank generic Paddle headers, and failed streams append non-JSON stdout diagnostics to the import log alongside stderr.
 
 The worker API serializes Docling, indexing, and RAG executions through one resource slot. This avoids stacking memory-heavy imports, reranking, and indexing in the same worker container. Docling layout/OCR/table stages run with small batches to reduce worker memory spikes on large OCR-heavy PDFs. Worker startup refreshes Docling model prefetch when the persistent model cache is missing known RapidOCR artifacts, writes downloads to the mounted `DOCLING_ARTIFACTS_PATH`, and only stamps the cache after required artifacts exist.
 
@@ -57,6 +61,12 @@ RedisSearch stores vectorized chunks with document metadata, page fields, tags, 
 `tools/index_redisearch.py` normalizes Markdown to index text, optionally prepends metadata, optionally splits chunks into embedding subchunks, builds embedding context from neighbors, generates chunk tags when configured, and upserts or deletes specific chunk IDs for incremental updates.
 
 Bundled Python tools use RESP3 and normalize Redis Search map replies at a shared parser boundary. The normalizer also accepts legacy RESP2 positional arrays, so the wire format never changes stored hashes or retrieval records.
+
+### Missing Index Recovery
+
+Missing Redis Search indexes are recreated during indexing while unrelated Redis failures remain fatal.
+
+The shared detector recognizes Redis 8 `SEARCH_INDEX_NOT_FOUND` and `Index not found`, `No such index`, and legacy `Unknown index name` responses. Both index creation and idempotent index dropping use [[tools/utils_redis.py#is_missing_search_index_error]].
 
 Embedding dimension mismatches trigger a drop/rebuild prompt because Redis vector schema dimensions must match the active embedding model.
 

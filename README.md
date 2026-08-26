@@ -6,6 +6,8 @@
 
 Ask questions across your Zotero library inside Obsidian. This plugin imports Zotero items, extracts PDF text (OCR when needed), indexes chunks in Redis 8, and returns answers with citations that jump straight to the relevant chunk in your note.
 
+Requires Obsidian 1.13.0 or newer. Settings use Obsidian's native searchable pages and controls.
+
 **Documentation:** [Zotero Research Assistant docs](https://jmiba.github.io/zotero-redisearch-rag/)  
 **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -83,7 +85,7 @@ For `citekey`, Zotero -> note sync always applies (including Better BibTeX-gener
 
 ## Frontmatter template (editable)
 
-You can edit the note frontmatter template in Settings → Output → Frontmatter template.  
+You can edit the note frontmatter template in Settings → Zotero import → Output → Frontmatter template.
 Placeholders use `{{var}}` and are filled from the cached Zotero item metadata (local API or web API).
 
 Common placeholders:
@@ -108,7 +110,7 @@ Obsidian links in YAML:
 - Use `*_links_yaml_list` (or any `*_yaml_list` built from links) so each `[[link]]` is quoted.
 
 Tag sanitization:
-- Zotero tags can be normalized for Obsidian (replace spaces or camelCase). See Settings → Output → Tag sanitization.
+- Zotero tags can be normalized for Obsidian (replace spaces or camelCase). See Settings → Zotero import → Output → Tag sanitization.
 
 Example (collections as links):
 ```yaml
@@ -118,7 +120,7 @@ collections:
 
 ## Note body template (editable)
 
-You can also customize the note body after frontmatter in Settings → Output → Note body template.
+You can also customize the note body after frontmatter in Settings → Zotero import → Output → Note body template.
 
 Default template:
 `{{annotation_block}}{{docling_markdown}}`
@@ -133,7 +135,7 @@ If you omit `{{docling_markdown}}`, it will be appended to avoid losing content.
 
 ## LLM provider profiles
 
-To avoid configuring base URL + API key in multiple places, you can define provider profiles in Settings → LLM Provider Profiles.  
+To avoid configuring base URL + API key in multiple places, define provider profiles in Settings → LLMs → Model provider profiles.
 Each section (Embeddings / Chat / OCR cleanup) can select a profile to populate those fields. API keys are masked in the UI and stored in plugin settings (not encrypted).
 
 ## Requirements
@@ -285,7 +287,7 @@ Notes:
 - Multiple vaults:
    - Starting from the plugin creates a per‑vault Docker Compose project and data folder.
    - With Auto‑assign Redis port enabled, each vault gets a unique local port and the Redis URL is updated automatically.
-   - If multiple vaults share the same Redis URL, the plugin namespaces the index and key prefix with a vault‑specific hash so they can safely share one Redis instance.
+   - If multiple vaults share the same Redis URL, the plugin uses a persisted vault-specific namespace for the index and key prefix so vaults remain isolated and moving a vault does not change its Redis identity.
 
 ### 4) Start a model provider (LM Studio, Ollama, or cloud)
 
@@ -305,7 +307,7 @@ Local options
 
 Cloud options
 - OpenAI or OpenRouter
-   - In Settings → LLM Provider Profiles, add/select a profile:
+   - In Settings → LLMs → Model provider profiles, add/select a profile:
       - Base URL: `https://api.openai.com/v1` (OpenAI) or `https://openrouter.ai/api/v1` (OpenRouter)
       - API key: your key from the provider
    - Then select that profile for Embeddings/Chat/OCR cleanup and choose a model via the Refresh buttons.
@@ -420,7 +422,7 @@ If you want Web API file downloads, your Zotero library must be synced and the A
 
 Area/drawing annotation images are cached locally by Zotero and are not exposed via the HTTP API.
 If you want those images embedded in Obsidian callouts, download the companion XPI from
-Settings → Maintenance → Zotero companion.
+Settings → Maintenance → Zotero companion plugin.
 
 Download XPI saves to your system Downloads folder.
 
@@ -456,7 +458,7 @@ If you want PaddleOCR API OCR, set the Paddle OCR API key (https://aistudio.baid
 
 ## Troubleshooting
 
-- "No such index idx:zotero": start Redis Stack and reindex cached chunks.
+- "No such index idx:zotero": current versions create a missing index on the next import or cache reindex; if it persists, start Redis and reindex cached chunks.
 - "Chunks cache missing for <doc_id>": open the note and run "Reindex current note from cache" to rebuild missing chunk cache from existing `zrr:chunk` markers.
 - "Invalid model identifier": use the exact LM Studio model ID.
 - Redis data not persisting: start Redis Stack from the plugin so it uses the correct data folder.

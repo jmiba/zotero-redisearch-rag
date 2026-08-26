@@ -7,12 +7,18 @@ import {
   type Plugin,
   PluginSettingTab,
   Setting,
+  type SettingDefinitionItem,
   TextComponent,
   requestUrl,
 } from "obsidian";
 import { randomBytes } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
+import { parseRedisNamespace } from "./redisNamespace";
+import {
+  SearchableSettingBuilder,
+  SearchableSettingsPageBuilder,
+} from "./settingsDefinitionBuilder";
 
 export type OcrMode = "auto" | "force_low_quality" | "force";
 export type OcrEngine =
@@ -109,6 +115,7 @@ export interface ZoteroRagSettings {
   redisDataDirOverride: string;
   pythonWorkerCacheDirOverride: string;
   redisProjectName: string;
+  redisNamespace: string;
   redisIndex: string;
   redisPrefix: string;
   embedBaseUrl: string;
@@ -169,8 +176,6 @@ export type LlmProviderProfile = {
   apiKey: string;
 };
 
-type SettingsTabId = "prerequisites" | "zotero-import" | "annotations" | "ocr" | "llms" | "maintenance";
-
 export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   // Prerequisites
   pythonRuntime: "worker",
@@ -184,6 +189,7 @@ export const DEFAULT_SETTINGS: ZoteroRagSettings = {
   redisDataDirOverride: "",
   pythonWorkerCacheDirOverride: "",
   redisProjectName: "",
+  redisNamespace: "",
   autoStartRedis: true,
   firstContainerStartupNoticeShown: false,
 
@@ -378,7 +384,6 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     switchPythonRuntimeToLocalLegacy: () => Promise<void>;
     manifest: { dir?: string };
   };
-  private activeTab: SettingsTabId = "prerequisites";
   private companionTokenInput: TextComponent | null = null;
 
   constructor(
@@ -410,9 +415,8 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
+  // @lat: [[architecture#Architecture#Obsidian Plugin Shell#Searchable Settings]]
+  getSettingDefinitions(): SettingDefinitionItem[] {
 
     const getProfiles = (): LlmProviderProfile[] =>
       Array.isArray(this.plugin.settings.llmProviderProfiles)
@@ -430,32 +434,32 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       text.inputEl.spellcheck = false;
     };
 
-    const renderPrerequisites = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("Prerequisites").setHeading();
+    const renderPrerequisites = (tab: SearchableSettingsPageBuilder) => {
+      tab.group("Prerequisites");
 
-      let pythonRuntimeSetting: Setting | null = null;
+      let pythonRuntimeSetting: SearchableSettingBuilder | null = null;
       let pythonRuntimeDropdown: DropdownComponent | null = null;
-      let pythonPathSetting: Setting | null = null;
-      let pythonEnvSetting: Setting | null = null;
-      let pythonEnvLocationSetting: Setting | null = null;
+      let pythonPathSetting: SearchableSettingBuilder | null = null;
+      let pythonEnvSetting: SearchableSettingBuilder | null = null;
+      let pythonEnvLocationSetting: SearchableSettingBuilder | null = null;
       let pythonPathText: TextComponent | null = null;
       let pythonEnvLocationDropdown: DropdownComponent | null = null;
       let pythonEnvButton: HTMLButtonElement | null = null;
       let pythonEnvButtonComponent: ButtonComponent | null = null;
 
-      const applyDisabledSettingState = (setting: Setting | null, disabled: boolean): void => {
+      const applyDisabledSettingState = (setting: SearchableSettingBuilder | null, disabled: boolean): void => {
         if (!setting) {
           return;
         }
-        setting.settingEl.classList.toggle("is-disabled", disabled);
-        setting.settingEl.classList.toggle("zrr-setting-disabled", disabled);
+        setting.toggleClass("is-disabled", disabled);
+        setting.toggleClass("zrr-setting-disabled", disabled);
       };
 
-      const setSettingVisibility = (setting: Setting | null, visible: boolean): void => {
+      const setSettingVisibility = (setting: SearchableSettingBuilder | null, visible: boolean): void => {
         if (!setting) {
           return;
         }
-        setting.settingEl.classList.toggle("zrr-setting-hidden", !visible);
+        setting.setVisible(visible);
       };
 
       const refreshPythonRuntimeState = (): void => {
@@ -481,7 +485,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         applyDisabledSettingState(pythonEnvLocationSetting, !localControlsEnabled);
       };
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Docker/podman path")
         .setDesc(
           "CLI path for Docker or Podman (used to start Redis, Redis Insight, and the Python worker). Leave as 'docker'/'podman' to auto-detect via PATH " +
@@ -498,7 +502,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Advanced python runtime options")
         .setDesc(
           "Show legacy local interpreter/venv controls. Recommended to keep this disabled."
@@ -514,10 +518,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               }
               await this.plugin.saveSettings();
               refreshPythonRuntimeState();
+              this.refreshDomState();
             })
         );
 
-      pythonRuntimeSetting = new Setting(tabEl)
+      pythonRuntimeSetting = tab.setting()
         .setName("Python runtime")
         .setDesc(
           "Worker runtime is recommended. Enable advanced options to expose local interpreter/venv mode."
@@ -535,10 +540,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               this.plugin.settings.pythonRuntime = value;
               await this.plugin.saveSettings();
               refreshPythonRuntimeState();
+              this.refreshDomState();
             });
         });
 
-      pythonPathSetting = new Setting(tabEl)
+      pythonPathSetting = tab.setting()
         .setName("Python path")
         .setDesc(
           "Local mode only: optional path to the Python interpreter used to create or run the plugin env. " +
@@ -556,7 +562,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      pythonEnvSetting = new Setting(tabEl)
+      pythonEnvSetting = tab.setting()
         .setName("Python environment")
         .setDesc(
           "Local mode: create or update the plugin's python env. Worker mode: managed by docker startup."
@@ -575,7 +581,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
         });
 
-      pythonEnvLocationSetting = new Setting(tabEl)
+      pythonEnvLocationSetting = tab.setting()
         .setName("Python env location")
         .setDesc(
           "Local mode only: shared user cache can be reused across vaults; plugin folder keeps a per-vault env."
@@ -597,7 +603,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       refreshPythonRuntimeState();
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Redis URL")
         .addText((text) =>
           text
@@ -609,19 +615,19 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      let redisDataDirSetting: Setting | null = null;
-      let redisProjectSetting: Setting | null = null;
+      let redisDataDirSetting: SearchableSettingBuilder | null = null;
+      let redisProjectSetting: SearchableSettingBuilder | null = null;
       let redisDataDirText: TextComponent | null = null;
       let redisProjectText: TextComponent | null = null;
       const refreshRedisOverrideState = (): void => {
         const disabled = this.plugin.settings.autoAssignRedisPort;
         redisDataDirText?.setDisabled(disabled);
         redisProjectText?.setDisabled(disabled);
-        redisDataDirSetting?.settingEl.classList.toggle("is-disabled", disabled);
-        redisProjectSetting?.settingEl.classList.toggle("is-disabled", disabled);
+        redisDataDirSetting?.toggleClass("is-disabled", disabled);
+        redisProjectSetting?.toggleClass("is-disabled", disabled);
       };
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Auto-assign redis port")
         .setDesc("When starting redis stack, pick a free local port and update the redis URL.")
         .addToggle((toggle) =>
@@ -629,10 +635,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.autoAssignRedisPort = value;
             await this.plugin.saveSettings();
             refreshRedisOverrideState();
+            this.refreshDomState();
           })
         );
 
-      redisDataDirSetting = new Setting(tabEl)
+      redisDataDirSetting = tab.setting()
         .setName("Redis data directory override")
         .setDesc(
           "Optional path to store Redis persistence when auto-assign is off. " +
@@ -649,9 +656,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
         });
-      redisDataDirSetting.settingEl.addClass("zrr-redis-override-setting");
+      redisDataDirSetting.addClass("zrr-redis-override-setting");
 
-      redisProjectSetting = new Setting(tabEl)
+      redisProjectSetting = tab.setting()
         .setName("Redis project name override")
         .setDesc(
           "Optional docker/podman compose project name when auto-assign is off."
@@ -666,9 +673,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             });
         });
-      redisProjectSetting.settingEl.addClass("zrr-redis-override-setting");
+      redisProjectSetting.addClass("zrr-redis-override-setting");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Python worker cache path")
         .setDesc(
           "Leave blank to use a per-vault cache under ~/.cache/zotero-redisearch-rag/. " +
@@ -687,7 +694,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
 
       refreshRedisOverrideState();
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Auto-start redis stack (docker/podman compose)")
         .setDesc(
           "Requires Docker Desktop running and your vault path shared with Docker. " +
@@ -700,7 +707,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Start redis stack now")
         .setDesc("Starts or restarts redis stack (and python worker in worker mode).")
         .addButton((button) =>
@@ -710,10 +717,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
     };
 
-    const renderZoteroImport = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("Zotero local API").setHeading();
+    const renderZoteroImport = (tab: SearchableSettingsPageBuilder) => {
+      tab.group("Zotero local API");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Zotero base URL")
         .setDesc("Local Zotero API base URL, e.g. HTTP://127.0.0.1:23119/API")
         .addText((text) =>
@@ -726,7 +733,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      const librarySetting = new Setting(tabEl)
+      const librarySetting = tab.setting()
         .setName("Zotero library")
         .setDesc("Select your local library or a Zotero group library.");
 
@@ -770,6 +777,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.zoteroUserId = value.trim();
           await this.plugin.saveSettings();
         });
+        void refreshLibraries();
       });
 
       librarySetting.addButton((button) => {
@@ -778,11 +786,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
       });
 
-      void refreshLibraries();
+      tab.group("Zotero web API");
 
-      new Setting(tabEl).setName("Zotero web API").setHeading();
-
-      new Setting(tabEl)
+      tab.setting()
         .setName("Web API base URL")
         .setDesc("Zotero Web API base URL for write fallback, e.g. https://api.zotero.org")
         .addText((text) =>
@@ -795,7 +801,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Web API library type")
         .setDesc("Library type for web API writes.")
         .addDropdown((dropdown) =>
@@ -809,7 +815,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Web API library ID")
         .setDesc("Numeric Zotero user/group ID for web API writes.")
         .addText((text) =>
@@ -822,7 +828,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Web API key")
         .setDesc("Zotero API key for write fallback (from Zotero.org).")
         .addText((text) => {
@@ -836,9 +842,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl).setName("Output").setHeading();
+      tab.group("Output");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("PDF folder")
         .addText((text) =>
           text
@@ -850,7 +856,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Notes folder")
         .addText((text) =>
           text
@@ -862,7 +868,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Frontmatter template")
         .setDesc("Template for note YAML frontmatter. Use {{var}} placeholders; leave blank to omit.")
         .addTextArea((text) => {
@@ -876,7 +882,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           text.inputEl.addClass("zrr-u-width-100");
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Tag sanitization")
         .setDesc("Normalize Zotero tags for Obsidian (no spaces, punctuation trimmed).")
         .addDropdown((dropdown) =>
@@ -893,7 +899,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Note body template")
         .setDesc(
           "Template for the note body after frontmatter. Use {{pdf_block}}, {{annotation_block}}, and {{docling_markdown}} placeholders."
@@ -909,7 +915,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           text.inputEl.addClass("zrr-u-width-100");
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Saved chats folder")
         .setDesc("Where exported chat notes are stored (vault-relative).")
         .addText((text) =>
@@ -922,7 +928,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat export template")
         .setDesc(
           "Optional vault-relative template file for copied chat notes. Use {{chat_body}} to control where the transcript is inserted (otherwise template text is appended after the transcript)."
@@ -937,7 +943,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat export post-create command")
         .setDesc(
           "Optional command ID to run after the chat note is created and opened. Useful for templater workflows that need the full note body already present."
@@ -952,7 +958,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Copy pdfs into vault")
         .setDesc(
           "Disable to use Zotero storage paths directly. If a local file path is unavailable, the plugin temporarily copies the PDF into the vault for processing."
@@ -964,11 +970,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
               this.plugin.settings.createOcrLayeredPdf = false;
             }
             await this.plugin.saveSettings();
-            this.display();
+            this.update();
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Create ocr-layered PDF copy")
         .setDesc(
           "When ocr is used, replace the vault PDF with a tesseract text layer (requires copy pdfs into vault)."
@@ -989,7 +995,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Prefer Obsidian note for citations")
         .setDesc("Link citations to the Obsidian note when available; otherwise use Zotero deep links.")
         .addToggle((toggle) =>
@@ -1000,10 +1006,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
     };
 
-    const renderAnnotations = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("Annotations").setHeading();
+    const renderAnnotations = (tab: SearchableSettingsPageBuilder) => {
+      tab.group("Annotations");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Annotation page label")
         .setDesc("Label shown before the page link in annotation callouts.")
         .addText((text) =>
@@ -1016,7 +1022,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Include annotation images")
         .setDesc("Embed image/rect annotations as images in callouts when available.")
         .addToggle((toggle) =>
@@ -1026,15 +1032,14 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl).setName("Zotero companion").setHeading();
-      tabEl.createEl("p", {
-        text: "Install the Zotero companion add-on to enable cached image/rect annotations. " +
-          "See tab Maintenance for instructions.",
-      });
+      tab.group("Zotero companion");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Use Zotero companion for annotation images")
-        .setDesc("Fetch cached annotation images from a local Zotero companion plugin.")
+        .setDesc(
+          "Fetch cached annotation images from a local Zotero companion plugin. " +
+            "See Maintenance for installation instructions."
+        )
         .addToggle((toggle) =>
           toggle.setValue(this.plugin.settings.zoteroCompanionEnabled).onChange(async (value) => {
             this.plugin.settings.zoteroCompanionEnabled = value;
@@ -1042,7 +1047,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Zotero companion base URL")
         .setDesc("Local URL for the Zotero companion plugin (loopback only).")
         .addText((text) =>
@@ -1055,7 +1060,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Zotero companion token")
         .setDesc("Optional shared token for the companion endpoint.")
         .addText((text) => {
@@ -1070,7 +1075,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Generate companion token")
         .setDesc("Create and paste a secure token. The generated token is copied to your clipboard. In Zotero, set your Zotero companion plugin token to this value.")
         .addButton((button) =>
@@ -1093,12 +1098,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl).setName("Annotation color map").setHeading();
-      tabEl.createEl("p", {
-        text: "Map Zotero highlight colors to section headings and callout types.",
-      });
-
-      const mapContainer = tabEl.createDiv({ cls: "zrr-annotation-map" });
+      tab.group("Annotation color map");
+      tab.setting()
+        .setName("Color mappings")
+        .setDesc("Map Zotero highlight colors to section headings and callout types.")
+        .addRender((setting) => {
+      const mapContainer = setting.controlEl.createDiv({ cls: "zrr-annotation-map" });
 
       const saveMap = async (map: AnnotationColorMap) => {
         this.plugin.settings.annotationColorMap = map;
@@ -1225,10 +1230,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       renderMap();
+        });
     };
 
-    const renderOcr = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("Docling").setHeading();
+    const renderOcr = (tab: SearchableSettingsPageBuilder) => {
+      tab.group("Docling");
 
       let ocrEngineDropdown: DropdownComponent | null = null;
 
@@ -1294,16 +1300,12 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         ocrEngineDropdown.setDisabled(false);
       };
 
-      const paddleApiKeySetting = new Setting(tabEl)
+      const paddleApiKeySetting = tab.setting()
         .setName("Paddle ocr API key")
-        .setDesc("API token for paddleocr-vl / pp-structurev3 endpoints. Get a free API key at ");
-      const paddleApiLink = createEl("a");
-      paddleApiLink.href = "https://aistudio.baidu.com/paddleocr";
-      paddleApiLink.textContent = "HTTPS://aistudio.baidu.com/paddleocr";
-      paddleApiLink.target = "_blank";
-      paddleApiLink.rel = "noopener noreferrer";
-      paddleApiKeySetting.descEl.appendChild(paddleApiLink);
-      paddleApiKeySetting.descEl.append(".");
+        .setDesc(
+          "API token for paddleocr-vl / pp-structurev3 endpoints. " +
+            "Get a free API key at https://aistudio.baidu.com/paddleocr."
+        );
       paddleApiKeySetting
         .addText((text) => {
           maskApiKeyInput(text);
@@ -1317,7 +1319,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Paddleocr-vl API URL")
         .setDesc("Optional override for the paddleocr-vl API endpoint.")
         .addText((text) =>
@@ -1330,7 +1332,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Pp-structurev3 API URL")
         .setDesc("API endpoint for pp-structurev3 (see baidu AI studio docs).")
         .addText((text) =>
@@ -1344,7 +1346,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Ocr engine")
         .setDesc("Select the ocr engine to use when ocr is required.")
         .addDropdown((dropdown) => {
@@ -1355,9 +1357,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             this.plugin.settings.ocrEngine = value as OcrEngine;
             await this.plugin.saveSettings();
           });
+          void refreshOcrEngineOptions();
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Ocr decision (when to ocr)")
         .setDesc("Controls when ocr runs; per-page behavior is configured separately below.")
         .addDropdown((dropdown) =>
@@ -1372,7 +1375,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Ocr layout override (per-page)")
         .setDesc("Force per-page ocr when ocr runs, bypassing layout heuristics; can be slower for multi-column pdfs.")
         .addToggle((toggle) =>
@@ -1384,21 +1387,20 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Text quality threshold")
         .setDesc("Lower values are stricter; below this threshold the text is treated as low quality.")
         .addSlider((slider) => {
           slider
             .setLimits(0, 1, 0.05)
             .setValue(this.plugin.settings.ocrQualityThreshold)
-            .setDynamicTooltip()
             .onChange(async (value) => {
               this.plugin.settings.ocrQualityThreshold = value;
               await this.plugin.saveSettings();
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chunking")
         .setDesc("Page or section")
         .addDropdown((dropdown) =>
@@ -1412,13 +1414,15 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      void refreshOcrEngineOptions();
     };
 
-    const renderLlms = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("Model provider profiles").setHeading();
-
-      const profilesContainer = tabEl.createDiv({ cls: "zrr-llm-profiles" });
+    const renderLlms = (tab: SearchableSettingsPageBuilder) => {
+      tab.group("Model provider profiles");
+      tab.setting()
+        .setName("Saved provider profiles")
+        .setDesc("Reusable provider names, endpoint addresses, and API keys for cleanup, embeddings, and chat.")
+        .addRender((setting) => {
+      const profilesContainer = setting.controlEl.createDiv({ cls: "zrr-llm-profiles" });
 
       const renderProfiles = () => {
         profilesContainer.empty();
@@ -1513,10 +1517,11 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
       };
 
       renderProfiles();
+        });
 
-      new Setting(tabEl).setName("Ocr cleanup").setHeading();
+      tab.group("Ocr cleanup");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Model cleanup for low-quality chunks")
         .setDesc("Automatic AI cleanup for poor ocr at import. Can be slow/costly.")
         .addToggle((toggle) =>
@@ -1559,7 +1564,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         await refreshCleanupModels();
       };
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup provider profile")
         .setDesc("Select a profile to populate base URL and API key.")
         .addDropdown((dropdown) => {
@@ -1580,7 +1585,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup base URL")
         .setDesc("OpenAI-compatible endpoint, e.g. HTTP://127.0.0.1:1234/v1")
         .addText((text) => {
@@ -1593,7 +1598,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup API key")
         .setDesc("Optional API key for the cleanup endpoint.")
         .addText((text) => {
@@ -1612,7 +1617,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      const cleanupModelSetting = new Setting(tabEl)
+      const cleanupModelSetting = tab.setting()
         .setName("Cleanup model")
         .setDesc("Select a cleanup-capable model from the provider.");
 
@@ -1658,6 +1663,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.llmCleanupModel = value.trim();
           await this.plugin.saveSettings();
         });
+        void refreshCleanupModels();
       });
 
       cleanupModelSetting.addButton((button) => {
@@ -1666,9 +1672,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
       });
 
-      void refreshCleanupModels();
-
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup temperature")
         .setDesc("Lower is more conservative.")
         .addText((text) =>
@@ -1682,7 +1686,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup reasoning mode")
         .setDesc("Automatically learn the best cleanup mode for the selected provider and model, and reprobe reasoning every 30 days.")
         .addDropdown((dropdown) =>
@@ -1698,21 +1702,20 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup minimum quality")
         .setDesc("Only run cleanup when chunk quality is below this threshold (0-1).")
         .addSlider((slider) =>
           slider
             .setLimits(0, 1, 0.05)
             .setValue(this.plugin.settings.llmCleanupMinQuality)
-            .setDynamicTooltip()
             .onChange(async (value) => {
               this.plugin.settings.llmCleanupMinQuality = value;
               await this.plugin.saveSettings();
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Cleanup maximum chars")
         .setDesc("Skip cleanup for chunks longer than this limit.")
         .addText((text) =>
@@ -1726,7 +1729,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl).setName("Text embedding").setHeading();
+      tab.group("Text embedding");
 
       let embedProfileDropdown: DropdownComponent | null = null;
       let embedBaseUrlInput: TextComponent | null = null;
@@ -1761,7 +1764,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         await refreshEmbeddingModels();
       };
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embeddings provider profile")
         .setDesc("Select a profile to populate base URL and API key.")
         .addDropdown((dropdown) => {
@@ -1782,7 +1785,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embeddings base URL")
         .addText((text) => {
           embedBaseUrlInput = text;
@@ -1794,7 +1797,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embeddings API key")
         .addText((text) => {
           embedApiKeyInput = text;
@@ -1812,7 +1815,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      const embeddingModelSetting = new Setting(tabEl)
+      const embeddingModelSetting = tab.setting()
         .setName("Embeddings model")
         .setDesc("Select an embeddings model from the provider.");
 
@@ -1858,6 +1861,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.embedModel = value.trim();
           await this.plugin.saveSettings();
         });
+        void refreshEmbeddingModels();
       });
 
       embeddingModelSetting.addButton((button) => {
@@ -1866,9 +1870,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
       });
 
-      void refreshEmbeddingModels();
-
-      new Setting(tabEl)
+      tab.setting()
         .setName("Include metadata in embeddings")
         .setDesc("Prepend title/authors/tags/section info before embedding chunks.")
         .addToggle((toggle) =>
@@ -1878,7 +1880,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embedding context window (chunks)")
         .setDesc("Include neighboring chunk text around each chunk when embedding (0 disables).")
         .addText((text) =>
@@ -1892,7 +1894,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embedding context snippet size (chars)")
         .setDesc("Max chars per neighboring chunk included in embeddings.")
         .addText((text) =>
@@ -1906,7 +1908,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embedding subchunk size (chars)")
         .setDesc("Split long chunks into smaller subchunks for embedding only (0 disables).")
         .addText((text) =>
@@ -1920,7 +1922,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Embedding subchunk overlap (chars)")
         .setDesc("Overlap between embedding subchunks to keep context intact.")
         .addText((text) =>
@@ -1934,7 +1936,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Generate model tags for chunks")
         .setDesc("Use the ocr cleanup model to tag chunks before indexing.")
         .addToggle((toggle) =>
@@ -1944,7 +1946,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl).setName("Chat model").setHeading();
+      tab.group("Chat model");
 
       let chatProfileDropdown: DropdownComponent | null = null;
       let chatBaseUrlInput: TextComponent | null = null;
@@ -1979,7 +1981,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         await refreshChatModels();
       };
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat provider profile")
         .setDesc("Select a profile to populate base URL and API key.")
         .addDropdown((dropdown) => {
@@ -2000,7 +2002,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat base URL")
         .setDesc("Compatible endpoint for chat requests.")
         .addText((text) => {
@@ -2013,7 +2015,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat API key")
         .addText((text) => {
           chatApiKeyInput = text;
@@ -2031,7 +2033,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             });
         });
 
-      const chatModelSetting = new Setting(tabEl)
+      const chatModelSetting = tab.setting()
         .setName("Chat model")
         .setDesc("Select a chat-capable model from the provider.");
 
@@ -2077,6 +2079,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           this.plugin.settings.chatModel = value.trim();
           await this.plugin.saveSettings();
         });
+        void refreshChatModels();
       });
 
       chatModelSetting.addButton((button) => {
@@ -2085,9 +2088,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         });
       });
 
-      void refreshChatModels();
-
-      new Setting(tabEl)
+      tab.setting()
         .setName("Temperature")
         .addText((text) =>
           text
@@ -2100,7 +2101,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat history messages")
         .setDesc("Number of recent messages to include for conversational continuity (0 disables).")
         .addText((text) =>
@@ -2114,7 +2115,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat panel location")
         .setDesc("Where to open the chat view by default.")
         .addDropdown((dropdown) =>
@@ -2128,9 +2129,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl).setName("Retrieval").setHeading();
+      tab.group("Retrieval");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Chat context chunks")
         .setDesc("Final number of retrieved chunks to keep before annotations and answer generation.")
         .addText((text) =>
@@ -2146,7 +2147,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Enable agentic retrieval")
         .setDesc(
           "Use a small planner step that can trigger expansion retry or full-document retrieval before answering."
@@ -2158,7 +2159,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Agentic max iterations")
         .setDesc("Maximum number of planner steps per query.")
         .addText((text) =>
@@ -2174,7 +2175,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Enable query expansion")
         .setDesc("Use the chat model to expand queries before retrieval.")
         .addToggle((toggle) =>
@@ -2184,7 +2185,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Rewrite follow-up queries")
         .setDesc("Rewrite chat queries into standalone retrieval queries using recent chat history.")
         .addToggle((toggle) =>
@@ -2194,7 +2195,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Query expansion count")
         .setDesc("Number of expansion variants to request.")
         .addText((text) =>
@@ -2210,7 +2211,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Enable cross-encoder reranking")
         .setDesc(
           "Rerank candidates locally with sentence-transformers (downloads model on first use)."
@@ -2241,7 +2242,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         rerankModelInput.inputEl.setAttribute("aria-disabled", String(disabled));
       };
 
-      const rerankModelSetting = new Setting(tabEl)
+      const rerankModelSetting = tab.setting()
         .setName("Cross-encoder model")
         .setDesc("Choose a multilingual preset, or select custom to edit the model ID.");
 
@@ -2281,7 +2282,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           syncRerankModelInputState();
         });
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Rerank candidate multiplier")
         .setDesc("Retrieve k × n candidates before reranking.")
         .addText((text) =>
@@ -2297,7 +2298,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Rrf k")
         .setDesc("Rank fusion constant for blending lexical and vector results.")
         .addText((text) =>
@@ -2311,7 +2312,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Rrf log top n")
         .setDesc("Log the top n rrf-ranked chunks to stderr (0 disables).")
         .addText((text) =>
@@ -2325,7 +2326,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Max chunks per document")
         .setDesc("Limit how many chunks from a single document can appear in retrieval (0 disables).")
         .addText((text) =>
@@ -2342,10 +2343,10 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
     };
 
-    const renderMaintenance = (tabEl: HTMLElement) => {
-      new Setting(tabEl).setName("Python runtime").setHeading();
+    const renderMaintenance = (tab: SearchableSettingsPageBuilder) => {
+      tab.group("Python runtime");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Use local runtime (legacy)")
         .setDesc(
           "Switch to local interpreter/venv mode and enable advanced runtime settings."
@@ -2356,9 +2357,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl).setName("Logging").setHeading();
+      tab.group("Logging");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Enable logging to file")
         .setDesc("Write plugin logs to a file.")
         .addToggle((toggle) =>
@@ -2368,7 +2369,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Log file path (vault-relative)")
         .setDesc("Where to write the log file. Keep inside the vault.")
         .addText((text) =>
@@ -2381,7 +2382,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("View or clear log")
         .setDesc("Open the log file or clear it.")
         .addButton((button) =>
@@ -2395,14 +2396,14 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl).setName("Zotero companion plugin").setHeading();
-      tabEl.createEl("p", {
-        text: "Download the xpi, then in Zotero go to tools → add-ons → install from file and restart.",
-      });
+      tab.group("Zotero companion plugin");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Download companion add-on")
-        .setDesc("Downloads the companion xpi to this plugin folder.")
+        .setDesc(
+          "Downloads the companion xpi to this plugin folder. Then in Zotero go to " +
+            "tools → add-ons → install from file and restart."
+        )
         .addButton((button) =>
           button
             .setButtonText("Download xpi")
@@ -2421,7 +2422,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Open Zotero")
         .setDesc("Launch Zotero and open the add-ons window (tools → add-ons).")
         .addButton((button) =>
@@ -2432,7 +2433,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Check companion status")
         .setDesc("Ping the companion /health endpoint.")
         .addButton((button) =>
@@ -2443,9 +2444,43 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
             })
       );
       
-      new Setting(tabEl).setName("Redis indexing").setHeading();
+      tab.group("Redis indexing");
 
-      new Setting(tabEl)
+      let redisNamespaceInput: TextComponent | null = null;
+      tab.setting()
+        .setName("Redis namespace")
+        .setDesc(
+          "Stable identifier used in index names and chunk-key prefixes. Changing it selects another namespace; it does not rename or delete data."
+        )
+        .addText((text) => {
+          redisNamespaceInput = text;
+          text
+            .setPlaceholder("Second-brain-7795f220")
+            .setValue(this.plugin.settings.redisNamespace);
+        })
+        .addButton((button) =>
+          button.setButtonText("Apply").onClick(async () => {
+            const candidate = parseRedisNamespace(redisNamespaceInput?.getValue() || "");
+            if (!candidate) {
+              new Notice(
+                "Redis namespace must contain 1-64 lowercase letters, numbers, or hyphens and cannot start or end with a hyphen."
+              );
+              return;
+            }
+            if (candidate === this.plugin.settings.redisNamespace) {
+              new Notice("Redis namespace is already active.");
+              return;
+            }
+            this.plugin.settings.redisNamespace = candidate;
+            await this.plugin.saveSettings();
+            redisNamespaceInput?.setValue(candidate);
+            new Notice(
+              `Redis namespace set to ${candidate}. Existing Redis data was not renamed or deleted.`
+            );
+          })
+        );
+
+      tab.setting()
         .setName("Reindex redis from cached chunks")
         .setDesc("Rebuild the redis index from cached chunk JSON files.")
         .addButton((button) =>
@@ -2454,7 +2489,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Recreate redis stack")
         .setDesc("Pulls both pinned images and force-recreates the redis and insight services.")
         .addButton((button) =>
@@ -2463,7 +2498,7 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Recreate missing notes from cache")
         .setDesc("Rebuild missing notes using cached Zotero items and chunks.")
         .addButton((button) =>
@@ -2477,9 +2512,9 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
           })
         );
 
-      new Setting(tabEl).setName("Release notes").setHeading();
+      tab.group("Release notes");
 
-      new Setting(tabEl)
+      tab.setting()
         .setName("Show release notes")
         .setDesc("Open the current version splash screen.")
         .addButton((button) =>
@@ -2489,72 +2524,48 @@ export class ZoteroRagSettingTab extends PluginSettingTab {
         );
     };
 
-    const tabs: Array<{
-      id: SettingsTabId;
-      label: string;
-      render: (tabEl: HTMLElement) => void;
+    const pages: Array<{
+      name: string;
+      desc: string;
+      build: (page: SearchableSettingsPageBuilder) => void;
     }> = [
-      { id: "prerequisites", label: "Prerequisites", render: renderPrerequisites },
-      { id: "zotero-import", label: "Zotero import", render: renderZoteroImport },
-      { id: "annotations", label: "Annotations", render: renderAnnotations },
-      { id: "ocr", label: "OCR", render: renderOcr },
-      { id: "llms", label: "LLMs", render: renderLlms },
-      { id: "maintenance", label: "Maintenance", render: renderMaintenance },
+      {
+        name: "Prerequisites",
+        desc: "Container runtime, Redis connection, Python worker, and startup behavior.",
+        build: renderPrerequisites,
+      },
+      {
+        name: "Zotero import",
+        desc: "Zotero API access, output paths, note templates, and PDF handling.",
+        build: renderZoteroImport,
+      },
+      {
+        name: "Annotations",
+        desc: "Annotation rendering, companion access, and color mappings.",
+        build: renderAnnotations,
+      },
+      {
+        name: "OCR",
+        desc: "Docling chunking, OCR engines, endpoints, and quality thresholds.",
+        build: renderOcr,
+      },
+      {
+        name: "LLMs",
+        desc: "Provider profiles, cleanup, embeddings, chat, and retrieval behavior.",
+        build: renderLlms,
+      },
+      {
+        name: "Maintenance",
+        desc: "Diagnostics, companion installation, Redis recovery, and release notes.",
+        build: renderMaintenance,
+      },
     ];
 
-    const tabButtons = new Map<SettingsTabId, HTMLButtonElement>();
-    const tabPanels = new Map<SettingsTabId, HTMLDivElement>();
-
-    const setActiveTab = (tabId: SettingsTabId) => {
-      this.activeTab = tabId;
-      for (const [id, button] of tabButtons) {
-        const isActive = id === tabId;
-        button.classList.toggle("is-active", isActive);
-        button.setAttribute("aria-selected", isActive ? "true" : "false");
-        button.setAttribute("tabindex", isActive ? "0" : "-1");
-      }
-      for (const [id, panel] of tabPanels) {
-        const isActive = id === tabId;
-        panel.classList.toggle("is-active", isActive);
-        panel.hidden = !isActive;
-      }
-    };
-
-    const tabList = containerEl.createDiv({ cls: "zrr-settings-tabs" });
-    tabList.setAttribute("role", "tablist");
-
-    const panelsWrap = containerEl.createDiv({ cls: "zrr-settings-tabs-panels" });
-
-    for (const tab of tabs) {
-      const tabButton = tabList.createEl("button", {
-        text: tab.label,
-        cls: "zrr-settings-tab-button",
-      });
-      const buttonId = `zrr-settings-tab-${tab.id}`;
-      const panelId = `zrr-settings-panel-${tab.id}`;
-      tabButton.type = "button";
-      tabButton.id = buttonId;
-      tabButton.setAttribute("role", "tab");
-      tabButton.setAttribute("aria-controls", panelId);
-      tabButton.setAttribute("aria-selected", "false");
-      tabButton.addEventListener("click", () => setActiveTab(tab.id));
-
-      const panel = panelsWrap.createDiv({ cls: "zrr-settings-tab-panel" });
-      panel.id = panelId;
-      panel.setAttribute("role", "tabpanel");
-      panel.setAttribute("aria-labelledby", buttonId);
-      panel.hidden = true;
-
-      tab.render(panel);
-
-      tabButtons.set(tab.id, tabButton);
-      tabPanels.set(tab.id, panel);
-    }
-
-    const initialTab = tabs.some((tab) => tab.id === this.activeTab)
-      ? this.activeTab
-      : tabs[0].id;
-    setActiveTab(initialTab);
+    return pages.map(({ name, desc, build }) => {
+      const page = new SearchableSettingsPageBuilder();
+      build(page);
+      return page.page(name, desc);
+    });
   }
 
   private getCompanionXpiPath(): string | null {

@@ -4,7 +4,8 @@ This page lists common issues and how to resolve them.
 
 ## Common errors and fixes
 - **“No such index idx:zotero”**
-  - Start Redis Stack and run **Reindex Redis from cached chunks**.
+  - Current versions create a missing index automatically on the next document import or cache reindex.
+  - If the error persists, start Redis and run **Reindex Redis from cached chunks**.
 
 - **“Chunks cache missing for <doc_id>”**
   - Run **Reindex current note from cache** while the affected note is open.
@@ -48,6 +49,14 @@ For scanned PDFs:
 
 - Worker runtime: Tesseract + Poppler are already in the worker image.
 - Local runtime (legacy/advanced mode): installing Tesseract + Poppler on the host improves OCR accuracy.
+
+### Paddle API queue-full or native-crash errors
+
+PaddleOCR-VL API `errorCode` 10010 / HTTP 503 means the provider's task queue is full. The plugin retries twice with short backoff, then preserves the provider error so the import can be retried later.
+
+Explicit Paddle API engines do not fall back to local Paddle. This avoids turning a temporary API outage into a native worker crash. If a local OCR engine exits with `SIGSEGV`, the Obsidian error names the signal and the import log retains native stdout diagnostics instead of showing only `Error Message Summary:`.
+
+For a PDF with a usable text layer, set **OCR decision** to Auto and disable **Per-page override** so OCR is skipped when it is unnecessary. For scans during an API outage, retry later or temporarily choose Tesseract.
 
 ## Redis Stack start failures
 
