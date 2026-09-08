@@ -1,4 +1,13 @@
 # Changelog
+## 1.0.11
+- Make annotation fetching failure-safe:
+  - treat a successful empty Zotero Local API response as authoritative instead of issuing a false-failing Web API request,
+  - use Web API annotation fallback only after both local request forms fail,
+  - preserve the last good annotation snapshot and cached chunks when neither API completes successfully.
+- Update the Zotero Research Assistant Companion add-on to `0.1.6`:
+  - extend compatibility through Zotero `10.0.*`,
+  - rebuild the bundled `zrr-companion.xpi` and refresh its update-manifest hash.
+
 ## 1.0.10
 - Adopt Obsidian's declarative settings API:
   - expose the settings as six native sub-pages with searchable control names and descriptions,

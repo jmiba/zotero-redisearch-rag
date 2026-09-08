@@ -119,6 +119,10 @@ import {
   formatProcessExitDiagnostic,
   summarizePythonDiagnostic,
 } from "./pythonDiagnostics";
+import {
+  fetchAnnotationChildrenPreferLocal,
+  getAnnotationFetchPersistencePolicy,
+} from "./zoteroAnnotationFetch";
 
 const ISO_639_1_TO_3: Record<string, string> = {
   en: "eng",
@@ -7000,12 +7004,15 @@ export default class ZoteroRagPlugin extends Plugin {
         }
       }
 
-      await this.updateAnnotationSnapshot(docId, attachmentKey, zoteroAnnotations);
+      const persistencePolicy = getAnnotationFetchPersistencePolicy(resolved.hadFetchError);
+      if (persistencePolicy.replaceSnapshot) {
+        await this.updateAnnotationSnapshot(docId, attachmentKey, zoteroAnnotations);
+      }
       await this.updateAnnotationChunks(
         docId,
         attachmentKey,
         zoteroAnnotations,
-        { allowDeletes: !resolved.hadFetchError }
+        { allowDeletes: persistencePolicy.allowChunkDeletes }
       );
     } catch (error) {
       console.warn("Failed to sync note annotations with Zotero", error);
@@ -7366,9 +7373,6 @@ export default class ZoteroRagPlugin extends Plugin {
     if (!attachmentKey) {
       return { annotations: [], hadFetchError: false };
     }
-    const canUseWebApi = this.canUseWebApi() || (await this.ensureWebApiLibraryId());
-    let hadFetchError = false;
-    let webRequestSucceeded = false;
     const parseAnnotations = (children: unknown[]): AnnotationEntry[] => {
       const annotations: AnnotationEntry[] = [];
       for (const child of children) {
@@ -7384,43 +7388,28 @@ export default class ZoteroRagPlugin extends Plugin {
       }
       return annotations;
     };
-    let children: unknown[] = [];
-    try {
-      children = await this.fetchZoteroChildrenLocal(attachmentKey, { includeAnnotationImage: true });
-    } catch {
-      try {
-        children = await this.fetchZoteroChildrenLocal(attachmentKey);
-      } catch (fallbackError) {
-        hadFetchError = true;
-        console.warn("Failed to fetch Zotero annotation items from local API", fallbackError);
-      }
-    }
-    let annotations = parseAnnotations(children);
-    if (!annotations.length && canUseWebApi) {
-      try {
-        let webChildren: unknown[] = [];
-        try {
-          webChildren = await this.fetchZoteroChildrenWeb(attachmentKey, { includeAnnotationImage: true });
-        } catch {
-          webChildren = await this.fetchZoteroChildrenWeb(attachmentKey);
+    const result = await fetchAnnotationChildrenPreferLocal(
+      (options) => this.fetchZoteroChildrenLocal(attachmentKey, options),
+      async () => {
+        if (!this.canUseWebApi()) {
+          const resolved = await this.ensureWebApiLibraryId();
+          if (!resolved || !this.canUseWebApi()) {
+            return null;
+          }
         }
-        webRequestSucceeded = true;
-        const webAnnotations = parseAnnotations(webChildren);
-        if (webAnnotations.length) {
-          annotations = webAnnotations;
-        }
-      } catch (error) {
-        hadFetchError = true;
-        this.logOptionalLookupFailure("Failed to fetch Zotero annotation items from Web API", error);
+        return (options) => this.fetchZoteroChildrenWeb(attachmentKey, options);
       }
+    );
+    if (result.localError) {
+      console.warn("Failed to fetch Zotero annotation items from local API", result.localError);
     }
-    if (!annotations.length && canUseWebApi && !webRequestSucceeded) {
-      hadFetchError = true;
+    if (result.webError) {
+      this.logOptionalLookupFailure("Failed to fetch Zotero annotation items from Web API", result.webError);
     }
-    if (!annotations.length && !canUseWebApi) {
-      hadFetchError = true;
-    }
-    return { annotations, hadFetchError };
+    return {
+      annotations: parseAnnotations(result.children),
+      hadFetchError: result.hadFetchError,
+    };
   }
 
   private async fetchZoteroAnnotationsForDoc(

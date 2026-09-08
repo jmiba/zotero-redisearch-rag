@@ -2,6 +2,7 @@
 
 This companion plugin exposes a local HTTP endpoint for cached Zotero annotation images.
 It is intended to be used by the Obsidian plugin in this repo.
+Version 0.1.6 supports Zotero 7 through Zotero 10.0.
 
 ## Install
 

@@ -36,5 +36,6 @@ The add-on accepts `Authorization: Bearer <token>` or `X-ZRR-Token: <token>`. Th
 
 The add-on is distributed as `zotero-companion/zrr-companion.xpi` with an update manifest in the repo.
 
-Publishing requires bumping the add-on manifest version, rebuilding the XPI from `zotero-companion/addon/`, updating the hash in `zotero-companion/updates.json`, and committing both generated artifacts.
+The manifest supports Zotero 7 through Zotero 10.0. The add-on avoids Zotero 10's changed collection-selection, search, item-tree, database, and built-in local-server APIs, so no version-specific runtime branch is required.
 
+Publishing requires bumping the add-on manifest version, rebuilding the XPI from `zotero-companion/addon/`, updating the hash in `zotero-companion/updates.json`, and committing both generated artifacts.

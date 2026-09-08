@@ -86,6 +86,22 @@ Namespace tests ensure the legacy path-derived value is stored once, remains sta
 
 Index-management tests require every supported missing-index response to reach `FT.CREATE` and require unrelated Redis errors to abort without creating an index.
 
+## Zotero Annotation Fetch Safety
+
+Annotation-fetch tests distinguish complete empty results from unavailable sources so synchronization cannot invent failures or discard its last trustworthy baseline.
+
+### Successful Empty Local Reads
+
+A successful Local API response with zero annotations must end the read without contacting the Web API or marking the result incomplete.
+
+### Web Fallback After Local Failure
+
+The Web API must be resolved only after both Local API forms fail, and a successful Web response must make the overall fetch complete.
+
+### Incomplete Fetch Persistence
+
+When neither API produces a complete response, annotation snapshots and cached annotation chunks must retain their last known contents.
+
 ## Searchable Settings Definitions
 
 Settings-builder tests ensure native pages, groups, names, and descriptions are discoverable without rendering controls or starting asynchronous settings work.
