@@ -88,11 +88,15 @@ Index-management tests require every supported missing-index response to reach `
 
 ## Zotero Annotation Fetch Safety
 
-Annotation-fetch tests distinguish complete empty results from unavailable sources so synchronization cannot invent failures or discard its last trustworthy baseline.
+Annotation-fetch tests keep the fetch contract aligned with what each Zotero source can actually return: the Local API is trusted only when its read contains annotations, and the Web API decides the outcome in every other case.
 
-### Successful Empty Local Reads
+### Local Reads Without Annotations
 
-A successful Local API response with zero annotations must end the read without contacting the Web API or marking the result incomplete.
+A successful Local API read without annotation children must not end the read; the Web API is then consulted, completes the fetch when it answers (even with zero annotations), and leaves it incomplete when it fails.
+
+### Local Reads With Annotations
+
+A Local API response that actually contains annotation children is authoritative for annotation sync, and the Web API must not be resolved or called in that case.
 
 ### Web Fallback After Local Failure
 

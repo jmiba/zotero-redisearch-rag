@@ -7,51 +7,96 @@ import {
   type AnnotationChildrenFetchOptions,
 } from "../src/zoteroAnnotationFetch.ts";
 
-// @lat: [[tests#Zotero Annotation Fetch Safety#Successful Empty Local Reads]]
-test("successful empty local annotation reads do not contact the Web API", async () => {
-  const directCalls: Array<AnnotationChildrenFetchOptions | undefined> = [];
-  let directWebResolutions = 0;
-  const directResult = await fetchAnnotationChildrenPreferLocal(
+// @lat: [[tests#Zotero Annotation Fetch Safety#Local Reads Without Annotations]]
+test("local reads without annotation children defer to the Web API", async () => {
+  // A successful local read can never contain annotation items, so it must
+  // be cross-checked against the Web API before the fetch is complete.
+  const localCalls: Array<AnnotationChildrenFetchOptions | undefined> = [];
+  const webCalls: Array<AnnotationChildrenFetchOptions | undefined> = [];
+  let webResolutions = 0;
+  const crossChecked = await fetchAnnotationChildrenPreferLocal(
     async (options) => {
-      directCalls.push(options);
+      localCalls.push(options);
       return [];
     },
     async () => {
-      directWebResolutions += 1;
-      return async () => {
-        throw new Error("Web API should not be called");
+      webResolutions += 1;
+      return async (options) => {
+        webCalls.push(options);
+        return [{ key: "ANNOT001", data: { itemType: "annotation" } }];
       };
     }
   );
+  assert.deepEqual(localCalls, [{ includeAnnotationImage: true }]);
+  assert.equal(webResolutions, 1);
+  assert.deepEqual(webCalls, [{ includeAnnotationImage: true }]);
+  assert.equal(crossChecked.hadFetchError, false);
+  assert.equal(crossChecked.source, "web");
+  assert.deepEqual(crossChecked.children, [
+    { key: "ANNOT001", data: { itemType: "annotation" } },
+  ]);
 
-  assert.deepEqual(directCalls, [{ includeAnnotationImage: true }]);
-  assert.equal(directWebResolutions, 0);
-  assert.deepEqual(directResult, {
-    children: [],
-    hadFetchError: false,
-    source: "local",
+  // A Web answer completes the fetch even when it lists no annotations.
+  const webCallsEmpty: Array<AnnotationChildrenFetchOptions | undefined> = [];
+  const emptyWeb = await fetchAnnotationChildrenPreferLocal(
+    async () => [],
+    async () =>
+      async (options) => {
+        webCallsEmpty.push(options);
+        return [];
+      }
+  );
+  assert.deepEqual(webCallsEmpty, [{ includeAnnotationImage: true }]);
+  assert.equal(emptyWeb.hadFetchError, false);
+  assert.equal(emptyWeb.source, "web");
+  assert.deepEqual(emptyWeb.children, []);
+  assert.deepEqual(getAnnotationFetchPersistencePolicy(emptyWeb.hadFetchError), {
+    replaceSnapshot: true,
+    allowChunkDeletes: true,
   });
 
-  const fallbackCalls: Array<AnnotationChildrenFetchOptions | undefined> = [];
-  let fallbackWebResolutions = 0;
-  const fallbackResult = await fetchAnnotationChildrenPreferLocal(
-    async (options) => {
-      fallbackCalls.push(options);
-      if (options?.includeAnnotationImage) {
-        throw new Error("annotationImage unsupported");
+  // A failing Web answer leaves the fetch incomplete and keeps the error.
+  const webError = new Error("Web API unavailable");
+  const failed = await fetchAnnotationChildrenPreferLocal(
+    async () => [],
+    async () =>
+      async () => {
+        throw webError;
       }
-      return [];
-    },
+  );
+  assert.equal(failed.hadFetchError, true);
+  assert.equal(failed.source, "none");
+  assert.equal(failed.localError, undefined);
+  assert.equal(failed.webError, webError);
+  assert.deepEqual(failed.children, []);
+});
+
+// @lat: [[tests#Zotero Annotation Fetch Safety#Local Reads With Annotations]]
+test("local reads containing annotation children are authoritative", async () => {
+  const localChildren = [
+    { key: "NOTE001", data: { itemType: "note" } },
+    { key: "ANNOT001", data: { itemType: "annotation" } },
+  ];
+  const result = await fetchAnnotationChildrenPreferLocal(
+    async () => localChildren,
     async () => {
-      fallbackWebResolutions += 1;
-      return async () => [];
+      throw new Error("Web API must not be resolved");
     }
   );
+  assert.equal(result.hadFetchError, false);
+  assert.equal(result.source, "local");
+  assert.deepEqual(result.children, localChildren);
 
-  assert.deepEqual(fallbackCalls, [{ includeAnnotationImage: true }, undefined]);
-  assert.equal(fallbackWebResolutions, 0);
-  assert.equal(fallbackResult.hadFetchError, false);
-  assert.equal(fallbackResult.source, "local");
+  // Annotation items without a nested data wrapper also make the read
+  // authoritative.
+  const flat = await fetchAnnotationChildrenPreferLocal(
+    async () => [{ itemType: "annotation" }],
+    async () => {
+      throw new Error("Web API must not be resolved");
+    }
+  );
+  assert.equal(flat.source, "local");
+  assert.deepEqual(flat.children, [{ itemType: "annotation" }]);
 });
 
 // @lat: [[tests#Zotero Annotation Fetch Safety#Web Fallback After Local Failure]]

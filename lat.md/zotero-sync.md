@@ -42,7 +42,7 @@ Annotation sync keeps Zotero annotation state and the note annotation block alig
 
 The note block is delimited by `zrr:annotations-start` and `zrr:annotations-end`. The plugin fetches annotation items for the resolved attachment, groups them by configured color headings, renders callouts, compares against snapshots, and writes note edits back to Zotero when the note changed alone.
 
-A successful Local API read is authoritative even when it returns no annotations. The Web API is consulted only after both local request forms fail. Incomplete fetches preserve the last good snapshot and disable annotation-chunk deletion.
+The Local API's children endpoint cannot return annotation items, so a local read is authoritative only when it actually contains annotation children through [[src/zoteroAnnotationFetch.ts#containsAnnotationChild]]; every other outcome defers to the Web API, the annotation source of record. A Web answer completes the fetch even when empty, and incomplete fetches preserve the last good snapshot and disable annotation-chunk deletion.
 
 Annotation tag sync is separate from metadata tag sync. Annotation blocks parse explicit `Tags:` lines inside the annotation block rather than arbitrary inline hashtags elsewhere in the note body.
 
