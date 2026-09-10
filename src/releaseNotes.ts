@@ -7,6 +7,10 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    "version": "1.0.12",
+    "markdown": "- Restore Zotero annotation sync for Zotero 7, 9, and 10:\n  - treat a successful Local API read as authoritative only when it actually contains annotation children, because the local children endpoint never returns annotation items,\n  - cross-check successful local reads without annotations against the Web API, the only source that exposes annotation children,\n  - keep fetches failure-safe: a Web answer completes the fetch even when empty, and incomplete fetches preserve the last good snapshot and cached annotation chunks."
+  },
+  {
     "version": "1.0.11",
     "markdown": "- Make annotation fetching failure-safe:\n  - treat a successful empty Zotero Local API response as authoritative instead of issuing a false-failing Web API request,\n  - use Web API annotation fallback only after both local request forms fail,\n  - preserve the last good annotation snapshot and cached chunks when neither API completes successfully.\n- Update the Zotero Research Assistant Companion add-on to `0.1.6`:\n  - extend compatibility through Zotero `10.0.*`,\n  - rebuild the bundled `zrr-companion.xpi` and refresh its update-manifest hash."
   },

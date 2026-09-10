@@ -1,5 +1,5 @@
 # Changelog
-## Unreleased
+## 1.0.12
 - Restore Zotero annotation sync for Zotero 7, 9, and 10:
   - treat a successful Local API read as authoritative only when it actually contains annotation children, because the local children endpoint never returns annotation items,
   - cross-check successful local reads without annotations against the Web API, the only source that exposes annotation children,
