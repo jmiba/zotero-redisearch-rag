@@ -96,6 +96,8 @@ GitHub-hosted release and documentation workflows use Node 24-compatible action 
 
 Local release packaging treats the top `CHANGELOG.md` entry as the release-note source, requires its version to match `manifest.json`, regenerates the full in-app history, and only then builds `main.js`. This keeps tagged source and packaged assets reproducible.
 
+Patch releases keep `manifest.json`, `package.json`, the root package-lock entries, and `versions.json` synchronized. The compatibility map retains the existing minimum Obsidian version unless the release actually changes its requirements.
+
 ## User-Facing Surfaces
 
 Users interact through commands, settings, generated notes, chunk controls, the PDF sidebar, and the chat panel.

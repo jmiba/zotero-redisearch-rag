@@ -1,6 +1,7 @@
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
@@ -297,6 +298,96 @@ class DoclingProcessingTests(unittest.TestCase):
         quality = self.docling.TextQuality(10, 0.2, 0.5, 0.1)
         low_quality = self.docling.is_low_quality(quality, config)
         self.assertTrue(self.docling.should_rasterize_text_layer(True, low_quality, config))
+
+    def write_text_layer_pdf(self, path, *, scanned=False):
+        from pypdf import PdfWriter
+        from pypdf.generic import (
+            DecodedStreamObject, DictionaryObject, NameObject, NumberObject,
+        )
+
+        writer = PdfWriter()
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Courier"),
+        })
+        image = DecodedStreamObject()
+        image.set_data(b"\xff\xff\xff")
+        image.update({
+            NameObject("/Type"): NameObject("/XObject"),
+            NameObject("/Subtype"): NameObject("/Image"),
+            NameObject("/Width"): NumberObject(1),
+            NameObject("/Height"): NumberObject(1),
+            NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+            NameObject("/BitsPerComponent"): NumberObject(8),
+        })
+        for _ in range(6):
+            page = writer.add_blank_page(width=600, height=800)
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+                NameObject("/XObject"): DictionaryObject({NameObject("/Logo"): image}),
+            })
+            matrix = "600 0 0 800 0 0" if scanned else "20 0 0 20 20 20"
+            mode = 3 if scanned else 0
+            content = DecodedStreamObject()
+            text = "(This document has useful embedded text for extraction.) Tj\n" * 6
+            content.set_data(
+                (f"q {matrix} cm /Logo Do Q\nBT /F1 10 Tf {mode} Tr 40 700 Td\n"
+                 + text + "ET\n").encode("ascii")
+            )
+            page[NameObject("/Contents")] = content
+        writer.write(path)
+
+    # @lat: [[tests#Docling Processing Tests#Image Presence And OCR Classification]]
+    def test_footer_images_preserve_native_text_and_ocr_overlays_still_use_ocr(self):
+        from pypdf import PdfReader
+
+        config = self.docling.DoclingProcessingConfig(
+            force_ocr_on_low_quality_text=True, force_per_page_ocr=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for scanned in (False, True):
+                with self.subTest(scanned=scanned):
+                    pdf = pathlib.Path(directory) / "test.pdf"
+                    self.write_text_layer_pdf(pdf, scanned=scanned)
+                    reader = PdfReader(pdf)
+                    metrics = self.docling._analyze_pdf_page_content(reader.pages[0], reader)
+                    self.assertEqual(metrics["text_ops"], 6)
+                    self.assertEqual(metrics["image_count"], 1)
+                    self.assertAlmostEqual(metrics["image_coverage"], 1 if scanned else 400 / 480000)
+                    self.assertEqual(metrics["invisible_text_ratio"], int(scanned))
+                    quality = self.docling.TextQuality(
+                        3000, 0.85, 0.01, 0.7 if scanned else 0.79, image_page_ratio=1.0,
+                        dictionary_hit_ratio=0.95,
+                    )
+                    quality, classifier = self.docling.apply_text_layer_classifier(quality, str(pdf), config)
+                    self.assertEqual(classifier["decision"], "ocr" if scanned else "digital")
+                    self.assertEqual(self.docling.is_low_quality(quality, config), scanned)
+                    decision = self.docling.decide_ocr_route(True, quality, ["paddle"], config, "eng")
+                    self.assertEqual(decision.ocr_used, scanned)
+                    self.assertEqual(self.docling.is_born_digital_text_layer(True, quality, decision.ocr_used, config), not scanned)
+                    with patch.object(self.docling, "estimate_text_quality", return_value=quality):
+                        report = self.docling.build_quality_report(str(pdf), config)
+                    self.assertEqual(report["text_layer_overlay"], scanned)
+
+    # @lat: [[tests#Docling Processing Tests#Rasterized Page Dimensions]]
+    def test_rasterized_pdf_preserves_physical_page_dimensions(self):
+        from PIL import Image
+        from pypdf import PdfReader
+
+        for dpi in (150, 300):
+            with self.subTest(dpi=dpi):
+                images = [Image.new("RGB", (600, 900)), Image.new("RGB", (900, 600))]
+                with patch.object(self.docling, "render_pdf_pages", return_value=images):
+                    output = pathlib.Path(self.docling.rasterize_pdf_to_temp("source.pdf", dpi))
+                try:
+                    pages = PdfReader(output).pages
+                    self.assertEqual(len(pages), 2)
+                    for page, (width, height) in zip(pages, [(600, 900), (900, 600)]):
+                        self.assertAlmostEqual(float(page.mediabox.width), width * 72 / dpi)
+                        self.assertAlmostEqual(float(page.mediabox.height), height * 72 / dpi)
+                finally:
+                    output.unlink()
 
     def test_decide_per_page_ocr(self):
         config = self.docling.DoclingProcessingConfig()

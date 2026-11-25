@@ -36,6 +36,10 @@ When an external OCR route is selected, Docling conversion is configured with ex
 
 Text-layer PDFs are not forced through external Paddle layout OCR unless OCR is forced or low-quality text re-OCR is explicitly enabled. This keeps usable embedded text from hitting native Paddle paths unnecessarily.
 
+Text-layer classification measures painted image area and invisible text operators through pypdf content streams. Image presence alone, such as a footer logo on every page, is diagnostic and cannot force an OCR classification or suppress digital-text confidence. Genuine full-page scans and invisible OCR overlays remain OCR signals.
+
+Rasterized OCR input is saved with the rendering DPI so its physical page dimensions remain unchanged apart from pixel rounding. Raster images are closed after saving; failed PDF writes remove their temporary output. This avoids oversized Docling renderings caused by interpreting 300-DPI pixels as 72-DPI PDF points.
+
 Local Paddle OCR keeps document-orientation and text-line orientation classification disabled by default because the native Paddle classifiers can crash the worker on some PDFs and platforms.
 
 If a configured external OCR engine is unavailable, extraction fails with an explicit worker/OCR diagnostic instead of falling back to Docling RapidOCR. This keeps missing Tesseract or Paddle installs from surfacing as obscure RapidOCR model path errors.

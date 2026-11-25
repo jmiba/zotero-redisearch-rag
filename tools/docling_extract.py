@@ -1171,7 +1171,7 @@ def _scan_content_stream(
     visited: Set[Any],
 ) -> None:
     try:
-        from pypdf import ContentStream
+        from pypdf.generic import ContentStream
     except Exception:
         return
     try:
@@ -1270,7 +1270,7 @@ def _analyze_pdf_page_content(page: Any, reader: Any) -> Dict[str, Any]:
     page_area = page_width * page_height if page_width > 0 and page_height > 0 else 0.0
     try:
         contents = page.get_contents()
-        if not contents:
+        if contents is None:
             return metrics
     except Exception:
         return metrics
@@ -1429,11 +1429,6 @@ def compute_effective_confidence(
     if quality.digital_page_ratio is not None:
         digital_ratio = float(quality.digital_page_ratio)
         digital_weight = 0.7
-        if quality.image_page_ratio is not None:
-            threshold = max(0.0, min(1.0, float(config.quality_image_page_ratio_threshold)))
-            if threshold < 1.0 and quality.image_page_ratio >= threshold:
-                guard = 1.0 - (float(quality.image_page_ratio) - threshold) / max(1e-6, 1.0 - threshold)
-                digital_weight *= max(0.0, min(1.0, guard))
         boosted = (score * (1.0 - digital_weight)) + (digital_ratio * digital_weight)
         score = max(score, boosted)
     return max(0.0, min(1.0, score))
@@ -1451,16 +1446,10 @@ def apply_text_layer_classifier(
     ocr_ratio = classifier.get("ocr_ratio")
     digital_ratio = classifier.get("digital_ratio")
     decision = classifier.get("decision")
-    guardrail_applied = False
     ocr_ratio_value = float(ocr_ratio) if ocr_ratio is not None else 0.0
     digital_ratio_value = float(digital_ratio) if digital_ratio is not None else 0.0
-    if quality.image_page_ratio is not None:
-        threshold = max(0.0, min(1.0, float(config.quality_image_page_ratio_threshold)))
-        if threshold < 1.0 and quality.image_page_ratio >= threshold:
-            guard = 1.0 - (float(quality.image_page_ratio) - threshold) / max(1e-6, 1.0 - threshold)
-            digital_ratio_value *= max(0.0, min(1.0, guard))
-            ocr_ratio_value = max(ocr_ratio_value, float(quality.image_page_ratio))
-            guardrail_applied = True
+    # Image presence (for example a footer logo) is diagnostic only. The
+    # classifier measures actual image coverage and invisible text instead.
     if decision == "digital" and digital_ratio_value < config.quality_classifier_decision_ratio:
         decision = "mixed"
     if decision in (None, "mixed") and ocr_ratio_value >= config.quality_classifier_decision_ratio:
@@ -1469,12 +1458,6 @@ def apply_text_layer_classifier(
     quality.ocr_overlay_ratio = ocr_ratio_value
     quality.digital_page_ratio = digital_ratio_value
     quality.layer_classification = decision
-    if guardrail_applied:
-        classifier["ocr_ratio"] = ocr_ratio_value
-        classifier["digital_ratio"] = digital_ratio_value
-        classifier["decision"] = decision
-        classifier["guardrail_applied"] = True
-        classifier["short_circuit"] = False
     quality.effective_confidence_proxy = compute_effective_confidence(quality, config)
     return quality, classifier
 
@@ -1605,14 +1588,12 @@ def is_born_digital_text_layer(
         float(quality.spellchecker_hit_ratio or 0.0),
     )
     digital_ratio = float(quality.digital_page_ratio or 0.0)
-    image_page_ratio = float(quality.image_page_ratio or 0.0)
     strong_text_layer = bool(
         effective_confidence >= max(float(config.quality_confidence_threshold), 0.75)
         and quality.alpha_ratio >= float(config.quality_alpha_ratio_threshold)
         and quality.suspicious_token_ratio <= float(config.quality_suspicious_token_threshold)
         and quality.avg_chars_per_page >= max(float(config.quality_min_avg_chars_per_page), 500.0)
         and lexicon_ratio >= 0.75
-        and image_page_ratio < float(config.quality_image_page_ratio_threshold)
     )
     classifier_digital = (
         (quality.layer_classification or "").lower() == "digital"
@@ -3828,9 +3809,20 @@ def rasterize_pdf_to_temp(pdf_path: str, dpi: int) -> str:
 
     temp_file = NamedTemporaryFile(delete=False, suffix=".pdf")
     temp_file.close()
-    first = images[0]
-    rest = images[1:]
-    first.save(temp_file.name, format="PDF", save_all=True, append_images=rest)
+    try:
+        images[0].save(
+            temp_file.name,
+            format="PDF",
+            save_all=True,
+            append_images=images[1:],
+            resolution=float(dpi),
+        )
+    except Exception:
+        os.unlink(temp_file.name)
+        raise
+    finally:
+        for image in images:
+            image.close()
     return temp_file.name
 
 
@@ -4304,16 +4296,8 @@ def build_quality_report(pdf_path: str, config: DoclingProcessingConfig) -> Dict
     born_digital_text_layer = is_born_digital_text_layer(has_text_layer, quality, False, config)
     text_layer_overlay = bool(
         has_text_layer
-        and (
-            (
-                quality.ocr_overlay_ratio is not None
-                and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
-            )
-            or (
-                quality.image_page_ratio is not None
-                and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
-            )
-        )
+        and quality.ocr_overlay_ratio is not None
+        and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
     )
     if quality.image_page_ratio is not None:
         LOGGER.info(
@@ -4373,16 +4357,8 @@ def convert_pdf_with_docling(
     low_quality = is_low_quality(quality, config)
     text_layer_overlay = bool(
         has_text_layer
-        and (
-            (
-                quality.ocr_overlay_ratio is not None
-                and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
-            )
-            or (
-                quality.image_page_ratio is not None
-                and quality.image_page_ratio >= config.quality_image_page_ratio_threshold
-            )
-        )
+        and quality.ocr_overlay_ratio is not None
+        and quality.ocr_overlay_ratio >= config.quality_classifier_decision_ratio
     )
     available_engines = detect_available_ocr_engines(config)
     decision = decide_ocr_route(has_text_layer, quality, available_engines, config, languages)

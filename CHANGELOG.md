@@ -1,4 +1,12 @@
 # Changelog
+## 1.0.13
+- Fix unnecessary OCR and worker memory failures when importing PDFs with usable embedded text:
+  - classify text layers using actual image coverage and invisible text instead of image presence, so repeated footer logos do not force OCR,
+  - restore pypdf content-stream analysis and retain OCR detection for scanned pages and invisible text overlays,
+  - preserve physical page dimensions when saving rasterized OCR input at the selected DPI, preventing oversized Docling renderings,
+  - close raster images after saving and remove temporary output when PDF creation fails.
+- Add regression tests for footer-image classification, scanned text layers, and multipage rasterization at different resolutions.
+
 ## 1.0.12
 - Restore Zotero annotation sync for Zotero 7, 9, and 10:
   - treat a successful Local API read as authoritative only when it actually contains annotation children, because the local children endpoint never returns annotation items,

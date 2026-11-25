@@ -7,6 +7,10 @@ export type ReleaseNotesEntry = {
 
 export const RELEASE_NOTES_LOG: ReleaseNotesEntry[] = [
   {
+    "version": "1.0.13",
+    "markdown": "- Fix unnecessary OCR and worker memory failures when importing PDFs with usable embedded text:\n  - classify text layers using actual image coverage and invisible text instead of image presence, so repeated footer logos do not force OCR,\n  - restore pypdf content-stream analysis and retain OCR detection for scanned pages and invisible text overlays,\n  - preserve physical page dimensions when saving rasterized OCR input at the selected DPI, preventing oversized Docling renderings,\n  - close raster images after saving and remove temporary output when PDF creation fails.\n- Add regression tests for footer-image classification, scanned text layers, and multipage rasterization at different resolutions."
+  },
+  {
     "version": "1.0.12",
     "markdown": "- Restore Zotero annotation sync for Zotero 7, 9, and 10:\n  - treat a successful Local API read as authoritative only when it actually contains annotation children, because the local children endpoint never returns annotation items,\n  - cross-check successful local reads without annotations against the Web API, the only source that exposes annotation children,\n  - keep fetches failure-safe: a Web answer completes the fetch even when empty, and incomplete fetches preserve the last good snapshot and cached annotation chunks."
   },

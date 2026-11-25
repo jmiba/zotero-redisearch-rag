@@ -22,6 +22,18 @@ OCR routing must choose OCR only when the configured mode and quality signals ju
 
 Tests cover low-quality forced OCR, text-layer preservation including low-quality text layers that are not explicitly re-OCRed, per-page OCR decisions, rasterization triggers, engine language selection, the default Paddle-first route, explicit Paddle routing, missing external OCR diagnostics, Docling converter ONNX OCR options and low-memory runtime limits for external routes, filtering unstable Paddle orientation overrides, and zero-character OCR page detection.
 
+### Image Presence And OCR Classification
+
+Real PDF content streams with footer logos must retain native text routing, while full-page images with invisible text must remain detectable as OCR overlays.
+
+Tests exercise pypdf content parsing, image coverage, visible and invisible text operators, effective quality, OCR routing, born-digital detection, and quality-report overlay diagnostics.
+
+### Rasterized Page Dimensions
+
+Rasterization must preserve physical PDF page sizes at different rendering resolutions so Docling does not allocate oversized page images.
+
+Tests save and reopen multipage raster PDFs at 150 and 300 DPI, including different page dimensions, and verify their media boxes in points.
+
 ### PaddleOCR-VL Version Selection
 
 The local PaddleOCR-VL route must explicitly select pipeline `v1.6` so dependency defaults cannot silently change OCR behavior.
